@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
-import { registerChatParticipant } from "./chat/participant";
-import { cancelExecutionGraph, dispatchFeature } from "./dispatch/client";
+import { cancelExecutionGraph } from "./dispatch/client";
+import { ChatllmPanelController } from "./panel/panel";
 import { scaffoldFeature, regenerateTasksIndex, updateTaskStatus, writeTextFile } from "./spec/writer";
 import { SpecStore } from "./spec/store";
 import { createThemeBridge } from "./theme-bridge";
@@ -9,11 +9,13 @@ import { SpecsTreeProvider } from "./views/specsTree";
 import { TasksTreeProvider } from "./views/tasksTree";
 
 let store: SpecStore;
+let panel: ChatllmPanelController;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const output = vscode.window.createOutputChannel("Chatllm");
   store = new SpecStore(output);
   await store.initialize(context);
+
   const specsTree = new SpecsTreeProvider(store);
   const tasksTree = new TasksTreeProvider(store);
   const runsTree = new RunsTreeProvider(async (featureId, taskId, status) => {
@@ -24,13 +26,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
   });
 
+  panel = new ChatllmPanelController(context, store, output);
+
   context.subscriptions.push(
     output,
     store,
+    panel,
+    vscode.window.registerWebviewViewProvider(ChatllmPanelController.viewType, panel, {
+      webviewOptions: { retainContextWhenHidden: true },
+    }),
     vscode.window.registerTreeDataProvider("chatllm.specs", specsTree),
     vscode.window.registerTreeDataProvider("chatllm.tasks", tasksTree),
     vscode.window.registerTreeDataProvider("chatllm.runs", runsTree),
-    registerChatParticipant(context, store, runsTree),
     createThemeBridge(output),
     statusBar(),
     ...commands(context, specsTree, tasksTree, runsTree),
@@ -44,7 +51,9 @@ function commands(
   runsTree: RunsTreeProvider,
 ): vscode.Disposable[] {
   return [
-    vscode.commands.registerCommand("chatllm.openChat", () => vscode.commands.executeCommand("workbench.action.chat.open")),
+    vscode.commands.registerCommand("chatllm.openChat", () => panel.showAsPanel("chat")),
+    vscode.commands.registerCommand("chatllm.openSettings", () => panel.showAsPanel("settings")),
+    vscode.commands.registerCommand("chatllm.openPipeline", () => panel.showAsPanel("pipeline")),
     vscode.commands.registerCommand("chatllm.refreshSpecs", async () => { await store.refresh(); specsTree.refresh(); }),
     vscode.commands.registerCommand("chatllm.refreshTasks", async () => { await store.refresh(); tasksTree.refresh(); }),
     vscode.commands.registerCommand("chatllm.refreshRuns", () => runsTree.refresh()),
@@ -53,8 +62,9 @@ function commands(
       const name = await vscode.window.showInputBox({ prompt: "Feature name" });
       if (!folder || !name) return;
       const root = await scaffoldFeature(folder, name);
-      store.setActiveFeature(root.path.split("/").pop() ?? name);
-      await context.workspaceState.update("chatllm.activeFeatureId", root.path.split("/").pop() ?? name);
+      const id = root.path.split("/").pop() ?? name;
+      store.setActiveFeature(id);
+      await context.workspaceState.update("chatllm.activeFeatureId", id);
       await store.refresh();
       specsTree.refresh();
     }),
@@ -70,8 +80,7 @@ function commands(
     vscode.commands.registerCommand("chatllm.runTask", async (arg?: { featureId: string; task: { id: string } }) => {
       const feature = arg && store.getFeature(arg.featureId);
       if (!feature || !arg) return;
-      const result = await dispatchFeature(feature, { taskIds: [arg.task.id] });
-      runsTree.trackRun(result.graphId, feature.id, `${feature.name} / ${arg.task.id}`, [arg.task.id]);
+      await panel.dispatch(feature.id, [arg.task.id]);
     }),
     vscode.commands.registerCommand("chatllm.markTaskReady", async (arg?: { featureId: string; task: { id: string } }) => {
       const task = arg && store.getTask(arg.featureId, arg.task.id);
@@ -81,8 +90,7 @@ function commands(
     vscode.commands.registerCommand("chatllm.dispatchFeature", async () => {
       const feature = store.getActiveFeature();
       if (!feature) return;
-      const result = await dispatchFeature(feature);
-      runsTree.trackRun(result.graphId, feature.id, feature.name, feature.tasks.map((task) => task.id));
+      await panel.dispatch(feature.id);
     }),
     vscode.commands.registerCommand("chatllm.regenerateTasksIndex", async () => {
       const feature = store.getActiveFeature();
@@ -98,6 +106,7 @@ function commands(
 function statusBar(): vscode.StatusBarItem {
   const item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   item.text = "$(comment-discussion) Chatllm";
+  item.tooltip = "Open Chatllm panel";
   item.command = "chatllm.openChat";
   item.show();
   return item;

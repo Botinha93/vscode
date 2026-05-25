@@ -34,10 +34,7 @@ __export(extension_exports, {
   deactivate: () => deactivate
 });
 module.exports = __toCommonJS(extension_exports);
-var vscode8 = __toESM(require("vscode"));
-
-// src/chat/participant.ts
-var vscode2 = __toESM(require("vscode"));
+var vscode9 = __toESM(require("vscode"));
 
 // src/api.ts
 function getApiOrigin() {
@@ -59,11 +56,6 @@ async function apiFetch(path, init) {
     ...init,
     headers: { ...authHeaders(), ...init?.headers }
   });
-}
-async function fetchConfig() {
-  const response = await apiFetch("/api/config");
-  if (!response.ok) throw new Error(`Failed to load config (${response.status})`);
-  return response.json();
 }
 
 // src/spec/dag.ts
@@ -93,9 +85,9 @@ function validateDag(tasks) {
   return order.length === tasks.length ? { ok: true, order } : { ok: false, order: [], error: "Task dependencies contain a cycle" };
 }
 function computeTaskReadiness(tasks) {
-  const status2 = new Map(tasks.map((task) => [task.id, task.status]));
+  const status = new Map(tasks.map((task) => [task.id, task.status]));
   return new Map(tasks.map((task) => {
-    const blockedBy = task.dependsOn.filter((dep) => status2.get(dep) !== "completed");
+    const blockedBy = task.dependsOn.filter((dep) => status.get(dep) !== "completed");
     return [task.id, { ready: blockedBy.length === 0 && task.status !== "completed", blockedBy }];
   }));
 }
@@ -194,6 +186,108 @@ async function cancelExecutionGraph(graphId) {
   await apiFetch(`/api/execution-graphs/${graphId}/cancel`, { method: "POST" });
 }
 
+// src/panel/panel.ts
+var vscode3 = __toESM(require("vscode"));
+
+// src/chat/commands.ts
+var SPEC_SYSTEM_PROMPTS = {
+  spec: "Draft EARS-style feature requirements in markdown using ## R-N section ids.",
+  design: "Draft design.md from requirements. Use ## D-N section ids and reference R-* ids.",
+  tasks: `Generate task contracts. Each task must be in a fenced \`\`\`task block with YAML frontmatter containing id, title, status, requirement_refs, design_refs, depends_on, expected_files, architecture_hints, acceptance, and agent.`
+};
+function extractTaskBlocks(content) {
+  const blocks = [];
+  const re = /```task\s*([\s\S]*?)```/gi;
+  let match;
+  while ((match = re.exec(content)) !== null) blocks.push(match[1].trim());
+  return blocks;
+}
+
+// src/chat/stream-client.ts
+async function streamChat(body, handlers, signal) {
+  const response = await apiFetch("/api/chat/stream", {
+    method: "POST",
+    body: JSON.stringify(body),
+    signal
+  });
+  if (!response.ok || !response.body) {
+    const err = await response.json().catch(() => ({ error: response.statusText }));
+    throw new Error(err.error ?? response.statusText);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finalResponse;
+  const consume = (rawEvent) => {
+    const event = rawEvent.match(/^event: (.+)$/m)?.[1];
+    const dataLine = rawEvent.match(/^data: (.+)$/m)?.[1];
+    if (!event || !dataLine) return;
+    const data = JSON.parse(dataLine);
+    if (event === "token") handlers.onToken?.(data.token);
+    if (event === "tool") handlers.onToolEvent?.(data);
+    if (event === "error") throw new Error(data.error);
+    if (event === "done") finalResponse = data;
+  };
+  while (true) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value, { stream: !done });
+    const parts = buffer.split("\n\n");
+    buffer = parts.pop() ?? "";
+    for (const part of parts) consume(part);
+    if (done) break;
+  }
+  if (buffer.trim()) consume(buffer);
+  if (!finalResponse) throw new Error("Stream ended before the chat response completed.");
+  return finalResponse;
+}
+
+// src/settings.ts
+var vscode = __toESM(require("vscode"));
+var SECTION = "chatllm";
+function readSettings() {
+  const cfg = vscode.workspace.getConfiguration(SECTION);
+  return {
+    provider: cfg.get("provider") ?? "openai",
+    model: cfg.get("model") ?? "gpt-4o-mini",
+    modelSelection: cfg.get("modelSelection") ?? "manual",
+    chatMode: cfg.get("chatMode") ?? "normal",
+    useRag: cfg.get("useRag") ?? false,
+    toolsEnabled: cfg.get("toolsEnabled") ?? true,
+    maxAgentSpawns: cfg.get("maxAgentSpawns") ?? 3,
+    agentIds: cfg.get("agentIds") ?? [],
+    mcpServerIds: cfg.get("mcpServerIds") ?? [],
+    skillIds: cfg.get("skillIds") ?? [],
+    documentIds: cfg.get("documentIds") ?? [],
+    systemPrompt: cfg.get("systemPrompt") ?? ""
+  };
+}
+async function writeSetting(key, value) {
+  await vscode.workspace.getConfiguration(SECTION).update(key, value, vscode.ConfigurationTarget.Global);
+}
+function onSettingsChange(listener) {
+  return vscode.workspace.onDidChangeConfiguration((event) => {
+    if (event.affectsConfiguration(SECTION)) listener(readSettings());
+  });
+}
+function settingsToChatRequest(settings, content, conversationId) {
+  return {
+    conversationId,
+    provider: settings.provider,
+    model: settings.model,
+    modelSelection: settings.modelSelection,
+    chatMode: settings.chatMode,
+    content,
+    systemPrompt: settings.systemPrompt || void 0,
+    skillIds: settings.skillIds,
+    documentIds: settings.documentIds,
+    useRag: settings.useRag,
+    toolsEnabled: settings.toolsEnabled,
+    mcpServerIds: settings.mcpServerIds,
+    agentIds: settings.agentIds,
+    maxAgentSpawns: settings.maxAgentSpawns
+  };
+}
+
 // src/spec/schema.ts
 var TASK_STATUSES = /* @__PURE__ */ new Set(["pending", "ready", "running", "completed", "blocked", "failed"]);
 var FEATURE_STATUSES = /* @__PURE__ */ new Set(["draft", "design", "tasks", "dispatching", "done"]);
@@ -252,8 +346,8 @@ function parseTaskContract(featureId, filePath, raw) {
   };
 }
 function parseFeatureStatus(raw) {
-  const status2 = raw.match(/status:\s*(\w+)/i)?.[1] ?? "draft";
-  return FEATURE_STATUSES.has(status2) ? status2 : "draft";
+  const status = raw.match(/status:\s*(\w+)/i)?.[1] ?? "draft";
+  return FEATURE_STATUSES.has(status) ? status : "draft";
 }
 function extractSectionIds(markdown, prefix) {
   const ids = [];
@@ -264,17 +358,17 @@ function extractSectionIds(markdown, prefix) {
 }
 
 // src/spec/writer.ts
-var vscode = __toESM(require("vscode"));
+var vscode2 = __toESM(require("vscode"));
 async function readTextFile(uri) {
-  return Buffer.from(await vscode.workspace.fs.readFile(uri)).toString("utf8");
+  return Buffer.from(await vscode2.workspace.fs.readFile(uri)).toString("utf8");
 }
 async function writeTextFile(uri, content) {
-  await vscode.workspace.fs.writeFile(uri, Buffer.from(content, "utf8"));
+  await vscode2.workspace.fs.writeFile(uri, Buffer.from(content, "utf8"));
 }
-async function updateTaskStatus(uri, status2) {
+async function updateTaskStatus(uri, status) {
   const raw = await readTextFile(uri);
   const { data, body } = parseFrontmatter(raw);
-  data.status = status2;
+  data.status = status;
   const frontmatter = Object.entries(data).map(
     ([key, value]) => Array.isArray(value) ? `${key}: [${value.join(", ")}]` : `${key}: ${value}`
   );
@@ -303,18 +397,18 @@ ${task.body}
 }
 async function scaffoldFeature(folder, featureName) {
   const slug = featureName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "new-feature";
-  const root = vscode.Uri.joinPath(folder.uri, ".chatllm", "specs", slug);
-  const tasks = vscode.Uri.joinPath(root, "tasks");
-  await vscode.workspace.fs.createDirectory(tasks);
-  await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(root, "runs"));
-  await writeTextFile(vscode.Uri.joinPath(root, "runs", ".gitignore"), "*\n!.gitignore\n");
-  await writeTextFile(vscode.Uri.joinPath(root, "feature.md"), `# ${featureName}
+  const root = vscode2.Uri.joinPath(folder.uri, ".chatllm", "specs", slug);
+  const tasks = vscode2.Uri.joinPath(root, "tasks");
+  await vscode2.workspace.fs.createDirectory(tasks);
+  await vscode2.workspace.fs.createDirectory(vscode2.Uri.joinPath(root, "runs"));
+  await writeTextFile(vscode2.Uri.joinPath(root, "runs", ".gitignore"), "*\n!.gitignore\n");
+  await writeTextFile(vscode2.Uri.joinPath(root, "feature.md"), `# ${featureName}
 
 status: draft
 `);
-  await writeTextFile(vscode.Uri.joinPath(root, "requirements.md"), "# Requirements\n\n## R-1 Overview\n\n");
-  await writeTextFile(vscode.Uri.joinPath(root, "design.md"), "# Design\n\n## D-1 Architecture\n\n");
-  await writeTextFile(vscode.Uri.joinPath(tasks, "index.md"), regenerateTasksIndex([]));
+  await writeTextFile(vscode2.Uri.joinPath(root, "requirements.md"), "# Requirements\n\n## R-1 Overview\n\n");
+  await writeTextFile(vscode2.Uri.joinPath(root, "design.md"), "# Design\n\n## D-1 Architecture\n\n");
+  await writeTextFile(vscode2.Uri.joinPath(tasks, "index.md"), regenerateTasksIndex([]));
   return root;
 }
 function regenerateTasksIndex(tasks) {
@@ -324,181 +418,348 @@ function regenerateTasksIndex(tasks) {
   ).join("\n") + "\n";
 }
 
-// src/chat/commands.ts
-var SPEC_SYSTEM_PROMPTS = {
-  spec: "Draft EARS-style feature requirements in markdown using ## R-N section ids.",
-  design: "Draft design.md from requirements. Use ## D-N section ids and reference R-* ids.",
-  tasks: `Generate task contracts. Each task must be in a fenced \`\`\`task block with YAML frontmatter containing id, title, status, requirement_refs, design_refs, depends_on, expected_files, architecture_hints, acceptance, and agent.`
-};
-function extractTaskBlocks(content) {
-  const blocks = [];
-  const re = /```task\s*([\s\S]*?)```/gi;
-  let match;
-  while ((match = re.exec(content)) !== null) blocks.push(match[1].trim());
-  return blocks;
-}
-
-// src/chat/stream-client.ts
-async function streamChat(body, handlers, signal) {
-  const response = await apiFetch("/api/chat/stream", {
-    method: "POST",
-    body: JSON.stringify(body),
-    signal
-  });
-  if (!response.ok || !response.body) {
-    const err = await response.json().catch(() => ({ error: response.statusText }));
-    throw new Error(err.error ?? response.statusText);
+// src/panel/panel.ts
+var ChatllmPanelController = class _ChatllmPanelController {
+  constructor(context, store2, output) {
+    this.context = context;
+    this.store = store2;
+    this.output = output;
+    this.conversationId = context.workspaceState.get("chatllm.conversationId");
+    this.disposables.push(
+      onSettingsChange((settings) => this.broadcast({ type: "settings", settings })),
+      this.store.onDidChange(() => this.broadcastFeatures())
+    );
   }
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let finalResponse;
-  const consume = (rawEvent) => {
-    const event = rawEvent.match(/^event: (.+)$/m)?.[1];
-    const dataLine = rawEvent.match(/^data: (.+)$/m)?.[1];
-    if (!event || !dataLine) return;
-    const data = JSON.parse(dataLine);
-    if (event === "token") handlers.onToken?.(data.token);
-    if (event === "tool") handlers.onToolEvent?.(data);
-    if (event === "error") throw new Error(data.error);
-    if (event === "done") finalResponse = data;
-  };
-  while (true) {
-    const { value, done } = await reader.read();
-    buffer += decoder.decode(value, { stream: !done });
-    const parts = buffer.split("\n\n");
-    buffer = parts.pop() ?? "";
-    for (const part of parts) consume(part);
-    if (done) break;
+  static viewType = "chatllm.panel";
+  view;
+  editorPanel;
+  disposables = [];
+  graphs = /* @__PURE__ */ new Map();
+  chatAbort;
+  conversationId;
+  activeTab = "chat";
+  resolveWebviewView(view) {
+    this.view = view;
+    this.bindWebview(view.webview);
+    view.onDidDispose(() => {
+      if (this.view === view) this.view = void 0;
+    });
   }
-  if (buffer.trim()) consume(buffer);
-  if (!finalResponse) throw new Error("Stream ended before the chat response completed.");
-  return finalResponse;
-}
-
-// src/chat/participant.ts
-function registerChatParticipant(context, store2, runs) {
-  if (!vscode2.chat?.createChatParticipant) return { dispose() {
-  } };
-  const participant = vscode2.chat.createChatParticipant("chatllm.chatllm", async (request, _ctx, stream, token) => {
-    try {
-      await handleRequest(context, store2, runs, request, stream, token);
-    } catch (error) {
-      stream.markdown(`**Error:** ${error instanceof Error ? error.message : String(error)}`);
+  showAsPanel(tab = "chat") {
+    this.activeTab = tab;
+    if (this.editorPanel) {
+      this.editorPanel.reveal();
+      this.editorPanel.webview.postMessage({ type: "tab", tab });
+      return;
     }
-  });
-  participant.iconPath = new vscode2.ThemeIcon("comment-discussion");
-  return participant;
-}
-async function handleRequest(context, store2, runs, request, stream, token) {
-  if (request.command === "status") return status(store2, stream);
-  if (request.command === "dispatch") return dispatch(context, store2, runs, stream);
-  if (request.command === "run") return runTask(context, store2, runs, request.prompt, stream);
-  const config = await fetchConfig().catch(() => ({}));
-  const model = config.configuredModels?.find((m) => m.capability === "chat") ?? config.configuredModels?.[0];
-  const body = {
-    conversationId: context.workspaceState.get("chatllm.conversationId"),
-    provider: model?.provider ?? "openai",
-    model: model?.model ?? "gpt-4o-mini",
-    modelSelection: "auto",
-    chatMode: request.command === "design" || request.command === "tasks" ? "agent" : "normal",
-    content: await buildPrompt(store2, request),
-    systemPrompt: request.command ? SPEC_SYSTEM_PROMPTS[request.command] : void 0,
-    skillIds: [],
-    documentIds: [],
-    useRag: false,
-    toolsEnabled: request.command === "design" || request.command === "tasks",
-    mcpServerIds: [],
-    agentIds: [],
-    maxAgentSpawns: 3
-  };
-  const abort = new AbortController();
-  const sub = token.onCancellationRequested(() => abort.abort());
-  let fullText = "";
-  try {
-    const response = await streamChat(body, {
-      onToken(chunk) {
-        fullText += chunk;
-        stream.markdown(chunk);
-      },
-      onToolEvent(event) {
-        stream.progress(`Tool: ${event.name}`);
-      }
-    }, abort.signal);
-    if (response.conversation?.id) await context.workspaceState.update("chatllm.conversationId", response.conversation.id);
-  } finally {
-    sub.dispose();
+    const panel2 = vscode3.window.createWebviewPanel(
+      _ChatllmPanelController.viewType,
+      "Chatllm",
+      vscode3.ViewColumn.Active,
+      this.webviewOptions()
+    );
+    panel2.iconPath = vscode3.Uri.joinPath(this.context.extensionUri, "resources", "chatllm.svg");
+    panel2.onDidDispose(() => {
+      if (this.editorPanel === panel2) this.editorPanel = void 0;
+    });
+    this.editorPanel = panel2;
+    this.bindWebview(panel2.webview);
   }
-  if (request.command === "tasks") await writeGeneratedTasks(store2, fullText, stream);
-}
-async function buildPrompt(store2, request) {
-  const feature = store2.getActiveFeature();
-  const parts = [request.prompt];
-  if (request.command === "design" && feature?.requirementsUri) parts.unshift(await readTextFile(feature.requirementsUri));
-  if (request.command === "tasks" && feature?.requirementsUri) parts.unshift(await readTextFile(feature.requirementsUri));
-  if (request.command === "tasks" && feature?.designUri) parts.unshift(await readTextFile(feature.designUri));
-  return parts.join("\n\n---\n\n");
-}
-function status(store2, stream) {
-  const feature = store2.getActiveFeature();
-  if (!feature) return stream.markdown("No spec features found.");
-  const ready = computeTaskReadiness(feature.tasks);
-  stream.markdown(["## " + feature.name, `Status: **${feature.status}**`, ...feature.tasks.map((task) => `- ${task.id}: ${task.status}${ready.get(task.id)?.blockedBy.length ? " (blocked)" : ""}`)].join("\n"));
-}
-async function dispatch(context, store2, runs, stream) {
-  const feature = store2.getActiveFeature();
-  if (!feature) return stream.markdown("No active feature.");
-  const validation = validateDag(feature.tasks);
-  if (!validation.ok) return stream.markdown(`Cannot dispatch: ${validation.error}`);
-  const result = await dispatchFeature(feature, { conversationId: context.workspaceState.get("chatllm.conversationId") });
-  runs.trackRun(result.graphId, feature.id, feature.name, validation.order);
-  stream.markdown(`Dispatched **${feature.name}** as graph \`${result.graphId}\`.`);
-}
-async function runTask(context, store2, runs, prompt, stream) {
-  const feature = store2.getActiveFeature();
-  const taskId = prompt.match(/T-\d+/i)?.[0].toUpperCase();
-  if (!feature || !taskId) return stream.markdown("Usage: `@chatllm /run T-001`");
-  const result = await dispatchFeature(feature, { conversationId: context.workspaceState.get("chatllm.conversationId"), taskIds: [taskId] });
-  runs.trackRun(result.graphId, feature.id, `${feature.name} / ${taskId}`, [taskId]);
-  stream.markdown(`Started **${taskId}** as graph \`${result.graphId}\`.`);
-}
-async function writeGeneratedTasks(store2, text, stream) {
-  const feature = store2.getActiveFeature();
-  if (!feature?.tasksDirUri) return;
-  const written = [];
-  for (const block of extractTaskBlocks(text)) {
-    const probe = vscode2.Uri.joinPath(feature.tasksDirUri, "_probe.md");
-    const task = parseTaskContract(feature.id, probe, block.startsWith("---") ? block : `---
+  focusView(tab = "chat") {
+    this.activeTab = tab;
+    void vscode3.commands.executeCommand("chatllm.panel.focus").then(() => {
+      this.broadcast({ type: "tab", tab });
+    });
+  }
+  dispose() {
+    for (const d of this.disposables) d.dispose();
+    for (const g of this.graphs.values()) g.dispose();
+    this.graphs.clear();
+    this.chatAbort?.abort();
+    this.editorPanel?.dispose();
+  }
+  webviewOptions() {
+    return {
+      enableScripts: true,
+      retainContextWhenHidden: true,
+      localResourceRoots: [
+        vscode3.Uri.joinPath(this.context.extensionUri, "media"),
+        vscode3.Uri.joinPath(this.context.extensionUri, "resources")
+      ]
+    };
+  }
+  bindWebview(webview) {
+    webview.options = this.webviewOptions();
+    webview.html = this.renderHtml(webview);
+    const sub = webview.onDidReceiveMessage((message) => {
+      void this.handleMessage(webview, message);
+    });
+    this.disposables.push(sub);
+  }
+  broadcast(message) {
+    this.view?.webview.postMessage(message);
+    this.editorPanel?.webview.postMessage(message);
+  }
+  broadcastFeatures() {
+    const features = this.featureSummaries();
+    const active = this.store.getActiveFeature();
+    this.broadcast({
+      type: "features",
+      features,
+      activeFeature: active ? { id: active.id, tasks: active.tasks.map((t) => this.taskSummary(t)) } : void 0
+    });
+  }
+  featureSummaries() {
+    const active = this.store.getActiveFeature();
+    return this.store.getFeatures().map((feature) => ({
+      id: feature.id,
+      name: feature.name,
+      status: feature.status,
+      requirementCount: feature.requirementIds.length,
+      designCount: feature.designIds.length,
+      taskCount: feature.tasks.length,
+      active: feature.id === active?.id
+    }));
+  }
+  taskSummary(task) {
+    return { id: task.id, title: task.title, status: task.status, dependsOn: task.dependsOn, agent: task.agent };
+  }
+  async handleMessage(webview, message) {
+    try {
+      switch (message.type) {
+        case "ready":
+          webview.postMessage({
+            type: "init",
+            settings: readSettings(),
+            features: this.featureSummaries(),
+            activeTab: this.activeTab,
+            apiOrigin: getApiOrigin()
+          });
+          this.broadcastFeatures();
+          break;
+        case "switchTab":
+          this.activeTab = message.tab;
+          break;
+        case "sendChat":
+          await this.sendChat(message.content, message.command);
+          break;
+        case "cancelChat":
+          this.chatAbort?.abort();
+          break;
+        case "updateSetting":
+          await writeSetting(message.key, message.value);
+          break;
+        case "setActiveFeature":
+          this.store.setActiveFeature(message.featureId);
+          await this.context.workspaceState.update("chatllm.activeFeatureId", message.featureId);
+          this.broadcastFeatures();
+          break;
+        case "scaffoldFeature":
+          await this.scaffold(message.name);
+          break;
+        case "dispatchFeature":
+          await this.dispatch(message.featureId, message.taskIds);
+          break;
+        case "cancelGraph":
+          await cancelExecutionGraph(message.graphId);
+          this.graphs.get(message.graphId)?.dispose();
+          this.graphs.delete(message.graphId);
+          break;
+        case "openTask": {
+          const task = this.store.getTask(message.featureId, message.taskId);
+          if (task) await vscode3.window.showTextDocument(task.filePath);
+          break;
+        }
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      this.output.appendLine(`[panel] ${msg}`);
+      this.broadcast({ type: "log", message: msg });
+    }
+  }
+  async sendChat(content, command) {
+    const settings = readSettings();
+    const prompt = await this.composePrompt(content, command);
+    const body = settingsToChatRequest(settings, prompt, this.conversationId);
+    if (command) {
+      body.systemPrompt = SPEC_SYSTEM_PROMPTS[command];
+      body.chatMode = command === "design" || command === "tasks" ? "agent" : body.chatMode;
+      body.toolsEnabled = command === "design" || command === "tasks" ? true : body.toolsEnabled;
+    }
+    this.chatAbort?.abort();
+    const abort = new AbortController();
+    this.chatAbort = abort;
+    let buffer = "";
+    try {
+      const response = await streamChat(
+        body,
+        {
+          onToken: (token) => {
+            buffer += token;
+            this.broadcast({ type: "chatToken", token });
+          },
+          onToolEvent: (event) => {
+            this.broadcast({ type: "chatToolEvent", name: event.name, arguments: event.arguments });
+          }
+        },
+        abort.signal
+      );
+      if (response.conversation?.id) {
+        this.conversationId = response.conversation.id;
+        await this.context.workspaceState.update("chatllm.conversationId", response.conversation.id);
+      }
+      this.broadcast({ type: "chatDone", conversationId: response.conversation?.id });
+      if (command === "tasks") await this.writeGeneratedTasks(buffer);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      this.broadcast({ type: "chatError", error: msg });
+    } finally {
+      if (this.chatAbort === abort) this.chatAbort = void 0;
+    }
+  }
+  async composePrompt(content, command) {
+    const feature = this.store.getActiveFeature();
+    const parts = [content];
+    if (command === "design" && feature?.requirementsUri) parts.unshift(await readTextFile(feature.requirementsUri));
+    if (command === "tasks" && feature?.requirementsUri) parts.unshift(await readTextFile(feature.requirementsUri));
+    if (command === "tasks" && feature?.designUri) parts.unshift(await readTextFile(feature.designUri));
+    return parts.join("\n\n---\n\n");
+  }
+  async writeGeneratedTasks(text) {
+    const feature = this.store.getActiveFeature();
+    if (!feature?.tasksDirUri) return;
+    for (const block of extractTaskBlocks(text)) {
+      const probe = vscode3.Uri.joinPath(feature.tasksDirUri, "_probe.md");
+      const task = parseTaskContract(feature.id, probe, block.startsWith("---") ? block : `---
 ${block}
 ---
 `);
-    if (!task) continue;
-    task.filePath = vscode2.Uri.joinPath(feature.tasksDirUri, `${task.id}-${task.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40)}.md`);
-    await writeTaskContract(task);
-    written.push(task.id);
+      if (!task) continue;
+      task.filePath = vscode3.Uri.joinPath(
+        feature.tasksDirUri,
+        `${task.id}-${task.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40)}.md`
+      );
+      await writeTaskContract(task);
+    }
+    await this.store.refresh();
+    const updated = this.store.getFeature(feature.id);
+    if (updated?.tasksDirUri) {
+      await writeTextFile(vscode3.Uri.joinPath(updated.tasksDirUri, "index.md"), regenerateTasksIndex(updated.tasks));
+    }
   }
-  await store2.refresh();
-  const updated = store2.getFeature(feature.id);
-  if (updated?.tasksDirUri) await writeTextFile(vscode2.Uri.joinPath(updated.tasksDirUri, "index.md"), regenerateTasksIndex(updated.tasks));
-  if (written.length) stream.markdown(`
-
-Wrote task files: ${written.join(", ")}`);
+  async scaffold(name) {
+    const folder = vscode3.workspace.workspaceFolders?.[0];
+    if (!folder) {
+      this.broadcast({ type: "log", message: "Open a workspace folder to scaffold a feature." });
+      return;
+    }
+    const root = await scaffoldFeature(folder, name);
+    const id = root.path.split("/").pop() ?? name;
+    this.store.setActiveFeature(id);
+    await this.context.workspaceState.update("chatllm.activeFeatureId", id);
+    await this.store.refresh();
+  }
+  async dispatch(featureId, taskIds) {
+    const feature = this.store.getFeature(featureId);
+    if (!feature) {
+      this.broadcast({ type: "log", message: `Unknown feature ${featureId}` });
+      return;
+    }
+    const tasks = taskIds?.length ? feature.tasks.filter((t) => taskIds.includes(t.id)) : feature.tasks;
+    const validation = validateDag(tasks);
+    if (!validation.ok) {
+      this.broadcast({ type: "log", message: `Cannot dispatch: ${validation.error}` });
+      return;
+    }
+    const readiness = computeTaskReadiness(feature.tasks);
+    const result = await dispatchFeature(feature, { conversationId: this.conversationId, taskIds });
+    const startEvent = {
+      graphId: result.graphId,
+      featureId: feature.id,
+      label: taskIds?.length ? `${feature.name} / ${taskIds.join(", ")}` : feature.name,
+      nodes: tasks.map((task) => ({
+        id: task.id,
+        label: `${task.id} \xB7 ${task.title}`,
+        dependsOn: task.dependsOn
+      }))
+    };
+    this.broadcast({ type: "graphStart", payload: startEvent });
+    for (const task of tasks) {
+      const ready = readiness.get(task.id);
+      this.broadcast({
+        type: "graphNode",
+        payload: { graphId: result.graphId, nodeId: task.id, status: ready?.blockedBy.length ? "blocked" : "queued" }
+      });
+    }
+    const dispose = subscribeExecutionGraphEvents(result.graphId, (event) => {
+      if (event.type === "node_status" && event.nodeId && event.status) {
+        const mapped = mapStatus(event.status);
+        if (mapped) {
+          const task = this.store.getTask(feature.id, event.nodeId);
+          if (task) void updateTaskStatus(task.filePath, mapped).then(() => this.store.refresh());
+        }
+        this.broadcast({ type: "graphNode", payload: { graphId: result.graphId, nodeId: event.nodeId, status: event.status } });
+      }
+      if (event.type === "done" && event.status) {
+        this.broadcast({ type: "graphDone", payload: { graphId: result.graphId, status: event.status } });
+        this.graphs.get(result.graphId)?.dispose();
+        this.graphs.delete(result.graphId);
+      }
+    });
+    this.graphs.set(result.graphId, { graphId: result.graphId, dispose });
+  }
+  renderHtml(webview) {
+    const scriptUri = webview.asWebviewUri(vscode3.Uri.joinPath(this.context.extensionUri, "media", "webview.js"));
+    const styleUri = webview.asWebviewUri(vscode3.Uri.joinPath(this.context.extensionUri, "media", "webview.css"));
+    const nonce = randomNonce();
+    const csp = [
+      `default-src 'none'`,
+      `img-src ${webview.cspSource} https: data:`,
+      `style-src ${webview.cspSource} 'unsafe-inline'`,
+      `font-src ${webview.cspSource}`,
+      `script-src 'nonce-${nonce}'`,
+      `connect-src ${webview.cspSource}`
+    ].join("; ");
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="${csp}" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Chatllm</title>
+  <link rel="stylesheet" href="${styleUri}" />
+</head>
+<body>
+  <div id="root"></div>
+  <script nonce="${nonce}" src="${scriptUri}"></script>
+</body>
+</html>`;
+  }
+};
+function mapStatus(status) {
+  if (status === "running" || status === "completed" || status === "failed" || status === "blocked") return status;
+  return void 0;
+}
+function randomNonce() {
+  const bytes = new Uint8Array(16);
+  for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 // src/spec/store.ts
-var vscode3 = __toESM(require("vscode"));
+var vscode4 = __toESM(require("vscode"));
 var SpecStore = class {
   constructor(output) {
     this.output = output;
   }
-  changeEmitter = new vscode3.EventEmitter();
+  changeEmitter = new vscode4.EventEmitter();
   onDidChange = this.changeEmitter.event;
   features = /* @__PURE__ */ new Map();
   watcher;
   activeFeatureId;
   async initialize(context) {
     this.activeFeatureId = context.workspaceState.get("chatllm.activeFeatureId");
-    this.watcher = vscode3.workspace.createFileSystemWatcher("**/.chatllm/specs/**/*.md");
+    this.watcher = vscode4.workspace.createFileSystemWatcher("**/.chatllm/specs/**/*.md");
     this.watcher.onDidCreate(() => void this.refresh());
     this.watcher.onDidChange(() => void this.refresh());
     this.watcher.onDidDelete(() => void this.refresh());
@@ -522,11 +783,11 @@ var SpecStore = class {
   }
   async refresh() {
     this.features.clear();
-    for (const folder of vscode3.workspace.workspaceFolders ?? []) {
-      const root = vscode3.Uri.joinPath(folder.uri, ".chatllm", "specs");
+    for (const folder of vscode4.workspace.workspaceFolders ?? []) {
+      const root = vscode4.Uri.joinPath(folder.uri, ".chatllm", "specs");
       try {
-        for (const [name, type] of await vscode3.workspace.fs.readDirectory(root)) {
-          if (type === vscode3.FileType.Directory) {
+        for (const [name, type] of await vscode4.workspace.fs.readDirectory(root)) {
+          if (type === vscode4.FileType.Directory) {
             const feature = await this.loadFeature(root, name);
             if (feature) this.features.set(feature.id, feature);
           }
@@ -537,17 +798,17 @@ var SpecStore = class {
     this.changeEmitter.fire();
   }
   async loadFeature(specsRoot, id) {
-    const rootUri = vscode3.Uri.joinPath(specsRoot, id);
-    const featureMdUri = vscode3.Uri.joinPath(rootUri, "feature.md");
-    const requirementsUri = vscode3.Uri.joinPath(rootUri, "requirements.md");
-    const designUri = vscode3.Uri.joinPath(rootUri, "design.md");
-    const tasksDirUri = vscode3.Uri.joinPath(rootUri, "tasks");
+    const rootUri = vscode4.Uri.joinPath(specsRoot, id);
+    const featureMdUri = vscode4.Uri.joinPath(rootUri, "feature.md");
+    const requirementsUri = vscode4.Uri.joinPath(rootUri, "requirements.md");
+    const designUri = vscode4.Uri.joinPath(rootUri, "design.md");
+    const tasksDirUri = vscode4.Uri.joinPath(rootUri, "tasks");
     let name = id;
-    let status2 = "draft";
+    let status = "draft";
     try {
       const featureMd = await readTextFile(featureMdUri);
       name = featureMd.match(/^#\s+(.+)$/m)?.[1]?.trim() || id;
-      status2 = parseFeatureStatus(featureMd);
+      status = parseFeatureStatus(featureMd);
     } catch {
       this.output.appendLine(`Feature ${id} has no feature.md`);
     }
@@ -555,15 +816,15 @@ var SpecStore = class {
     const designIds = await this.readIds(designUri, "D");
     const tasks = [];
     try {
-      for (const [fileName, fileType] of await vscode3.workspace.fs.readDirectory(tasksDirUri)) {
-        if (fileType !== vscode3.FileType.File || !/^T-\d+.*\.md$/i.test(fileName)) continue;
-        const filePath = vscode3.Uri.joinPath(tasksDirUri, fileName);
+      for (const [fileName, fileType] of await vscode4.workspace.fs.readDirectory(tasksDirUri)) {
+        if (fileType !== vscode4.FileType.File || !/^T-\d+.*\.md$/i.test(fileName)) continue;
+        const filePath = vscode4.Uri.joinPath(tasksDirUri, fileName);
         const task = parseTaskContract(id, filePath, await readTextFile(filePath));
         if (task) tasks.push(task);
       }
     } catch {
     }
-    return { id, name, status: status2, rootUri, featureMdUri, requirementsUri, designUri, tasksDirUri, requirementIds, designIds, tasks };
+    return { id, name, status, rootUri, featureMdUri, requirementsUri, designUri, tasksDirUri, requirementIds, designIds, tasks };
   }
   async readIds(uri, prefix) {
     try {
@@ -579,7 +840,7 @@ var SpecStore = class {
 };
 
 // src/theme-bridge.ts
-var vscode4 = __toESM(require("vscode"));
+var vscode5 = __toESM(require("vscode"));
 var CHATLLM_TO_VSCODE = {
   "default:light": "Light Modern",
   "default:dark": "Dark Modern",
@@ -603,13 +864,27 @@ function createThemeBridge(output) {
   let ws;
   let disposed = false;
   let lastApplied;
+  let lastOverridesKey;
   async function applyTheme(themeId) {
     if (!themeId) return;
     lastApplied = themeId;
-    await vscode4.workspace.getConfiguration("workbench").update("colorTheme", themeId, vscode4.ConfigurationTarget.Global);
+    await vscode5.workspace.getConfiguration("workbench").update("colorTheme", themeId, vscode5.ConfigurationTarget.Global);
+  }
+  async function applyColorOverrides(overrides) {
+    if (!overrides || Object.keys(overrides).length === 0) return;
+    const fingerprint = JSON.stringify(overrides);
+    if (fingerprint === lastOverridesKey) return;
+    lastOverridesKey = fingerprint;
+    const config = vscode5.workspace.getConfiguration("workbench");
+    const existing = config.get("colorCustomizations") ?? {};
+    const next = { ...overrides };
+    for (const [key, value] of Object.entries(existing)) {
+      if (key.startsWith("[") && key.endsWith("]")) next[key] = value;
+    }
+    await config.update("colorCustomizations", next, vscode5.ConfigurationTarget.Global);
   }
   async function publishTheme() {
-    const themeId = vscode4.workspace.getConfiguration("workbench").get("colorTheme");
+    const themeId = vscode5.workspace.getConfiguration("workbench").get("colorTheme");
     if (!themeId || themeId === lastApplied) {
       lastApplied = void 0;
       return;
@@ -627,13 +902,15 @@ function createThemeBridge(output) {
     ws.addEventListener("message", (event) => {
       const payload = JSON.parse(String(event.data));
       if (payload.type !== "theme" || payload.snapshot?.source === "vscode") return;
-      void applyTheme(payload.snapshot?.vsCodeThemeId ?? CHATLLM_TO_VSCODE[`${payload.snapshot?.family}:${payload.snapshot?.mode}`]);
+      const snapshot = payload.snapshot;
+      const themeId = snapshot?.vsCodeThemeId ?? CHATLLM_TO_VSCODE[`${snapshot?.family}:${snapshot?.mode}`];
+      void applyTheme(themeId).then(() => applyColorOverrides(snapshot?.colorOverrides));
     });
     ws.addEventListener("close", () => setTimeout(connect, 1e3));
   }
   const envTheme = CHATLLM_TO_VSCODE[`${process.env.CHATLLM_THEME_FAMILY}:${process.env.CHATLLM_THEME_MODE === "system" ? "dark" : process.env.CHATLLM_THEME_MODE}`];
   void applyTheme(envTheme);
-  const listener = vscode4.workspace.onDidChangeConfiguration((event) => {
+  const listener = vscode5.workspace.onDidChangeConfiguration((event) => {
     if (event.affectsConfiguration("workbench.colorTheme")) void publishTheme();
   });
   connect();
@@ -646,12 +923,12 @@ function createThemeBridge(output) {
 }
 
 // src/views/runsTree.ts
-var vscode5 = __toESM(require("vscode"));
+var vscode6 = __toESM(require("vscode"));
 var RunsTreeProvider = class {
   constructor(writeback) {
     this.writeback = writeback;
   }
-  emitter = new vscode5.EventEmitter();
+  emitter = new vscode6.EventEmitter();
   onDidChangeTreeData = this.emitter.event;
   runs = /* @__PURE__ */ new Map();
   refresh() {
@@ -662,7 +939,7 @@ var RunsTreeProvider = class {
     run.dispose = subscribeExecutionGraphEvents(graphId, (event) => {
       if (event.type === "node_status" && event.nodeId && event.status) {
         run.nodes.set(event.nodeId, event.status);
-        const mapped = mapStatus(event.status);
+        const mapped = mapStatus2(event.status);
         if (mapped) void this.writeback?.(featureId, event.nodeId, mapped);
       }
       if (event.type === "done" && event.status) run.status = event.status;
@@ -678,47 +955,47 @@ var RunsTreeProvider = class {
   }
   getTreeItem(item) {
     if (item.kind === "run") {
-      const tree2 = new vscode5.TreeItem(item.run.label, vscode5.TreeItemCollapsibleState.Expanded);
+      const tree2 = new vscode6.TreeItem(item.run.label, vscode6.TreeItemCollapsibleState.Expanded);
       tree2.description = item.run.status;
       return tree2;
     }
-    const tree = new vscode5.TreeItem(item.nodeId);
+    const tree = new vscode6.TreeItem(item.nodeId);
     tree.description = item.status;
     return tree;
   }
   getChildren(item) {
     if (!item) return [...this.runs.values()].map((run) => ({ kind: "run", run }));
-    if (item.kind === "run") return [...item.run.nodes.entries()].map(([nodeId, status2]) => ({ kind: "node", nodeId, status: status2 }));
+    if (item.kind === "run") return [...item.run.nodes.entries()].map(([nodeId, status]) => ({ kind: "node", nodeId, status }));
     return [];
   }
 };
-function mapStatus(status2) {
-  if (status2 === "running" || status2 === "completed" || status2 === "failed" || status2 === "blocked") return status2;
+function mapStatus2(status) {
+  if (status === "running" || status === "completed" || status === "failed" || status === "blocked") return status;
   return void 0;
 }
 
 // src/views/specsTree.ts
-var vscode6 = __toESM(require("vscode"));
+var vscode7 = __toESM(require("vscode"));
 var SpecsTreeProvider = class {
   constructor(store2) {
     this.store = store2;
     store2.onDidChange(() => this.refresh());
   }
-  emitter = new vscode6.EventEmitter();
+  emitter = new vscode7.EventEmitter();
   onDidChangeTreeData = this.emitter.event;
   refresh() {
     this.emitter.fire(void 0);
   }
   getTreeItem(item) {
     if (item.kind === "feature") {
-      const tree2 = new vscode6.TreeItem(item.feature.name, vscode6.TreeItemCollapsibleState.Expanded);
+      const tree2 = new vscode7.TreeItem(item.feature.name, vscode7.TreeItemCollapsibleState.Expanded);
       tree2.description = item.feature.status;
       tree2.contextValue = "feature";
-      tree2.iconPath = new vscode6.ThemeIcon("folder");
+      tree2.iconPath = new vscode7.ThemeIcon("folder");
       tree2.command = { command: "chatllm.setActiveFeature", title: "Set Active", arguments: [item.feature.id] };
       return tree2;
     }
-    const tree = new vscode6.TreeItem(item.label);
+    const tree = new vscode7.TreeItem(item.label);
     tree.resourceUri = item.uri;
     tree.command = { command: "vscode.open", title: "Open", arguments: [item.uri] };
     return tree;
@@ -730,26 +1007,26 @@ var SpecsTreeProvider = class {
     return [
       f.requirementsUri && { kind: "file", label: `requirements.md (${f.requirementIds.length})`, uri: f.requirementsUri },
       f.designUri && { kind: "file", label: `design.md (${f.designIds.length})`, uri: f.designUri },
-      f.tasksDirUri && { kind: "file", label: `tasks/index.md (${f.tasks.length})`, uri: vscode6.Uri.joinPath(f.tasksDirUri, "index.md") }
+      f.tasksDirUri && { kind: "file", label: `tasks/index.md (${f.tasks.length})`, uri: vscode7.Uri.joinPath(f.tasksDirUri, "index.md") }
     ].filter(Boolean);
   }
 };
 
 // src/views/tasksTree.ts
-var vscode7 = __toESM(require("vscode"));
+var vscode8 = __toESM(require("vscode"));
 var TasksTreeProvider = class {
   constructor(store2) {
     this.store = store2;
     store2.onDidChange(() => this.refresh());
   }
-  emitter = new vscode7.EventEmitter();
+  emitter = new vscode8.EventEmitter();
   onDidChangeTreeData = this.emitter.event;
   refresh() {
     this.emitter.fire(void 0);
   }
   getTreeItem(item) {
-    if (item.kind === "group") return new vscode7.TreeItem(item.label, vscode7.TreeItemCollapsibleState.Expanded);
-    const tree = new vscode7.TreeItem(`${item.task.id}: ${item.task.title}`);
+    if (item.kind === "group") return new vscode8.TreeItem(item.label, vscode8.TreeItemCollapsibleState.Expanded);
+    const tree = new vscode8.TreeItem(`${item.task.id}: ${item.task.title}`);
     tree.description = item.task.status;
     tree.contextValue = "task";
     tree.command = { command: "chatllm.openTask", title: "Open Task", arguments: [{ kind: "task", featureId: item.featureId, task: { id: item.task.id } }] };
@@ -760,7 +1037,7 @@ var TasksTreeProvider = class {
     if (!feature) return [];
     if (!item) {
       const groups = groupTasksByStatus(feature.tasks);
-      return ["running", "ready", "blocked", "pending", "failed", "completed"].filter((status2) => groups[status2].length).map((status2) => ({ kind: "group", status: status2, label: `${status2} (${groups[status2].length})` }));
+      return ["running", "ready", "blocked", "pending", "failed", "completed"].filter((status) => groups[status].length).map((status) => ({ kind: "group", status, label: `${status} (${groups[status].length})` }));
     }
     if (item.kind !== "group") return [];
     return (groupTasksByStatus(feature.tasks)[item.status] ?? []).map((task) => ({ kind: "task", featureId: feature.id, task }));
@@ -769,92 +1046,99 @@ var TasksTreeProvider = class {
 
 // src/extension.ts
 var store;
+var panel;
 async function activate(context) {
-  const output = vscode8.window.createOutputChannel("Chatllm");
+  const output = vscode9.window.createOutputChannel("Chatllm");
   store = new SpecStore(output);
   await store.initialize(context);
   const specsTree = new SpecsTreeProvider(store);
   const tasksTree = new TasksTreeProvider(store);
-  const runsTree = new RunsTreeProvider(async (featureId, taskId, status2) => {
+  const runsTree = new RunsTreeProvider(async (featureId, taskId, status) => {
     const task = store.getTask(featureId, taskId);
     if (task) {
-      await updateTaskStatus(task.filePath, status2);
+      await updateTaskStatus(task.filePath, status);
       await store.refresh();
     }
   });
+  panel = new ChatllmPanelController(context, store, output);
   context.subscriptions.push(
     output,
     store,
-    vscode8.window.registerTreeDataProvider("chatllm.specs", specsTree),
-    vscode8.window.registerTreeDataProvider("chatllm.tasks", tasksTree),
-    vscode8.window.registerTreeDataProvider("chatllm.runs", runsTree),
-    registerChatParticipant(context, store, runsTree),
+    panel,
+    vscode9.window.registerWebviewViewProvider(ChatllmPanelController.viewType, panel, {
+      webviewOptions: { retainContextWhenHidden: true }
+    }),
+    vscode9.window.registerTreeDataProvider("chatllm.specs", specsTree),
+    vscode9.window.registerTreeDataProvider("chatllm.tasks", tasksTree),
+    vscode9.window.registerTreeDataProvider("chatllm.runs", runsTree),
     createThemeBridge(output),
     statusBar(),
-    ...commands2(context, specsTree, tasksTree, runsTree)
+    ...commands3(context, specsTree, tasksTree, runsTree)
   );
 }
-function commands2(context, specsTree, tasksTree, runsTree) {
+function commands3(context, specsTree, tasksTree, runsTree) {
   return [
-    vscode8.commands.registerCommand("chatllm.openChat", () => vscode8.commands.executeCommand("workbench.action.chat.open")),
-    vscode8.commands.registerCommand("chatllm.refreshSpecs", async () => {
+    vscode9.commands.registerCommand("chatllm.openChat", () => panel.showAsPanel("chat")),
+    vscode9.commands.registerCommand("chatllm.openSettings", () => panel.showAsPanel("settings")),
+    vscode9.commands.registerCommand("chatllm.openPipeline", () => panel.showAsPanel("pipeline")),
+    vscode9.commands.registerCommand("chatllm.refreshSpecs", async () => {
       await store.refresh();
       specsTree.refresh();
     }),
-    vscode8.commands.registerCommand("chatllm.refreshTasks", async () => {
+    vscode9.commands.registerCommand("chatllm.refreshTasks", async () => {
       await store.refresh();
       tasksTree.refresh();
     }),
-    vscode8.commands.registerCommand("chatllm.refreshRuns", () => runsTree.refresh()),
-    vscode8.commands.registerCommand("chatllm.scaffoldFeature", async () => {
-      const folder = vscode8.workspace.workspaceFolders?.[0];
-      const name = await vscode8.window.showInputBox({ prompt: "Feature name" });
+    vscode9.commands.registerCommand("chatllm.refreshRuns", () => runsTree.refresh()),
+    vscode9.commands.registerCommand("chatllm.scaffoldFeature", async () => {
+      const folder = vscode9.workspace.workspaceFolders?.[0];
+      const name = await vscode9.window.showInputBox({ prompt: "Feature name" });
       if (!folder || !name) return;
       const root = await scaffoldFeature(folder, name);
-      store.setActiveFeature(root.path.split("/").pop() ?? name);
-      await context.workspaceState.update("chatllm.activeFeatureId", root.path.split("/").pop() ?? name);
+      const id = root.path.split("/").pop() ?? name;
+      store.setActiveFeature(id);
+      await context.workspaceState.update("chatllm.activeFeatureId", id);
       await store.refresh();
       specsTree.refresh();
     }),
-    vscode8.commands.registerCommand("chatllm.setActiveFeature", async (id) => {
+    vscode9.commands.registerCommand("chatllm.setActiveFeature", async (id) => {
       store.setActiveFeature(id);
       await context.workspaceState.update("chatllm.activeFeatureId", id);
       tasksTree.refresh();
     }),
-    vscode8.commands.registerCommand("chatllm.openTask", async (arg) => {
+    vscode9.commands.registerCommand("chatllm.openTask", async (arg) => {
       const task = arg && store.getTask(arg.featureId, arg.task.id);
-      if (task) await vscode8.window.showTextDocument(task.filePath);
+      if (task) await vscode9.window.showTextDocument(task.filePath);
     }),
-    vscode8.commands.registerCommand("chatllm.runTask", async (arg) => {
+    vscode9.commands.registerCommand("chatllm.runTask", async (arg) => {
       const feature = arg && store.getFeature(arg.featureId);
       if (!feature || !arg) return;
-      const result = await dispatchFeature(feature, { taskIds: [arg.task.id] });
-      runsTree.trackRun(result.graphId, feature.id, `${feature.name} / ${arg.task.id}`, [arg.task.id]);
+      await panel.dispatch(feature.id, [arg.task.id]);
     }),
-    vscode8.commands.registerCommand("chatllm.markTaskReady", async (arg) => {
+    vscode9.commands.registerCommand("chatllm.markTaskReady", async (arg) => {
       const task = arg && store.getTask(arg.featureId, arg.task.id);
       if (task) await updateTaskStatus(task.filePath, "ready");
       await store.refresh();
     }),
-    vscode8.commands.registerCommand("chatllm.dispatchFeature", async () => {
+    vscode9.commands.registerCommand("chatllm.dispatchFeature", async () => {
       const feature = store.getActiveFeature();
       if (!feature) return;
-      const result = await dispatchFeature(feature);
-      runsTree.trackRun(result.graphId, feature.id, feature.name, feature.tasks.map((task) => task.id));
+      await panel.dispatch(feature.id);
     }),
-    vscode8.commands.registerCommand("chatllm.regenerateTasksIndex", async () => {
+    vscode9.commands.registerCommand("chatllm.regenerateTasksIndex", async () => {
       const feature = store.getActiveFeature();
-      if (feature?.tasksDirUri) await writeTextFile(vscode8.Uri.joinPath(feature.tasksDirUri, "index.md"), regenerateTasksIndex(feature.tasks));
+      if (feature?.tasksDirUri) await writeTextFile(vscode9.Uri.joinPath(feature.tasksDirUri, "index.md"), regenerateTasksIndex(feature.tasks));
     }),
-    vscode8.commands.registerCommand("chatllm.cancelRun", async () => {
-      const graphId = await vscode8.window.showInputBox({ prompt: "Graph id to cancel" });
+    vscode9.commands.registerCommand("chatllm.cancelRun", async () => {
+      const graphId = await vscode9.window.showInputBox({ prompt: "Graph id to cancel" });
       if (graphId) await cancelExecutionGraph(graphId);
     })
   ];
 }
 function statusBar() {
-  const item = vscode8.window.createStatusBarItem(vscode8.StatusBarAlignment.Left, 100);
+  const item = vscode9.window.createStatusBarItem(vscode9.StatusBarAlignment.Left, 100);
   item.text = "$(comment-discussion) Chatllm";
+  item.tooltip = "Open Chatllm panel";
   item.command = "chatllm.openChat";
   item.show();
   return item;

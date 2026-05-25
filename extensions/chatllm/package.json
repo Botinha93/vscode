@@ -2,34 +2,95 @@
   "name": "chatllm",
   "displayName": "Chatllm",
   "description": "Chatllm integration for the bundled VS Code workspace.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "chatllm",
   "private": true,
   "license": "MIT",
   "engines": { "vscode": "^1.90.0" },
   "categories": ["AI", "Other"],
-  "activationEvents": ["onStartupFinished", "onView:chatllm.specs"],
+  "activationEvents": ["onStartupFinished"],
   "main": "./extension.js",
   "scripts": { "build": "node esbuild.mjs" },
   "capabilities": { "virtualWorkspaces": true, "untrustedWorkspaces": { "supported": true } },
   "contributes": {
-    "chatParticipants": [{
-      "id": "chatllm.chatllm",
-      "name": "chatllm",
-      "fullName": "Chatllm",
-      "description": "Chat with Chatllm - guided specs, design, tasks, and agent dispatch.",
-      "isSticky": true,
-      "commands": [
-        { "name": "spec", "description": "Create or refine feature requirements" },
-        { "name": "design", "description": "Draft design.md from requirements" },
-        { "name": "tasks", "description": "Generate task contracts from requirements and design" },
-        { "name": "dispatch", "description": "Dispatch the task graph to agents" },
-        { "name": "run", "description": "Run a single task by id" },
-        { "name": "status", "description": "Show spec and task status" }
-      ]
-    }],
+    "configuration": {
+      "title": "Chatllm",
+      "properties": {
+        "chatllm.provider": {
+          "type": "string",
+          "enum": ["openai", "openrouter", "google", "ollama", "llamacpp", "lmstudio", "custom"],
+          "default": "openai",
+          "description": "Provider used for Chatllm chat completions."
+        },
+        "chatllm.model": {
+          "type": "string",
+          "default": "gpt-4o-mini",
+          "description": "Model identifier sent to the provider."
+        },
+        "chatllm.modelSelection": {
+          "type": "string",
+          "enum": ["auto", "manual"],
+          "default": "manual",
+          "description": "When 'auto', the backend may upgrade the model based on the request."
+        },
+        "chatllm.chatMode": {
+          "type": "string",
+          "enum": ["normal", "agent"],
+          "default": "normal",
+          "description": "Default chat mode. 'agent' enables tool calls and may spawn subagents."
+        },
+        "chatllm.useRag": {
+          "type": "boolean",
+          "default": false,
+          "description": "Attach indexed documents to chat requests."
+        },
+        "chatllm.toolsEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Allow the assistant to call tools (filesystem, shell, etc.)."
+        },
+        "chatllm.maxAgentSpawns": {
+          "type": "number",
+          "default": 3,
+          "minimum": 0,
+          "maximum": 32,
+          "description": "Maximum number of subagents the assistant may spawn per turn."
+        },
+        "chatllm.agentIds": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Agent identifiers available to the assistant."
+        },
+        "chatllm.mcpServerIds": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "MCP server identifiers connected to chat sessions."
+        },
+        "chatllm.skillIds": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Skill identifiers attached by default."
+        },
+        "chatllm.documentIds": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Document identifiers to attach when RAG is enabled."
+        },
+        "chatllm.systemPrompt": {
+          "type": "string",
+          "default": "",
+          "description": "Optional system prompt prepended to every Chatllm chat request."
+        }
+      }
+    },
     "commands": [
-      { "command": "chatllm.openChat", "title": "Open Chatllm Chat", "category": "Chatllm" },
+      { "command": "chatllm.openChat", "title": "Open Chatllm", "category": "Chatllm", "icon": "$(comment-discussion)" },
+      { "command": "chatllm.openSettings", "title": "Open Chatllm Settings", "category": "Chatllm", "icon": "$(gear)" },
+      { "command": "chatllm.openPipeline", "title": "Open Chatllm Pipeline", "category": "Chatllm", "icon": "$(type-hierarchy)" },
       { "command": "chatllm.scaffoldFeature", "title": "Scaffold Spec Feature", "category": "Chatllm" },
       { "command": "chatllm.setActiveFeature", "title": "Set Active Spec Feature", "category": "Chatllm" },
       { "command": "chatllm.openTask", "title": "Open Task Contract", "category": "Chatllm" },
@@ -42,19 +103,29 @@
       { "command": "chatllm.refreshTasks", "title": "Refresh Tasks", "category": "Chatllm" },
       { "command": "chatllm.refreshRuns", "title": "Refresh Runs", "category": "Chatllm" }
     ],
-    "viewsContainers": { "activitybar": [{ "id": "chatllm", "title": "Chatllm", "icon": "resources/chatllm.svg" }] },
-    "views": { "chatllm": [
-      { "id": "chatllm.specs", "name": "Specs" },
-      { "id": "chatllm.tasks", "name": "Tasks" },
-      { "id": "chatllm.runs", "name": "Agent Runs" }
-    ] },
+    "viewsContainers": {
+      "activitybar": [{ "id": "chatllm", "title": "Chatllm", "icon": "resources/chatllm.svg" }]
+    },
+    "views": {
+      "chatllm": [
+        { "type": "webview", "id": "chatllm.panel", "name": "Chatllm", "icon": "resources/chatllm.svg", "contextualTitle": "Chatllm" },
+        { "id": "chatllm.specs", "name": "Specs" },
+        { "id": "chatllm.tasks", "name": "Tasks" },
+        { "id": "chatllm.runs", "name": "Agent Runs" }
+      ]
+    },
     "menus": {
       "commandPalette": [
         { "command": "chatllm.openChat" },
+        { "command": "chatllm.openSettings" },
+        { "command": "chatllm.openPipeline" },
         { "command": "chatllm.scaffoldFeature" },
         { "command": "chatllm.dispatchFeature" }
       ],
       "view/title": [
+        { "command": "chatllm.openChat", "when": "view == chatllm.panel", "group": "navigation@1" },
+        { "command": "chatllm.openPipeline", "when": "view == chatllm.panel", "group": "navigation@2" },
+        { "command": "chatllm.openSettings", "when": "view == chatllm.panel", "group": "navigation@3" },
         { "command": "chatllm.refreshSpecs", "when": "view == chatllm.specs", "group": "navigation" },
         { "command": "chatllm.scaffoldFeature", "when": "view == chatllm.specs", "group": "navigation" },
         { "command": "chatllm.refreshTasks", "when": "view == chatllm.tasks", "group": "navigation" },
@@ -69,9 +140,14 @@
       ]
     }
   },
+  "dependencies": {
+    "cytoscape": "^3.30.0",
+    "cytoscape-dagre": "^2.5.0"
+  },
   "devDependencies": {
     "@types/node": "^22.10.0",
     "@types/vscode": "^1.90.0",
+    "@types/cytoscape": "^3.21.0",
     "esbuild": "^0.24.0",
     "typescript": "^5.7.0"
   }

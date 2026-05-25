@@ -9,7 +9,7 @@ export function getAuthToken(): string {
 }
 
 export function authHeaders(extra?: Record<string, string>): Record<string, string> {
-  const headers = { "Content-Type": "application/json", ...(extra ?? {}) };
+  const headers: Record<string, string> = { "Content-Type": "application/json", ...(extra ?? {}) };
   const token = getAuthToken();
   if (token) headers.Authorization = `Bearer ${token}`;
   return headers;

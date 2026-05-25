@@ -4,14 +4,28 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-await esbuild.build({
-  entryPoints: [join(__dirname, "src/extension.ts")],
+const common = {
   bundle: true,
-  platform: "node",
-  format: "cjs",
-  outfile: join(__dirname, "extension.js"),
-  external: ["vscode"],
   sourcemap: true,
-  target: "node18",
   logLevel: "info",
-});
+};
+
+await Promise.all([
+  esbuild.build({
+    ...common,
+    entryPoints: [join(__dirname, "src/extension.ts")],
+    platform: "node",
+    format: "cjs",
+    outfile: join(__dirname, "extension.js"),
+    external: ["vscode"],
+    target: "node18",
+  }),
+  esbuild.build({
+    ...common,
+    entryPoints: [join(__dirname, "src/webview/main.ts")],
+    platform: "browser",
+    format: "iife",
+    outfile: join(__dirname, "media/webview.js"),
+    target: "es2022",
+  }),
+]);
