@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { initApiFromContext } from "./api";
 import { cancelExecutionGraph } from "./dispatch/client";
 import { ChatllmPipelineController } from "./panel/panel";
 import { ChatllmChatPanelController } from "./chat/chat-panel";
@@ -14,6 +15,7 @@ let pipeline: ChatllmPipelineController;
 let chat: ChatllmChatPanelController;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  initApiFromContext(context);
   const output = vscode.window.createOutputChannel("Chatllm");
   store = new SpecStore(output);
   await store.initialize(context);

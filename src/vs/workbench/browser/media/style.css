@@ -359,8 +359,7 @@ body {
 	outline-offset: -1px;
 }
 
-/* Chatllm chrome: rounded floating parts with gaps between them.
- * Uses border (not margin) so the workbench grid layout is unchanged. */
+/* Chatllm chrome: rounded floating parts with real gaps between them. */
 
 .monaco-workbench .part.activitybar,
 .monaco-workbench .part.sidebar,
@@ -368,9 +367,7 @@ body {
 .monaco-workbench .part.panel {
 	box-sizing: border-box;
 	border-radius: var(--chatllm-chrome-radius);
-	border-color: var(--vscode-editor-background) !important;
-	border-style: solid !important;
-	border-width: 0;
+	border: none !important;
 }
 
 .monaco-workbench .part.activitybar {
@@ -378,44 +375,62 @@ body {
 }
 
 /* Sidebar on the left: activity bar -> sidebar -> editor */
-.monaco-workbench:not(.sidebar-right) .part.sidebar {
-	border-left-width: var(--chatllm-chrome-gap) !important;
-	border-right-width: var(--chatllm-chrome-gap) !important;
+.monaco-workbench .part.sidebar.left {
+	border-radius: 0 var(--chatllm-chrome-radius) var(--chatllm-chrome-radius) 0;
+	margin-right: var(--chatllm-chrome-gap);
+	width: calc(100% - var(--chatllm-chrome-gap)) !important;
 }
 
 /* Sidebar on the right: editor -> sidebar -> activity bar */
-.monaco-workbench.sidebar-right .part.sidebar {
-	border-left-width: var(--chatllm-chrome-gap) !important;
-	border-right-width: var(--chatllm-chrome-gap) !important;
+.monaco-workbench .part.sidebar.right {
+	border-radius: var(--chatllm-chrome-radius) 0 0 var(--chatllm-chrome-radius);
+	margin-left: var(--chatllm-chrome-gap);
+	width: calc(100% - var(--chatllm-chrome-gap)) !important;
+}
+
+.monaco-workbench .part.activitybar.left {
+	border-radius: var(--chatllm-chrome-radius) 0 0 var(--chatllm-chrome-radius);
+}
+
+.monaco-workbench .part.activitybar.right {
+	border-radius: 0 var(--chatllm-chrome-radius) var(--chatllm-chrome-radius) 0;
 }
 
 /* Auxiliary bar (opposite side of the sidebar) */
-.monaco-workbench:not(.sidebar-right) .part.auxiliarybar {
-	border-left-width: var(--chatllm-chrome-gap) !important;
+.monaco-workbench .part.auxiliarybar.right {
+	margin-left: var(--chatllm-chrome-gap);
+	width: calc(100% - var(--chatllm-chrome-gap)) !important;
 }
 
-.monaco-workbench.sidebar-right .part.auxiliarybar {
-	border-right-width: var(--chatllm-chrome-gap) !important;
+.monaco-workbench .part.auxiliarybar.left {
+	margin-right: var(--chatllm-chrome-gap);
+	width: calc(100% - var(--chatllm-chrome-gap)) !important;
 }
 
 /* Panel position (default bottom) */
 .monaco-workbench .part.panel {
-	border-top-width: var(--chatllm-chrome-gap) !important;
+	margin-top: var(--chatllm-chrome-gap);
+	height: calc(100% - var(--chatllm-chrome-gap)) !important;
 }
 
-.monaco-workbench.panel-position-top .part.panel {
-	border-top-width: 0 !important;
-	border-bottom-width: var(--chatllm-chrome-gap) !important;
+.monaco-workbench .part.panel.top {
+	margin-top: 0;
+	margin-bottom: var(--chatllm-chrome-gap);
+	height: calc(100% - var(--chatllm-chrome-gap)) !important;
 }
 
-.monaco-workbench.panel-position-left .part.panel {
-	border-top-width: 0 !important;
-	border-right-width: var(--chatllm-chrome-gap) !important;
+.monaco-workbench .part.panel.left {
+	margin-top: 0;
+	margin-right: var(--chatllm-chrome-gap);
+	width: calc(100% - var(--chatllm-chrome-gap)) !important;
+	height: 100% !important;
 }
 
-.monaco-workbench.panel-position-right .part.panel {
-	border-top-width: 0 !important;
-	border-left-width: var(--chatllm-chrome-gap) !important;
+.monaco-workbench .part.panel.right {
+	margin-top: 0;
+	margin-left: var(--chatllm-chrome-gap);
+	width: calc(100% - var(--chatllm-chrome-gap)) !important;
+	height: 100% !important;
 }
 
 .monaco-workbench .part.titlebar,

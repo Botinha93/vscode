@@ -7,26 +7,44 @@
     sessions: [],
     activeSession: null,
     activeSessionId: null,
-    modelCatalog: [],
+    project: null,
+    catalog: { models: [], agents: [], skills: [], mcpServers: [], documents: [], maxAgentSpawns: 3 },
+    backendStatus: "unconfigured",
+    apiOrigin: "",
     sidebarOpen: false,
     settingsOpen: false,
     modelPickerOpen: false,
+    agentPickerOpen: false,
     draft: "",
     streaming: false
+  };
+  var PROVIDER_LABELS = {
+    openai: "OpenAI",
+    openrouter: "OpenRouter",
+    google: "Google",
+    ollama: "Ollama",
+    "ollama-internal": "Ollama (internal)",
+    llamacpp: "llama.cpp",
+    lmstudio: "LM Studio",
+    custom: "Custom"
   };
   var root = document.getElementById("root");
   function send(msg) {
     vscode.postMessage(msg);
   }
-  function effectiveOverrides() {
+  function effective() {
     const s = state.settings;
     const o = state.activeSession?.overrides ?? {};
+    const fallbackModel = state.catalog.models.find((m) => m.enabled);
     return {
-      provider: o.provider ?? s?.provider ?? "openai",
-      model: o.model ?? s?.model ?? "gpt-4o-mini",
+      provider: o.provider ?? fallbackModel?.provider,
+      model: o.model ?? fallbackModel?.modelId,
       chatMode: o.chatMode ?? s?.chatMode ?? "normal",
       useRag: o.useRag ?? s?.useRag ?? false,
-      toolsEnabled: o.toolsEnabled ?? s?.toolsEnabled ?? true
+      toolsEnabled: o.toolsEnabled ?? s?.toolsEnabled ?? true,
+      agentIds: o.agentIds ?? [],
+      skillIds: o.skillIds ?? [],
+      mcpServerIds: o.mcpServerIds ?? []
     };
   }
   function setOverrides(partial) {
@@ -38,12 +56,15 @@
       root.innerHTML = shellHtml();
       bindShell();
     }
+    renderProjectBar();
     renderSidebar();
     renderHeader();
     renderTranscript();
     renderComposer();
-    renderSettingsOverlay();
-    renderModelPicker();
+    applySettings();
+    applyModelPicker();
+    applyAgentPicker();
+    renderBackendBanner();
   }
   function shellHtml() {
     return `
@@ -57,13 +78,18 @@
           <button class="ghost-btn" id="sidebar-new">+  New chat</button>
         </div>
         <div class="chat-sidebar-list" id="session-list"></div>
+        <footer class="chat-sidebar-footer">
+          <button class="ghost-btn small" id="sidebar-refresh" title="Refresh chats from Chatllm">\u21BB  Refresh</button>
+        </footer>
       </aside>
       <div class="chat-main">
+        <div class="project-bar" id="project-bar"></div>
         <header class="chat-header">
           <button class="icon-btn" id="sidebar-toggle" title="Show chats" aria-label="Show chats">\u2630</button>
           <div class="chat-title" id="chat-title">New chat</div>
           <button class="icon-btn" id="new-chat" title="New chat" aria-label="New chat">+</button>
         </header>
+        <div class="backend-banner" id="backend-banner" hidden></div>
         <section class="chat-transcript" id="transcript"></section>
         <footer class="chat-composer">
           <div class="composer-chips" id="chip-row"></div>
@@ -75,7 +101,8 @@
         </footer>
       </div>
       <div class="modal-backdrop" id="modal-backdrop" hidden></div>
-      <div class="model-picker" id="model-picker" hidden></div>
+      <div class="popover" id="model-picker" hidden></div>
+      <div class="popover" id="agent-picker" hidden></div>
       <aside class="settings-overlay" id="settings-overlay" hidden>
         <header class="settings-overlay-header">
           <span>Chatllm Settings</span>
@@ -95,12 +122,9 @@
       state.sidebarOpen = false;
       applySidebar();
     });
-    root.querySelector("#sidebar-new")?.addEventListener("click", () => {
-      send({ type: "newSession" });
-    });
-    root.querySelector("#new-chat")?.addEventListener("click", () => {
-      send({ type: "newSession" });
-    });
+    root.querySelector("#sidebar-new")?.addEventListener("click", () => send({ type: "newSession" }));
+    root.querySelector("#sidebar-refresh")?.addEventListener("click", () => send({ type: "refreshSessions" }));
+    root.querySelector("#new-chat")?.addEventListener("click", () => send({ type: "newSession" }));
     root.querySelector("#settings-close")?.addEventListener("click", () => {
       state.settingsOpen = false;
       applySettings();
@@ -109,6 +133,10 @@
       if (state.modelPickerOpen) {
         state.modelPickerOpen = false;
         applyModelPicker();
+      }
+      if (state.agentPickerOpen) {
+        state.agentPickerOpen = false;
+        applyAgentPicker();
       }
       if (state.settingsOpen) {
         state.settingsOpen = false;
@@ -146,43 +174,68 @@
   }
   function autosize(el) {
     el.style.height = "auto";
-    const max = 180;
+    const max = 200;
     el.style.height = Math.min(el.scrollHeight, max) + "px";
   }
   function applySidebar() {
     const el = root.querySelector("#chat-sidebar");
-    if (!el) return;
-    el.toggleAttribute("hidden", !state.sidebarOpen);
+    if (el) el.toggleAttribute("hidden", !state.sidebarOpen);
   }
   function applySettings() {
     const el = root.querySelector("#settings-overlay");
     const backdrop = root.querySelector("#modal-backdrop");
     if (el) el.toggleAttribute("hidden", !state.settingsOpen);
-    if (backdrop) backdrop.toggleAttribute("hidden", !(state.settingsOpen || state.modelPickerOpen));
+    if (backdrop) backdrop.toggleAttribute("hidden", !(state.settingsOpen || state.modelPickerOpen || state.agentPickerOpen));
     if (state.settingsOpen) renderSettings();
   }
   function applyModelPicker() {
     const el = root.querySelector("#model-picker");
     const backdrop = root.querySelector("#modal-backdrop");
     if (el) el.toggleAttribute("hidden", !state.modelPickerOpen);
-    if (backdrop) backdrop.toggleAttribute("hidden", !(state.settingsOpen || state.modelPickerOpen));
+    if (backdrop) backdrop.toggleAttribute("hidden", !(state.settingsOpen || state.modelPickerOpen || state.agentPickerOpen));
     if (state.modelPickerOpen) renderModelPicker();
+  }
+  function applyAgentPicker() {
+    const el = root.querySelector("#agent-picker");
+    const backdrop = root.querySelector("#modal-backdrop");
+    if (el) el.toggleAttribute("hidden", !state.agentPickerOpen);
+    if (backdrop) backdrop.toggleAttribute("hidden", !(state.settingsOpen || state.modelPickerOpen || state.agentPickerOpen));
+    if (state.agentPickerOpen) renderAgentPicker();
+  }
+  function renderProjectBar() {
+    const bar = root.querySelector("#project-bar");
+    if (!bar) return;
+    if (!state.project || state.project.source === "none") {
+      bar.innerHTML = `<span class="project-name">No workspace folder</span>`;
+      return;
+    }
+    const icon = state.project.source === "git" ? "\u2387" : "\u25A2";
+    const subtitle = state.project.source === "git" ? state.project.remoteUrl ?? state.project.id : state.project.rootPath ?? "";
+    const branch = state.project.branch ? ` <span class="project-branch">\u2387 ${escapeHtml(state.project.branch)}</span>` : "";
+    bar.innerHTML = `
+    <span class="project-icon">${icon}</span>
+    <div class="project-text">
+      <div class="project-name">${escapeHtml(state.project.name)}${branch}</div>
+      <div class="project-subtitle" title="${escapeAttr(subtitle)}">${escapeHtml(subtitle)}</div>
+    </div>
+  `;
   }
   function renderSidebar() {
     const list = root.querySelector("#session-list");
     if (!list) return;
     list.innerHTML = "";
     if (state.sessions.length === 0) {
-      list.innerHTML = `<div class="sidebar-empty">No chats yet.</div>`;
+      list.innerHTML = `<div class="sidebar-empty">No chats yet for this project.</div>`;
       return;
     }
     for (const s of state.sessions) {
       const row = document.createElement("div");
       row.className = "session-row" + (s.id === state.activeSessionId ? " active" : "");
       const time = relativeTime(s.updatedAt);
+      const tag = s.remote ? "" : `<span class="session-tag">draft</span>`;
       row.innerHTML = `
       <div class="session-row-main">
-        <div class="session-row-title">${escapeHtml(s.title)}</div>
+        <div class="session-row-title">${escapeHtml(s.title)} ${tag}</div>
         <div class="session-row-meta">${s.messageCount} \xB7 ${time}</div>
       </div>
       <button class="icon-btn session-delete" title="Delete" aria-label="Delete">\u2715</button>
@@ -212,36 +265,62 @@
       if (next != null) send({ type: "renameSession", sessionId: state.activeSession.id, title: next });
     };
   }
+  function renderBackendBanner() {
+    const banner = root.querySelector("#backend-banner");
+    if (!banner) return;
+    if (state.backendStatus === "ok") {
+      banner.toggleAttribute("hidden", true);
+      return;
+    }
+    banner.toggleAttribute("hidden", false);
+    if (state.backendStatus === "unconfigured") {
+      banner.className = "backend-banner unconfigured";
+      banner.innerHTML = `Chatllm API origin is not configured. Set <code>CHATLLM_API_ORIGIN</code> in your environment to start chatting.`;
+    } else if (state.backendStatus === "unauthorized") {
+      banner.className = "backend-banner unauthorized";
+      banner.innerHTML = `VS Code is not signed in to Chatllm. Close this window and reopen the project from the Chatllm desktop app while you are logged in.`;
+    } else {
+      banner.className = "backend-banner unreachable";
+      banner.innerHTML = `Can't reach Chatllm at <code>${escapeHtml(state.apiOrigin)}</code>. <button id="retry-backend" class="link-btn">Retry</button>`;
+      banner.querySelector("#retry-backend")?.addEventListener("click", () => send({ type: "refreshCatalog" }));
+    }
+  }
   function renderTranscript() {
     const transcript = root.querySelector("#transcript");
     if (!transcript) return;
     transcript.innerHTML = "";
     const messages = state.activeSession?.messages ?? [];
     if (messages.length === 0) {
-      transcript.innerHTML = `
-      <div class="empty-state">
-        <h2>What can I build for you?</h2>
-        <p>Type a question, or use a slash command:</p>
-        <div class="empty-commands">
-          <button data-prompt="/spec ">/spec   draft EARS requirements</button>
-          <button data-prompt="/design ">/design   draft design.md</button>
-          <button data-prompt="/tasks ">/tasks   generate task contracts</button>
-        </div>
-      </div>`;
-      for (const b of transcript.querySelectorAll(".empty-commands button")) {
-        b.addEventListener("click", () => {
-          const composer = root.querySelector("#composer");
-          composer.value = b.dataset.prompt ?? "";
-          composer.focus();
-          autosize(composer);
-        });
-      }
+      transcript.appendChild(renderEmptyState());
       return;
     }
     for (const m of messages) {
       transcript.appendChild(renderMessage(m));
     }
     transcript.scrollTop = transcript.scrollHeight;
+  }
+  function renderEmptyState() {
+    const el = document.createElement("div");
+    el.className = "empty-state";
+    const projectLine = state.project && state.project.source !== "none" ? `<div class="empty-project">Chats here live with <strong>${escapeHtml(state.project.name)}</strong>${state.project.source === "git" ? " (git project)" : ""}.</div>` : "";
+    el.innerHTML = `
+    <h2>What can I build for you?</h2>
+    ${projectLine}
+    <div class="empty-commands">
+      <button data-prompt="/spec ">/spec   draft EARS requirements</button>
+      <button data-prompt="/design ">/design   draft design.md</button>
+      <button data-prompt="/tasks ">/tasks   generate task contracts</button>
+    </div>
+  `;
+    for (const b of el.querySelectorAll(".empty-commands button")) {
+      b.addEventListener("click", () => {
+        const composer = root.querySelector("#composer");
+        composer.value = b.dataset.prompt ?? "";
+        composer.focus();
+        autosize(composer);
+      });
+    }
+    return el;
   }
   function renderMessage(message) {
     const turn = document.createElement("article");
@@ -268,12 +347,13 @@
   function renderComposer() {
     const chipRow = root.querySelector("#chip-row");
     if (!chipRow) return;
-    const eff = effectiveOverrides();
-    const desc = lookupModelLabel(eff.provider, eff.model);
+    const eff = effective();
+    const modelLabel = describeModel(eff.provider, eff.model);
+    const agentCount = eff.agentIds.length;
     chipRow.innerHTML = `
-    <button class="chip chip-model" id="chip-model" title="Pick model">
+    <button class="chip chip-model" id="chip-model" title="Pick model for this chat" ${state.catalog.models.length === 0 ? "disabled" : ""}>
       <span class="chip-icon">\u25CF</span>
-      <span>${escapeHtml(desc)}</span>
+      <span>${escapeHtml(modelLabel)}</span>
       <span class="chip-caret">\u25BE</span>
     </button>
     <button class="chip${eff.chatMode === "agent" ? " chip-on" : ""}" id="chip-mode" title="Toggle agent mode">
@@ -282,8 +362,11 @@
     <button class="chip${eff.toolsEnabled ? " chip-on" : ""}" id="chip-tools" title="Toggle tools">
       \u2692 Tools
     </button>
-    <button class="chip${eff.useRag ? " chip-on" : ""}" id="chip-rag" title="Toggle RAG">
+    <button class="chip${eff.useRag ? " chip-on" : ""}" id="chip-rag" title="Toggle RAG (uses indexed documents)">
       \u2630 RAG
+    </button>
+    <button class="chip${agentCount > 0 ? " chip-on" : ""}" id="chip-agents" title="Attach agents from Chatllm" ${state.catalog.agents.length === 0 ? "disabled" : ""}>
+      \u269B Agents${agentCount ? ` (${agentCount})` : ""}
     </button>
     <span class="composer-spacer"></span>
     <button class="chip chip-ghost" id="chip-settings" title="Open settings">\u2699</button>
@@ -301,6 +384,10 @@
     });
     chipRow.querySelector("#chip-rag")?.addEventListener("click", () => {
       setOverrides({ useRag: !eff.useRag });
+    });
+    chipRow.querySelector("#chip-agents")?.addEventListener("click", () => {
+      state.agentPickerOpen = !state.agentPickerOpen;
+      applyAgentPicker();
     });
     chipRow.querySelector("#chip-settings")?.addEventListener("click", () => {
       state.settingsOpen = true;
@@ -343,74 +430,118 @@
   function renderModelPicker() {
     const el = root.querySelector("#model-picker");
     if (!el || !state.modelPickerOpen) return;
-    const eff = effectiveOverrides();
-    const groups = state.modelCatalog.filter((g) => g.models.length > 0);
-    el.innerHTML = `
-    <header class="model-picker-header">
-      <span>Choose model for this chat</span>
-      <button class="icon-btn" id="picker-close" title="Close" aria-label="Close">\u2715</button>
-    </header>
-    <div class="model-picker-body">
-      ${groups.map((g) => `
-        <section class="provider-group">
-          <h4>${escapeHtml(g.label)}</h4>
-          <ul>
-            ${g.models.map((m) => {
-      const selected = m.provider === eff.provider && m.modelId === eff.model;
-      return `<li class="model-row${selected ? " selected" : ""}" data-provider="${m.provider}" data-model="${escapeAttr(m.modelId)}">
-                <div class="model-row-title">${escapeHtml(m.name)}</div>
-                <div class="model-row-detail">${escapeHtml(m.detail ?? "")}</div>
-              </li>`;
-    }).join("")}
-          </ul>
-        </section>
-      `).join("")}
-      <section class="provider-group">
-        <h4>Use default</h4>
-        <ul>
-          <li class="model-row" data-clear="1">
-            <div class="model-row-title">Reset to workspace default</div>
-            <div class="model-row-detail">${escapeHtml(state.settings?.provider ?? "")} \xB7 ${escapeHtml(state.settings?.model ?? "")}</div>
-          </li>
-        </ul>
-      </section>
-    </div>
-  `;
+    const eff = effective();
+    const grouped = groupModels(state.catalog.models);
+    if (grouped.length === 0) {
+      el.innerHTML = `
+      <header class="popover-header">
+        <span>Choose model</span>
+        <button class="icon-btn" id="picker-close">\u2715</button>
+      </header>
+      <div class="popover-empty">
+        No models configured in Chatllm. Open the Chatllm app and add a model under Settings \u2192 Models.
+      </div>
+    `;
+    } else {
+      el.innerHTML = `
+      <header class="popover-header">
+        <span>Model for this chat</span>
+        <button class="icon-btn" id="picker-close">\u2715</button>
+      </header>
+      <div class="popover-body">
+        ${grouped.map((g) => `
+          <section class="popover-group">
+            <h4>${escapeHtml(g.label)}</h4>
+            <ul>
+              ${g.models.map((m) => {
+        const selected = m.provider === eff.provider && m.modelId === eff.model;
+        const cap = (m.capabilities ?? []).slice(0, 3).join(", ");
+        return `<li class="popover-row${selected ? " selected" : ""}" data-provider="${escapeAttr(m.provider)}" data-model="${escapeAttr(m.modelId)}">
+                  <div class="popover-row-title">${escapeHtml(m.displayName)}</div>
+                  <div class="popover-row-detail">${escapeHtml(cap || m.modelId)}</div>
+                </li>`;
+      }).join("")}
+            </ul>
+          </section>
+        `).join("")}
+      </div>
+    `;
+    }
     el.querySelector("#picker-close")?.addEventListener("click", () => {
       state.modelPickerOpen = false;
       applyModelPicker();
     });
-    for (const li of el.querySelectorAll(".model-row")) {
+    for (const li of el.querySelectorAll(".popover-row")) {
       li.addEventListener("click", () => {
-        if (li.dataset.clear) {
-          setOverrides({ provider: void 0, model: void 0 });
-        } else {
-          setOverrides({
-            provider: li.dataset.provider,
-            model: li.dataset.model
-          });
-        }
+        setOverrides({
+          provider: li.dataset.provider,
+          model: li.dataset.model
+        });
         state.modelPickerOpen = false;
         applyModelPicker();
       });
     }
   }
-  function renderSettingsOverlay() {
-    applySettings();
+  function renderAgentPicker() {
+    const el = root.querySelector("#agent-picker");
+    if (!el || !state.agentPickerOpen) return;
+    const eff = effective();
+    if (state.catalog.agents.length === 0) {
+      el.innerHTML = `
+      <header class="popover-header">
+        <span>Agents</span>
+        <button class="icon-btn" id="agent-close">\u2715</button>
+      </header>
+      <div class="popover-empty">No agents configured in Chatllm.</div>
+    `;
+    } else {
+      el.innerHTML = `
+      <header class="popover-header">
+        <span>Agents for this chat</span>
+        <button class="icon-btn" id="agent-close">\u2715</button>
+      </header>
+      <div class="popover-body">
+        <ul>
+          ${state.catalog.agents.map((a) => {
+        const selected = eff.agentIds.includes(a.id);
+        return `<li class="popover-row${selected ? " selected" : ""}" data-id="${escapeAttr(a.id)}">
+              <div class="popover-row-title">${escapeHtml(a.name)}</div>
+              <div class="popover-row-detail">${escapeHtml(a.description || "")}</div>
+            </li>`;
+      }).join("")}
+        </ul>
+      </div>
+    `;
+    }
+    el.querySelector("#agent-close")?.addEventListener("click", () => {
+      state.agentPickerOpen = false;
+      applyAgentPicker();
+    });
+    for (const li of el.querySelectorAll(".popover-row")) {
+      li.addEventListener("click", () => {
+        const id = li.dataset.id;
+        const current = new Set(eff.agentIds);
+        if (current.has(id)) current.delete(id);
+        else current.add(id);
+        setOverrides({ agentIds: [...current] });
+      });
+    }
   }
   function renderSettings() {
     const grid = root.querySelector("#settings-form");
     if (!grid || !state.settings) return;
     const s = state.settings;
+    const projectLine = state.project && state.project.source !== "none" ? `<div class="hint">Active project: <strong>${escapeHtml(state.project.name)}</strong> &mdash; ${escapeHtml(state.project.source === "git" ? state.project.remoteUrl ?? state.project.id : state.project.rootPath ?? "")}</div>` : "";
     grid.innerHTML = `
-    <h2>Defaults</h2>
-    <label for="set-provider">Provider</label>
-    <select id="set-provider" data-key="provider">
-      ${["openai", "openrouter", "google", "ollama", "llamacpp", "lmstudio", "custom"].map((p) => `<option value="${p}" ${p === s.provider ? "selected" : ""}>${p}</option>`).join("")}
-    </select>
-    <label for="set-model">Default model</label>
-    <input id="set-model" data-key="model" type="text" value="${escapeAttr(s.model)}" />
-    <label for="set-mode">Model selection</label>
+    <h2>Connection</h2>
+    <label>API origin</label>
+    <div class="value">${escapeHtml(state.apiOrigin || "(not configured)")}</div>
+    <label>Status</label>
+    <div class="value status-${state.backendStatus}">${escapeHtml(state.backendStatus)}</div>
+    ${projectLine}
+
+    <h2>Local defaults</h2>
+    <label for="set-mode">Model selection mode</label>
     <select id="set-mode" data-key="modelSelection">
       <option value="manual" ${s.modelSelection === "manual" ? "selected" : ""}>manual</option>
       <option value="auto" ${s.modelSelection === "auto" ? "selected" : ""}>auto</option>
@@ -420,28 +551,12 @@
       <option value="normal" ${s.chatMode === "normal" ? "selected" : ""}>normal</option>
       <option value="agent" ${s.chatMode === "agent" ? "selected" : ""}>agent</option>
     </select>
-
-    <h2>Default behavior</h2>
     <label for="set-rag">RAG by default</label>
     <div><input id="set-rag" data-key="useRag" type="checkbox" ${s.useRag ? "checked" : ""} /></div>
     <label for="set-tools">Tools by default</label>
     <div><input id="set-tools" data-key="toolsEnabled" type="checkbox" ${s.toolsEnabled ? "checked" : ""} /></div>
-    <label for="set-spawns">Max agent spawns</label>
-    <input id="set-spawns" data-key="maxAgentSpawns" type="number" min="0" max="32" value="${s.maxAgentSpawns}" />
-
-    <h2>Wiring</h2>
-    <label for="set-agents">Agents</label>
-    <input id="set-agents" data-key="agentIds" data-list="1" type="text" value="${escapeAttr(s.agentIds.join(", "))}" placeholder="agent-1, agent-2" />
-    <label for="set-mcps">MCP servers</label>
-    <input id="set-mcps" data-key="mcpServerIds" data-list="1" type="text" value="${escapeAttr(s.mcpServerIds.join(", "))}" placeholder="server-1, server-2" />
-    <label for="set-skills">Skills</label>
-    <input id="set-skills" data-key="skillIds" data-list="1" type="text" value="${escapeAttr(s.skillIds.join(", "))}" placeholder="skill-1, skill-2" />
-    <label for="set-docs">Documents</label>
-    <input id="set-docs" data-key="documentIds" data-list="1" type="text" value="${escapeAttr(s.documentIds.join(", "))}" placeholder="doc-1, doc-2" />
-
-    <h2>Prompts</h2>
-    <label for="set-system">System prompt</label>
-    <textarea id="set-system" data-key="systemPrompt">${escapeHtml(s.systemPrompt)}</textarea>
+    <label for="set-system">Local system prompt</label>
+    <textarea id="set-system" data-key="systemPrompt" placeholder="(empty)">${escapeHtml(s.systemPrompt)}</textarea>
 
     <h2>Integrations</h2>
     <label for="set-copilot">GitHub Copilot</label>
@@ -450,7 +565,7 @@
       <span class="hint inline">Re-enable the bundled Copilot extension and the native Chat view. Toggling prompts a window reload.</span>
     </div>
 
-    <div class="hint">Defaults persist as <code>chatllm.*</code> user settings. Per-chat picks (model, mode, tools, RAG) only affect the current conversation.</div>
+    <div class="hint">Models, agents, MCP servers, and skills are managed in the Chatllm app. Per-chat picks are stored on the conversation.</div>
   `;
     for (const input of grid.querySelectorAll("[data-key]")) {
       input.addEventListener("change", () => emitSettingChange(input));
@@ -460,18 +575,28 @@
     const key = input.dataset.key;
     let value;
     if (input instanceof HTMLInputElement && input.type === "checkbox") value = input.checked;
-    else if (input instanceof HTMLInputElement && input.type === "number") value = Number(input.value);
-    else if (input.dataset.list) value = input.value.split(",").map((v) => v.trim()).filter(Boolean);
     else value = input.value;
     send({ type: "updateSetting", key, value });
   }
-  function lookupModelLabel(provider, modelId) {
-    for (const g of state.modelCatalog) {
-      if (g.provider !== provider) continue;
-      const m = g.models.find((x) => x.modelId === modelId);
-      if (m) return m.name;
+  function groupModels(models) {
+    const map = /* @__PURE__ */ new Map();
+    for (const m of models) {
+      const list = map.get(m.provider) ?? [];
+      list.push(m);
+      map.set(m.provider, list);
     }
-    return `${provider} \xB7 ${modelId}`;
+    return Array.from(map.entries()).map(([provider, group]) => ({
+      provider,
+      label: PROVIDER_LABELS[provider] ?? provider,
+      models: [...group].sort((a, b) => a.displayName.localeCompare(b.displayName))
+    })).sort((a, b) => a.label.localeCompare(b.label));
+  }
+  function describeModel(provider, modelId) {
+    if (!provider || !modelId) return state.catalog.models.length === 0 ? "No models configured" : "Pick a model";
+    for (const m of state.catalog.models) {
+      if (m.provider === provider && m.modelId === modelId) return m.displayName;
+    }
+    return `${PROVIDER_LABELS[provider] ?? provider} \xB7 ${modelId}`;
   }
   function relativeTime(ts) {
     const diff = Date.now() - ts;
@@ -484,7 +609,8 @@
     return `${d}d`;
   }
   function escapeHtml(value) {
-    return value.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] ?? ch);
+    if (value == null) return "";
+    return String(value).replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] ?? ch);
   }
   function escapeAttr(value) {
     return escapeHtml(value);
@@ -534,7 +660,10 @@
         state.sessions = msg.sessions;
         state.activeSession = msg.activeSession;
         state.activeSessionId = msg.activeSessionId;
-        state.modelCatalog = msg.modelCatalog;
+        state.project = msg.project;
+        state.catalog = msg.catalog;
+        state.backendStatus = msg.backendStatus;
+        state.apiOrigin = msg.apiOrigin;
         state.streaming = false;
         render();
         break;
@@ -542,6 +671,14 @@
         state.settings = msg.settings;
         renderComposer();
         if (state.settingsOpen) renderSettings();
+        break;
+      case "catalog":
+        state.catalog = msg.catalog;
+        state.backendStatus = msg.backendStatus;
+        renderComposer();
+        renderBackendBanner();
+        if (state.modelPickerOpen) renderModelPicker();
+        if (state.agentPickerOpen) renderAgentPicker();
         break;
       case "openSettings":
         state.settingsOpen = true;
@@ -575,12 +712,9 @@
       case "messageComplete":
         if (state.activeSession && state.activeSession.id === msg.sessionId) {
           const m = state.activeSession.messages.find((x) => x.id === msg.messageId);
-          if (m) {
-            m.status = "complete";
-            if (msg.conversationId) state.activeSession.conversationId = msg.conversationId;
-            rerenderMessageInDom(msg.messageId);
-          }
-          state.streaming = state.activeSession.messages.some((x) => x.status === "streaming");
+          if (m) m.status = "complete";
+          if (m) rerenderMessageInDom(msg.messageId);
+          state.streaming = false;
           renderComposer();
         }
         break;

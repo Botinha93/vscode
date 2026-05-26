@@ -65,15 +65,6 @@
 	justify-content: center;
 }
 
-.monaco-workbench .activitybar.left > .content :not(.monaco-menu) > .monaco-action-bar .action-label.codicon {
-	justify-content: flex-start;
-}
-
-.monaco-workbench .activitybar.left > .content :not(.monaco-menu) > .monaco-action-bar .action-label.uri-icon {
-	mask-position: 0 50%;
-	-webkit-mask-position: 0 50%;
-}
-
 .monaco-workbench .activitybar > .content :not(.monaco-menu) > .monaco-action-bar .action-item.active .action-label.codicon,
 .monaco-workbench .activitybar > .content :not(.monaco-menu) > .monaco-action-bar .action-item:focus .action-label.codicon,
 .monaco-workbench .activitybar > .content :not(.monaco-menu) > .monaco-action-bar .action-item:hover .action-label.codicon {

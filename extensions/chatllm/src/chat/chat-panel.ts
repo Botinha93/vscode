@@ -1,24 +1,53 @@
 import * as vscode from "vscode";
+import {
+  addConversationToFolder,
+  createConversation,
+  createFolder,
+  deleteConversation,
+  fetchConfig,
+  getApiOrigin,
+  listConversationMessages,
+  listConversations,
+  listDocuments,
+  listFolders,
+  patchConversation,
+  probeBackend,
+} from "../api";
 import { onSettingsChange, readSettings, writeSetting, type ChatllmSettings } from "../settings";
-import { ALL_PROVIDERS, listKnownModels, describeModel } from "./models";
+import { detectProjectIdentity, projectFolderName, type ProjectIdentity } from "../project/identity";
 import { SPEC_SYSTEM_PROMPTS, extractTaskBlocks } from "./commands";
+import { defaultEnabledModel, findConfiguredModel, toWireProvider } from "./models";
 import { streamChat } from "./stream-client";
-import type { ChatRequest, Provider } from "./types";
-import { parseTaskContract } from "../spec/schema";
-import type { SpecStore } from "../spec/store";
-import { regenerateTasksIndex, writeTaskContract, writeTextFile } from "../spec/writer";
 import type {
+  AppConfig,
+  ChatRequest,
+  ConfiguredProvider,
+  Conversation,
+  ConversationMessage,
+  Provider,
+  SharingFolder,
+} from "./types";
+import type {
+  BackendCatalog,
+  BackendStatus,
   ChatHostToWebview,
   ChatMessage,
   ChatOverrides,
   ChatSession,
   ChatWebviewToHost,
-  ProviderModelGroup,
+  ProjectInfo,
   SessionSummary,
 } from "./chat-protocol";
+import { parseTaskContract } from "../spec/schema";
+import type { SpecStore } from "../spec/store";
+import { regenerateTasksIndex, writeTaskContract, writeTextFile } from "../spec/writer";
 
-const STORAGE_KEY = "chatllm.chat.sessions";
-const ACTIVE_KEY = "chatllm.chat.activeSession";
+const OVERRIDES_STORAGE_KEY = "chatllm.chat.overrides";
+const ACTIVE_SESSION_STORAGE_KEY = "chatllm.chat.activeSession";
+
+interface OverridesCache {
+  [conversationId: string]: ChatOverrides;
+}
 
 interface ActiveStream {
   abort: AbortController;
@@ -30,16 +59,29 @@ export class ChatllmChatPanelController implements vscode.WebviewViewProvider, v
 
   private view?: vscode.WebviewView;
   private readonly disposables: vscode.Disposable[] = [];
-  private sessions = new Map<string, ChatSession>();
-  private activeSessionId: string | null = null;
   private readonly streams = new Map<string, ActiveStream>();
+
+  private project: ProjectIdentity = { id: "none", source: "none", name: "" };
+  private projectFolderId: string | null = null;
+  private projectFolder?: SharingFolder;
+  private catalog: BackendCatalog = emptyCatalog();
+  private backendStatus: BackendStatus = "unconfigured";
+
+  private conversations = new Map<string, Conversation>();
+  private messagesCache = new Map<string, ConversationMessage[]>();
+  private overrides: OverridesCache = {};
+
+  /** Locally-staged session for "new chat" before the first message creates it on the backend. */
+  private draftSession: ChatSession | null = null;
+  private activeSessionId: string | null = null;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
     private readonly store: SpecStore,
     private readonly output: vscode.OutputChannel,
   ) {
-    this.loadSessions();
+    this.overrides = this.context.workspaceState.get<OverridesCache>(OVERRIDES_STORAGE_KEY, {});
+    this.activeSessionId = this.context.workspaceState.get<string | null>(ACTIVE_SESSION_STORAGE_KEY, null);
     this.disposables.push(
       onSettingsChange((settings) => this.broadcast({ type: "settings", settings })),
     );
@@ -57,13 +99,12 @@ export class ChatllmChatPanelController implements vscode.WebviewViewProvider, v
     void vscode.commands.executeCommand(`${ChatllmChatPanelController.viewType}.focus`);
   }
 
-  async newSession(): Promise<ChatSession> {
-    const session = this.createSession();
-    this.activeSessionId = session.id;
-    await this.persist();
+  async newSession(): Promise<void> {
+    this.draftSession = this.makeDraft();
+    this.activeSessionId = this.draftSession.id;
+    await this.persistActive();
     this.broadcastSessions();
     this.broadcastActiveSession();
-    return session;
   }
 
   openSettings(): void {
@@ -76,6 +117,10 @@ export class ChatllmChatPanelController implements vscode.WebviewViewProvider, v
     for (const s of this.streams.values()) s.abort.abort();
     this.streams.clear();
   }
+
+  // ---------------------------------------------------------------------------
+  // Webview plumbing
+  // ---------------------------------------------------------------------------
 
   private webviewOptions(): vscode.WebviewPanelOptions & vscode.WebviewOptions {
     return {
@@ -97,84 +142,6 @@ export class ChatllmChatPanelController implements vscode.WebviewViewProvider, v
     this.disposables.push(sub);
   }
 
-  private loadSessions(): void {
-    const raw = this.context.workspaceState.get<ChatSession[]>(STORAGE_KEY, []);
-    this.sessions.clear();
-    for (const s of raw) {
-      this.sessions.set(s.id, this.normalizeSession(s));
-    }
-    this.activeSessionId = this.context.workspaceState.get<string | null>(ACTIVE_KEY, null);
-    if (this.activeSessionId && !this.sessions.has(this.activeSessionId)) {
-      this.activeSessionId = null;
-    }
-  }
-
-  private normalizeSession(session: ChatSession): ChatSession {
-    return {
-      ...session,
-      messages: session.messages.map((m) => ({
-        ...m,
-        status: m.status === "streaming" || m.status === "pending" ? "complete" : (m.status ?? "complete"),
-      })),
-      overrides: session.overrides ?? {},
-    };
-  }
-
-  private async persist(): Promise<void> {
-    const list = Array.from(this.sessions.values()).sort((a, b) => b.updatedAt - a.updatedAt);
-    await this.context.workspaceState.update(STORAGE_KEY, list);
-    await this.context.workspaceState.update(ACTIVE_KEY, this.activeSessionId);
-  }
-
-  private createSession(): ChatSession {
-    const now = Date.now();
-    const session: ChatSession = {
-      id: randomId(),
-      title: "New chat",
-      messages: [],
-      overrides: {},
-      createdAt: now,
-      updatedAt: now,
-    };
-    this.sessions.set(session.id, session);
-    return session;
-  }
-
-  private getOrCreateActive(): ChatSession {
-    if (this.activeSessionId) {
-      const s = this.sessions.get(this.activeSessionId);
-      if (s) return s;
-    }
-    const created = this.createSession();
-    this.activeSessionId = created.id;
-    return created;
-  }
-
-  private sessionSummaries(): SessionSummary[] {
-    return Array.from(this.sessions.values())
-      .sort((a, b) => b.updatedAt - a.updatedAt)
-      .map((s) => ({
-        id: s.id,
-        title: s.title,
-        updatedAt: s.updatedAt,
-        messageCount: s.messages.length,
-        overrides: s.overrides,
-      }));
-  }
-
-  private modelCatalog(): ProviderModelGroup[] {
-    return ALL_PROVIDERS.map((provider) => ({
-      provider,
-      label: providerLabel(provider),
-      models: listKnownModels(provider).map((m) => ({
-        provider,
-        modelId: m.id,
-        name: m.name,
-        detail: m.detail,
-      })),
-    }));
-  }
-
   private broadcast(message: ChatHostToWebview): void {
     this.view?.webview.postMessage(message);
   }
@@ -188,7 +155,7 @@ export class ChatllmChatPanelController implements vscode.WebviewViewProvider, v
   }
 
   private broadcastActiveSession(): void {
-    const session = this.activeSessionId ? this.sessions.get(this.activeSessionId) : null;
+    const session = this.activeSession();
     if (session) this.broadcast({ type: "session", session });
   }
 
@@ -198,49 +165,18 @@ export class ChatllmChatPanelController implements vscode.WebviewViewProvider, v
         case "ready":
           await this.sendInit();
           break;
-        case "newSession": {
-          const s = this.createSession();
-          this.activeSessionId = s.id;
-          await this.persist();
-          this.broadcastSessions();
-          this.broadcastActiveSession();
+        case "newSession":
+          await this.newSession();
           break;
-        }
-        case "openSession": {
-          if (this.sessions.has(message.sessionId)) {
-            this.activeSessionId = message.sessionId;
-            await this.persist();
-            this.broadcastSessions();
-            this.broadcastActiveSession();
-          }
+        case "openSession":
+          await this.openSession(message.sessionId);
           break;
-        }
-        case "deleteSession": {
-          const stream = this.streams.get(message.sessionId);
-          if (stream) {
-            stream.abort.abort();
-            this.streams.delete(message.sessionId);
-          }
-          this.sessions.delete(message.sessionId);
-          if (this.activeSessionId === message.sessionId) {
-            const next = this.sessionSummaries()[0];
-            this.activeSessionId = next?.id ?? null;
-          }
-          await this.persist();
-          this.broadcastSessions();
-          this.broadcastActiveSession();
+        case "deleteSession":
+          await this.removeSession(message.sessionId);
           break;
-        }
-        case "renameSession": {
-          const s = this.sessions.get(message.sessionId);
-          if (s) {
-            s.title = message.title.trim() || "Untitled";
-            s.updatedAt = Date.now();
-            await this.persist();
-            this.broadcastSessions();
-          }
+        case "renameSession":
+          await this.renameSession(message.sessionId, message.title);
           break;
-        }
         case "sendMessage":
           await this.sendChat(message.sessionId, message.content);
           break;
@@ -252,17 +188,15 @@ export class ChatllmChatPanelController implements vscode.WebviewViewProvider, v
           }
           break;
         }
-        case "setOverrides": {
-          const s = this.sessions.get(message.sessionId);
-          if (s) {
-            s.overrides = { ...s.overrides, ...message.overrides };
-            s.updatedAt = Date.now();
-            await this.persist();
-            this.broadcastSessions();
-            this.broadcastActiveSession();
-          }
+        case "setOverrides":
+          await this.updateOverrides(message.sessionId, message.overrides);
           break;
-        }
+        case "refreshCatalog":
+          await this.refreshCatalog();
+          break;
+        case "refreshSessions":
+          await this.refreshConversations();
+          break;
         case "updateSetting":
           await writeSetting(message.key as keyof ChatllmSettings, message.value as ChatllmSettings[keyof ChatllmSettings]);
           break;
@@ -280,21 +214,349 @@ export class ChatllmChatPanelController implements vscode.WebviewViewProvider, v
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Initialisation: project, catalog, conversations
+  // ---------------------------------------------------------------------------
+
   private async sendInit(): Promise<void> {
-    if (!this.activeSessionId || !this.sessions.has(this.activeSessionId)) {
-      this.getOrCreateActive();
-      await this.persist();
+    this.project = await detectProjectIdentity();
+    await this.refreshCatalog();
+    await this.ensureProjectFolder();
+    await this.refreshConversations();
+    if (!this.activeSession()) {
+      this.draftSession = this.makeDraft();
+      this.activeSessionId = this.draftSession.id;
+      await this.persistActive();
     }
-    const active = this.activeSessionId ? this.sessions.get(this.activeSessionId) ?? null : null;
     this.broadcast({
       type: "init",
       settings: readSettings(),
       sessions: this.sessionSummaries(),
       activeSessionId: this.activeSessionId,
-      activeSession: active,
-      modelCatalog: this.modelCatalog(),
+      activeSession: this.activeSession(),
+      project: this.projectInfo(),
+      catalog: this.catalog,
+      backendStatus: this.backendStatus,
+      apiOrigin: getApiOrigin(),
     });
   }
+
+  private async refreshCatalog(): Promise<void> {
+    const reachability = await probeBackend();
+    if (reachability === "unconfigured") {
+      this.backendStatus = "unconfigured";
+      this.catalog = emptyCatalog();
+      this.broadcast({ type: "catalog", catalog: this.catalog, backendStatus: this.backendStatus });
+      return;
+    }
+    if (reachability === "unauthorized") {
+      this.backendStatus = "unauthorized";
+      this.catalog = emptyCatalog();
+      this.broadcast({ type: "catalog", catalog: this.catalog, backendStatus: this.backendStatus });
+      return;
+    }
+    if (reachability === "unreachable") {
+      this.backendStatus = "unreachable";
+      this.catalog = emptyCatalog();
+      this.broadcast({ type: "catalog", catalog: this.catalog, backendStatus: this.backendStatus });
+      return;
+    }
+    try {
+      const [config, documents] = await Promise.all([fetchConfig(), listDocuments().catch(() => [])]);
+      this.catalog = catalogFromConfig(config, documents);
+      this.backendStatus = "ok";
+    } catch (err) {
+      this.output.appendLine(`[chat.catalog] ${err instanceof Error ? err.message : String(err)}`);
+      this.catalog = emptyCatalog();
+      this.backendStatus = "unreachable";
+    }
+    this.broadcast({ type: "catalog", catalog: this.catalog, backendStatus: this.backendStatus });
+  }
+
+  private async ensureProjectFolder(): Promise<void> {
+    if (this.backendStatus !== "ok") return;
+    if (this.project.source === "none") {
+      this.projectFolder = undefined;
+      this.projectFolderId = null;
+      return;
+    }
+    const folderName = projectFolderName(this.project);
+    try {
+      const folders = await listFolders("mine");
+      let folder = folders.find((f) => f.name === folderName);
+      if (!folder) {
+        folder = await createFolder({ name: folderName, icon: this.project.source === "git" ? "git" : "folder" });
+      }
+      this.projectFolder = folder;
+      this.projectFolderId = folder.id;
+    } catch (err) {
+      this.output.appendLine(`[chat.folder] ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  private async refreshConversations(): Promise<void> {
+    if (this.backendStatus !== "ok") {
+      this.broadcastSessions();
+      return;
+    }
+    try {
+      const all = await listConversations();
+      const folderName = projectFolderName(this.project);
+      const folderId = this.projectFolderId;
+      const owned = all.filter((c) => {
+        if (this.project.source === "none") return true;
+        if (c.folder === folderName) return true;
+        if (folderId && c.folderIds?.includes(folderId)) return true;
+        return false;
+      });
+      this.conversations.clear();
+      for (const c of owned) this.conversations.set(c.id, c);
+      if (this.activeSessionId && this.activeSessionId.startsWith("draft:")) {
+        // keep current draft
+      } else if (!this.activeSessionId || !this.conversations.has(this.activeSessionId)) {
+        const next = [...this.conversations.values()].sort((a, b) =>
+          new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+        )[0];
+        this.activeSessionId = next?.id ?? null;
+        await this.persistActive();
+      }
+    } catch (err) {
+      this.output.appendLine(`[chat.conversations] ${err instanceof Error ? err.message : String(err)}`);
+    }
+    this.broadcastSessions();
+    if (this.activeSessionId && this.conversations.has(this.activeSessionId)) {
+      await this.ensureMessagesLoaded(this.activeSessionId);
+      this.broadcastActiveSession();
+    }
+  }
+
+  private async ensureMessagesLoaded(conversationId: string): Promise<void> {
+    if (this.messagesCache.has(conversationId)) return;
+    try {
+      const messages = await listConversationMessages(conversationId);
+      this.messagesCache.set(conversationId, messages);
+    } catch (err) {
+      this.output.appendLine(`[chat.messages] ${err instanceof Error ? err.message : String(err)}`);
+      this.messagesCache.set(conversationId, []);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Session view models
+  // ---------------------------------------------------------------------------
+
+  private makeDraft(): ChatSession {
+    const now = Date.now();
+    return {
+      id: `draft:${randomId()}`,
+      title: "New chat",
+      messages: [],
+      overrides: {},
+      remote: false,
+      createdAt: now,
+      updatedAt: now,
+    };
+  }
+
+  private sessionSummaries(): SessionSummary[] {
+    const summaries: SessionSummary[] = [];
+    if (this.draftSession) {
+      summaries.push({
+        id: this.draftSession.id,
+        title: this.draftSession.title,
+        updatedAt: this.draftSession.updatedAt,
+        messageCount: this.draftSession.messages.length,
+        overrides: this.draftSession.overrides,
+        remote: false,
+      });
+    }
+    for (const c of this.conversations.values()) {
+      summaries.push({
+        id: c.id,
+        conversationId: c.id,
+        title: c.title || "Untitled",
+        updatedAt: new Date(c.updatedAt).getTime() || Date.now(),
+        messageCount: this.messagesCache.get(c.id)?.length ?? 0,
+        overrides: this.conversationOverrides(c),
+        remote: true,
+      });
+    }
+    summaries.sort((a, b) => b.updatedAt - a.updatedAt);
+    return summaries;
+  }
+
+  private activeSession(): ChatSession | null {
+    if (!this.activeSessionId) return null;
+    if (this.activeSessionId.startsWith("draft:")) return this.draftSession;
+    const conv = this.conversations.get(this.activeSessionId);
+    if (!conv) return null;
+    return this.sessionFromConversation(conv);
+  }
+
+  private sessionFromConversation(conv: Conversation): ChatSession {
+    const cached = this.messagesCache.get(conv.id) ?? [];
+    const messages: ChatMessage[] = cached
+      .filter((m) => m.role === "user" || m.role === "assistant")
+      .map((m) => ({
+        id: m.id,
+        role: m.role as "user" | "assistant",
+        content: m.content,
+        createdAt: new Date(m.createdAt).getTime() || Date.now(),
+        status: "complete",
+      }));
+    return {
+      id: conv.id,
+      conversationId: conv.id,
+      title: conv.title || "Untitled",
+      messages,
+      overrides: this.conversationOverrides(conv),
+      remote: true,
+      createdAt: new Date(conv.createdAt).getTime() || Date.now(),
+      updatedAt: new Date(conv.updatedAt).getTime() || Date.now(),
+    };
+  }
+
+  private conversationOverrides(conv: Conversation): ChatOverrides {
+    const stored = this.overrides[conv.id] ?? {};
+    return {
+      provider: (conv.provider as ConfiguredProvider) ?? stored.provider,
+      model: conv.model ?? stored.model,
+      chatMode: conv.chatMode ?? stored.chatMode,
+      useRag: stored.useRag,
+      toolsEnabled: stored.toolsEnabled,
+      agentIds: conv.agentIds ?? stored.agentIds,
+      skillIds: stored.skillIds,
+      mcpServerIds: stored.mcpServerIds,
+    };
+  }
+
+  private projectInfo(): ProjectInfo {
+    return {
+      id: this.project.id,
+      source: this.project.source,
+      name: this.project.name,
+      remoteUrl: this.project.remoteUrl,
+      branch: this.project.branch,
+      rootPath: this.project.rootPath,
+      folderName: projectFolderName(this.project),
+    };
+  }
+
+  private async persistActive(): Promise<void> {
+    await this.context.workspaceState.update(ACTIVE_SESSION_STORAGE_KEY, this.activeSessionId);
+  }
+
+  private async persistOverrides(): Promise<void> {
+    await this.context.workspaceState.update(OVERRIDES_STORAGE_KEY, this.overrides);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Session operations
+  // ---------------------------------------------------------------------------
+
+  private async openSession(id: string): Promise<void> {
+    if (id.startsWith("draft:")) {
+      if (!this.draftSession || this.draftSession.id !== id) this.draftSession = this.makeDraft();
+      this.activeSessionId = this.draftSession.id;
+      await this.persistActive();
+      this.broadcastSessions();
+      this.broadcastActiveSession();
+      return;
+    }
+    if (!this.conversations.has(id)) {
+      await this.refreshConversations();
+      if (!this.conversations.has(id)) return;
+    }
+    this.activeSessionId = id;
+    await this.persistActive();
+    await this.ensureMessagesLoaded(id);
+    this.broadcastSessions();
+    this.broadcastActiveSession();
+  }
+
+  private async removeSession(id: string): Promise<void> {
+    if (id.startsWith("draft:")) {
+      if (this.draftSession?.id === id) {
+        this.draftSession = null;
+        if (this.activeSessionId === id) this.activeSessionId = null;
+      }
+    } else if (this.conversations.has(id)) {
+      try {
+        await deleteConversation(id);
+      } catch (err) {
+        this.output.appendLine(`[chat.delete] ${err instanceof Error ? err.message : String(err)}`);
+      }
+      this.conversations.delete(id);
+      this.messagesCache.delete(id);
+      delete this.overrides[id];
+      await this.persistOverrides();
+      if (this.activeSessionId === id) this.activeSessionId = null;
+    }
+    if (!this.activeSessionId) {
+      const next = [...this.conversations.values()].sort((a, b) =>
+        new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+      )[0];
+      this.activeSessionId = next?.id ?? null;
+      if (!this.activeSessionId) {
+        this.draftSession = this.makeDraft();
+        this.activeSessionId = this.draftSession.id;
+      }
+    }
+    await this.persistActive();
+    this.broadcastSessions();
+    this.broadcastActiveSession();
+  }
+
+  private async renameSession(id: string, title: string): Promise<void> {
+    const trimmed = title.trim() || "Untitled";
+    if (id.startsWith("draft:") && this.draftSession?.id === id) {
+      this.draftSession.title = trimmed;
+      this.draftSession.updatedAt = Date.now();
+    } else if (this.conversations.has(id)) {
+      try {
+        const updated = await patchConversation(id, { title: trimmed });
+        this.conversations.set(id, updated);
+      } catch (err) {
+        this.output.appendLine(`[chat.rename] ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    this.broadcastSessions();
+    this.broadcastActiveSession();
+  }
+
+  private async updateOverrides(id: string, overrides: ChatOverrides): Promise<void> {
+    if (id.startsWith("draft:") && this.draftSession?.id === id) {
+      this.draftSession.overrides = { ...this.draftSession.overrides, ...overrides };
+      this.draftSession.updatedAt = Date.now();
+      this.broadcastSessions();
+      this.broadcastActiveSession();
+      return;
+    }
+    if (!this.conversations.has(id)) return;
+    const merged = { ...(this.overrides[id] ?? {}), ...overrides };
+    this.overrides[id] = merged;
+    await this.persistOverrides();
+
+    const patch: Record<string, unknown> = {};
+    if (overrides.provider) patch.provider = toWireProvider(overrides.provider);
+    if (overrides.model) patch.model = overrides.model;
+    if (overrides.chatMode) patch.chatMode = overrides.chatMode;
+    if (overrides.agentIds) patch.agentIds = overrides.agentIds;
+    if (Object.keys(patch).length > 0) {
+      try {
+        const updated = await patchConversation(id, patch);
+        this.conversations.set(id, updated);
+      } catch (err) {
+        this.output.appendLine(`[chat.override] ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    this.broadcastSessions();
+    this.broadcastActiveSession();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Sending chat
+  // ---------------------------------------------------------------------------
 
   private detectCommand(content: string): { command?: "spec" | "design" | "tasks"; rest: string } {
     const trimmed = content.trimStart();
@@ -306,67 +568,104 @@ export class ChatllmChatPanelController implements vscode.WebviewViewProvider, v
     };
   }
 
+  private resolveProviderModel(overrides: ChatOverrides): { provider: Provider; model: string } | null {
+    const fromOverride = overrides.provider && overrides.model
+      ? findConfiguredModel(this.catalog.models, overrides.provider, overrides.model)
+      : undefined;
+    const chosen = fromOverride ?? defaultEnabledModel(this.catalog.models);
+    if (!chosen) return null;
+    return { provider: toWireProvider(chosen.provider), model: chosen.modelId };
+  }
+
   private async sendChat(sessionId: string, content: string): Promise<void> {
-    const session = this.sessions.get(sessionId);
+    let session = this.findSession(sessionId);
     if (!session) return;
     if (this.streams.has(sessionId)) {
       this.broadcast({ type: "log", message: "A response is already streaming for this chat." });
       return;
     }
+    if (this.backendStatus !== "ok") {
+      const hint =
+        this.backendStatus === "unauthorized"
+          ? "Not signed in to Chatllm. Close VS Code and reopen the project from the Chatllm desktop app while logged in."
+          : "Chatllm backend is unreachable. Check the CHATLLM_API_ORIGIN setting.";
+      this.broadcast({ type: "log", message: hint });
+      return;
+    }
+    const resolved = this.resolveProviderModel(session.overrides);
+    if (!resolved) {
+      this.broadcast({ type: "log", message: "No configured model. Add one in the Chatllm app first." });
+      return;
+    }
 
+    let conversation = session.remote && session.conversationId
+      ? this.conversations.get(session.conversationId) ?? null
+      : null;
+    if (!conversation) {
+      conversation = await this.createSessionConversation(content);
+      if (!conversation) return;
+      this.conversations.set(conversation.id, conversation);
+      this.messagesCache.set(conversation.id, []);
+      this.draftSession = null;
+      this.activeSessionId = conversation.id;
+      await this.persistActive();
+      session = this.sessionFromConversation(conversation);
+    }
+
+    const conversationId = conversation.id;
     const settings = readSettings();
     const { command, rest } = this.detectCommand(content);
-    const userMessage: ChatMessage = {
-      id: randomId(),
+    const messages = this.messagesCache.get(conversationId) ?? [];
+
+    const userMessage: ConversationMessage = {
+      id: `local:user:${randomId()}`,
+      conversationId,
       role: "user",
-      content: content,
-      createdAt: Date.now(),
-      status: "complete",
+      content,
+      createdAt: new Date().toISOString(),
     };
-    session.messages.push(userMessage);
-    if (session.messages.length === 1) {
-      session.title = deriveTitle(content);
-    }
-    session.updatedAt = Date.now();
+    messages.push(userMessage);
+
+    const assistantMessage: ConversationMessage = {
+      id: `local:asst:${randomId()}`,
+      conversationId,
+      role: "assistant",
+      content: "",
+      createdAt: new Date().toISOString(),
+    };
+    messages.push(assistantMessage);
+    this.messagesCache.set(conversationId, messages);
     this.broadcastActiveSession();
     this.broadcastSessions();
 
-    const assistant: ChatMessage = {
-      id: randomId(),
-      role: "assistant",
-      content: "",
-      createdAt: Date.now(),
-      status: "streaming",
-    };
-    session.messages.push(assistant);
-    this.broadcastActiveSession();
-
-    const provider: Provider = session.overrides.provider ?? settings.provider;
-    const model: string = session.overrides.model ?? settings.model;
-    const chatMode = session.overrides.chatMode ?? settings.chatMode;
-    const useRag = session.overrides.useRag ?? settings.useRag;
-    const toolsEnabled = session.overrides.toolsEnabled ?? settings.toolsEnabled;
+    const overrides = session.overrides;
+    const chatMode = command
+      ? (command === "spec" ? "normal" : "agent")
+      : (overrides.chatMode ?? settings.chatMode);
+    const useRag = overrides.useRag ?? settings.useRag;
+    const toolsEnabled = command
+      ? (command === "spec" ? (overrides.toolsEnabled ?? settings.toolsEnabled) : true)
+      : (overrides.toolsEnabled ?? settings.toolsEnabled);
 
     const body: ChatRequest = {
-      conversationId: session.conversationId,
-      provider,
-      model,
+      conversationId,
+      provider: resolved.provider,
+      model: resolved.model,
       modelSelection: settings.modelSelection,
-      chatMode: command ? (command === "spec" ? "normal" : "agent") : chatMode,
+      chatMode,
       content: rest || content,
       systemPrompt: command ? SPEC_SYSTEM_PROMPTS[command] : settings.systemPrompt || undefined,
-      skillIds: settings.skillIds,
-      documentIds: settings.documentIds,
+      skillIds: overrides.skillIds ?? [],
+      documentIds: [],
       useRag,
-      toolsEnabled: command ? (command === "spec" ? toolsEnabled : true) : toolsEnabled,
-      mcpServerIds: settings.mcpServerIds,
-      agentIds: settings.agentIds,
-      maxAgentSpawns: settings.maxAgentSpawns,
+      toolsEnabled,
+      mcpServerIds: overrides.mcpServerIds ?? [],
+      agentIds: overrides.agentIds ?? [],
+      maxAgentSpawns: this.catalog.maxAgentSpawns,
     };
 
     const abort = new AbortController();
-    this.streams.set(sessionId, { abort, messageId: assistant.id });
-
+    this.streams.set(conversationId, { abort, messageId: assistantMessage.id });
     let buffer = "";
     try {
       const response = await streamChat(
@@ -374,13 +673,13 @@ export class ChatllmChatPanelController implements vscode.WebviewViewProvider, v
         {
           onToken: (text) => {
             buffer += text;
-            assistant.content = buffer;
-            this.broadcast({ type: "messageAppend", sessionId, messageId: assistant.id, chunk: text });
+            assistantMessage.content = buffer;
+            this.broadcast({ type: "messageAppend", sessionId: conversationId, messageId: assistantMessage.id, chunk: text });
           },
           onToolEvent: (event) => {
             this.broadcast({
               type: "toolEvent",
-              sessionId,
+              sessionId: conversationId,
               name: event.name,
               arguments: event.arguments ?? {},
             });
@@ -388,49 +687,91 @@ export class ChatllmChatPanelController implements vscode.WebviewViewProvider, v
         },
         abort.signal,
       );
-      if (response.conversation?.id) session.conversationId = response.conversation.id;
-      assistant.status = "complete";
-      assistant.content = buffer;
-      session.updatedAt = Date.now();
-
+      const finalConversation = response.conversation as Conversation | undefined;
+      if (finalConversation) this.conversations.set(finalConversation.id, finalConversation);
+      if (response.assistantMessage?.id) assistantMessage.id = response.assistantMessage.id;
+      if (response.assistantMessage?.content) {
+        assistantMessage.content = response.assistantMessage.content;
+        buffer = assistantMessage.content;
+      }
       if (command === "tasks" && buffer) {
         try {
           const written = await this.writeGeneratedTasks(buffer);
           if (written > 0) {
-            const note = `\n\n_Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active feature. Run **Chatllm: Dispatch Feature Tasks** to execute them._`;
-            assistant.content = `${buffer}${note}`;
-            this.broadcast({ type: "messageAppend", sessionId, messageId: assistant.id, chunk: note });
+            const note = `\n\n_Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active feature._`;
+            assistantMessage.content += note;
+            this.broadcast({ type: "messageAppend", sessionId: conversationId, messageId: assistantMessage.id, chunk: note });
           }
         } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          this.output.appendLine(`[chat.tasks] ${msg}`);
+          this.output.appendLine(`[chat.tasks] ${err instanceof Error ? err.message : String(err)}`);
         }
       }
-
       this.broadcast({
         type: "messageComplete",
-        sessionId,
-        messageId: assistant.id,
-        conversationId: session.conversationId,
+        sessionId: conversationId,
+        messageId: assistantMessage.id,
+        conversationId,
       });
+      void this.refreshSingleConversation(conversationId);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.output.appendLine(`[chat] ${msg}`);
-      const aborted = abort.signal.aborted;
-      if (aborted) {
-        assistant.status = "complete";
-        assistant.content = `${buffer}${buffer ? "\n\n" : ""}_Cancelled._`;
-        this.broadcast({ type: "messageAppend", sessionId, messageId: assistant.id, chunk: `${buffer ? "\n\n" : ""}_Cancelled._` });
-        this.broadcast({ type: "messageComplete", sessionId, messageId: assistant.id, conversationId: session.conversationId });
+      if (abort.signal.aborted) {
+        const note = `${buffer ? "\n\n" : ""}_Cancelled._`;
+        assistantMessage.content = `${buffer}${note}`;
+        this.broadcast({ type: "messageAppend", sessionId: conversationId, messageId: assistantMessage.id, chunk: note });
+        this.broadcast({ type: "messageComplete", sessionId: conversationId, messageId: assistantMessage.id, conversationId });
       } else {
-        assistant.status = "error";
-        assistant.error = msg;
-        this.broadcast({ type: "messageError", sessionId, messageId: assistant.id, error: msg });
+        this.broadcast({ type: "messageError", sessionId: conversationId, messageId: assistantMessage.id, error: msg });
       }
     } finally {
-      this.streams.delete(sessionId);
-      await this.persist();
+      this.streams.delete(conversationId);
+    }
+  }
+
+  private findSession(id: string): ChatSession | null {
+    if (id.startsWith("draft:") && this.draftSession?.id === id) return this.draftSession;
+    const conv = this.conversations.get(id);
+    return conv ? this.sessionFromConversation(conv) : null;
+  }
+
+  private async createSessionConversation(firstMessage: string): Promise<Conversation | null> {
+    try {
+      const title = deriveTitle(firstMessage);
+      const conv = await createConversation(title);
+      if (this.projectFolderId) {
+        try {
+          await addConversationToFolder(this.projectFolderId, conv.id);
+        } catch (err) {
+          this.output.appendLine(`[chat.attachFolder] ${err instanceof Error ? err.message : String(err)}`);
+        }
+        const folderName = this.projectFolder?.name ?? projectFolderName(this.project);
+        try {
+          const patched = await patchConversation(conv.id, { folder: folderName });
+          return patched;
+        } catch (err) {
+          this.output.appendLine(`[chat.tagFolder] ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      return conv;
+    } catch (err) {
+      this.output.appendLine(`[chat.createConversation] ${err instanceof Error ? err.message : String(err)}`);
+      this.broadcast({ type: "log", message: `Failed to create conversation: ${err instanceof Error ? err.message : err}` });
+      return null;
+    }
+  }
+
+  private async refreshSingleConversation(id: string): Promise<void> {
+    try {
+      const list = await listConversations();
+      const updated = list.find((c) => c.id === id);
+      if (updated) this.conversations.set(id, updated);
+      const fresh = await listConversationMessages(id);
+      this.messagesCache.set(id, fresh);
       this.broadcastSessions();
+      if (this.activeSessionId === id) this.broadcastActiveSession();
+    } catch (err) {
+      this.output.appendLine(`[chat.refresh] ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -462,6 +803,10 @@ export class ChatllmChatPanelController implements vscode.WebviewViewProvider, v
     return written;
   }
 
+  // ---------------------------------------------------------------------------
+  // HTML
+  // ---------------------------------------------------------------------------
+
   private renderHtml(webview: vscode.Webview): string {
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "chat.js"));
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "webview.css"));
@@ -491,16 +836,19 @@ export class ChatllmChatPanelController implements vscode.WebviewViewProvider, v
   }
 }
 
-function providerLabel(provider: Provider): string {
-  switch (provider) {
-    case "openai": return "OpenAI";
-    case "openrouter": return "OpenRouter";
-    case "google": return "Google";
-    case "ollama": return "Ollama";
-    case "llamacpp": return "llama.cpp";
-    case "lmstudio": return "LM Studio";
-    case "custom": return "Custom";
-  }
+function emptyCatalog(): BackendCatalog {
+  return { models: [], agents: [], skills: [], mcpServers: [], documents: [], maxAgentSpawns: 3 };
+}
+
+function catalogFromConfig(config: AppConfig, documents: BackendCatalog["documents"]): BackendCatalog {
+  return {
+    models: (config.configuredModels ?? []).filter((m) => m.enabled !== false),
+    agents: config.agents ?? [],
+    skills: config.skills ?? [],
+    mcpServers: config.mcpServers ?? [],
+    documents,
+    maxAgentSpawns: config.maxAgentSpawns ?? 3,
+  };
 }
 
 function deriveTitle(text: string): string {
@@ -518,5 +866,3 @@ function randomNonce(): string {
   for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
-
-export { describeModel };
