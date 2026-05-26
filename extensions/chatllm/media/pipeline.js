@@ -38334,7 +38334,7 @@
   cytoscape2.version = version;
   cytoscape2.stylesheet = cytoscape2.Stylesheet = _Stylesheet;
 
-  // src/webview/main.ts
+  // src/webview/pipeline-main.ts
   var import_cytoscape_dagre = __toESM(require_cytoscape_dagre());
   cytoscape2.use(import_cytoscape_dagre.default);
   var vscode = acquireVsCodeApi();
@@ -38343,8 +38343,7 @@
     features: [],
     activeFeatureId: null,
     activeTasks: [],
-    runs: /* @__PURE__ */ new Map(),
-    settingsOpen: false
+    runs: /* @__PURE__ */ new Map()
   };
   var root = document.getElementById("root");
   var cy = null;
@@ -38357,23 +38356,13 @@
     if (!root.firstChild) {
       root.innerHTML = `
       <main class="chatllm-main">
-        <section class="chatllm-tab active" data-tab="pipeline">${pipelineHtml()}</section>
-        <aside class="settings-overlay" id="settings-overlay" hidden>
-          <header class="settings-overlay-header">
-            <span>Chatllm Settings</span>
-            <button class="icon-btn" id="settings-close" title="Close settings" aria-label="Close settings">\u2715</button>
-          </header>
-          <div class="settings-grid" id="settings-form"></div>
-        </aside>
+        <section class="chatllm-tab active">${pipelineHtml()}</section>
       </main>
     `;
       bindPipeline();
-      bindGlobal();
     }
-    applySettingsOverlay();
     renderFeatures();
     renderRuns();
-    renderSettings();
   }
   function pipelineHtml() {
     return `
@@ -38392,22 +38381,14 @@
       </aside>
       <div class="pipeline-main">
         <div class="pipeline-actions">
-          <button data-cmd="spec" title="Open chat with /spec">/spec</button>
-          <button data-cmd="design" title="Open chat with /design">/design</button>
-          <button data-cmd="tasks" title="Open chat with /tasks">/tasks</button>
           <span class="pipeline-spacer"></span>
           <button class="primary" id="dispatch-btn">Dispatch tasks</button>
         </div>
-        <div class="graph-area" id="graph-area"><div class="graph-empty">Generate task contracts via <strong>@chatllm /tasks</strong>, then dispatch to see the live execution graph.</div></div>
+        <div class="graph-area" id="graph-area"><div class="graph-empty">Generate task contracts via the Chatllm chat (use <strong>/tasks</strong>), then dispatch to see the live execution graph.</div></div>
         <div class="runs-list" id="runs-list"></div>
       </div>
     </div>
   `;
-  }
-  function bindGlobal() {
-    root.querySelector("#settings-close")?.addEventListener("click", () => {
-      setSettingsOpen(false);
-    });
   }
   function bindPipeline() {
     graphContainerEl = root.querySelector("#graph-area");
@@ -38422,24 +38403,10 @@
       send({ type: "scaffoldFeature", name });
       scaffoldInput.value = "";
     });
-    for (const button of root.querySelectorAll(".pipeline-actions button[data-cmd]")) {
-      button.addEventListener("click", () => {
-        send({ type: "openChat" });
-      });
-    }
     root.querySelector("#dispatch-btn").addEventListener("click", () => {
       if (!state.activeFeatureId) return;
       send({ type: "dispatchFeature", featureId: state.activeFeatureId });
     });
-  }
-  function setSettingsOpen(open) {
-    state.settingsOpen = open;
-    applySettingsOverlay();
-  }
-  function applySettingsOverlay() {
-    const overlay = root.querySelector("#settings-overlay");
-    if (overlay) overlay.toggleAttribute("hidden", !state.settingsOpen);
-    if (state.settingsOpen) renderSettings();
   }
   function renderFeatures() {
     const list = root.querySelector("#feature-list");
@@ -38487,73 +38454,6 @@
       wrapper.addEventListener("click", () => focusGraph(run.graphId));
       container2.appendChild(wrapper);
     }
-  }
-  function renderSettings() {
-    const grid = root.querySelector("#settings-form");
-    if (!grid || !state.settings) return;
-    const s = state.settings;
-    grid.innerHTML = `
-    <h2>Model</h2>
-    <label for="set-provider">Provider</label>
-    <select id="set-provider" data-key="provider">
-      ${["openai", "openrouter", "google", "ollama", "llamacpp", "lmstudio", "custom"].map((p2) => `<option value="${p2}" ${p2 === s.provider ? "selected" : ""}>${p2}</option>`).join("")}
-    </select>
-    <label for="set-model">Default model</label>
-    <input id="set-model" data-key="model" type="text" value="${escapeAttr(s.model)}" />
-    <label for="set-mode">Model selection</label>
-    <select id="set-mode" data-key="modelSelection">
-      <option value="manual" ${s.modelSelection === "manual" ? "selected" : ""}>manual</option>
-      <option value="auto" ${s.modelSelection === "auto" ? "selected" : ""}>auto</option>
-    </select>
-    <label for="set-chatmode">Chat mode</label>
-    <select id="set-chatmode" data-key="chatMode">
-      <option value="normal" ${s.chatMode === "normal" ? "selected" : ""}>normal</option>
-      <option value="agent" ${s.chatMode === "agent" ? "selected" : ""}>agent</option>
-    </select>
-
-    <h2>Behavior</h2>
-    <label for="set-rag">RAG</label>
-    <div><input id="set-rag" data-key="useRag" type="checkbox" ${s.useRag ? "checked" : ""} /></div>
-    <label for="set-tools">Tools enabled</label>
-    <div><input id="set-tools" data-key="toolsEnabled" type="checkbox" ${s.toolsEnabled ? "checked" : ""} /></div>
-    <label for="set-spawns">Max agent spawns</label>
-    <input id="set-spawns" data-key="maxAgentSpawns" type="number" min="0" max="32" value="${s.maxAgentSpawns}" />
-
-    <h2>Wiring</h2>
-    <label for="set-agents">Agents</label>
-    <input id="set-agents" data-key="agentIds" data-list="1" type="text" value="${escapeAttr(s.agentIds.join(", "))}" placeholder="agent-1, agent-2" />
-    <label for="set-mcps">MCP servers</label>
-    <input id="set-mcps" data-key="mcpServerIds" data-list="1" type="text" value="${escapeAttr(s.mcpServerIds.join(", "))}" placeholder="server-1, server-2" />
-    <label for="set-skills">Skills</label>
-    <input id="set-skills" data-key="skillIds" data-list="1" type="text" value="${escapeAttr(s.skillIds.join(", "))}" placeholder="skill-1, skill-2" />
-    <label for="set-docs">Documents</label>
-    <input id="set-docs" data-key="documentIds" data-list="1" type="text" value="${escapeAttr(s.documentIds.join(", "))}" placeholder="doc-1, doc-2" />
-
-    <h2>Prompts</h2>
-    <label for="set-system">System prompt</label>
-    <textarea id="set-system" data-key="systemPrompt">${escapeHtml(s.systemPrompt)}</textarea>
-
-    <h2>Integrations</h2>
-    <label for="set-copilot">GitHub Copilot</label>
-    <div>
-      <input id="set-copilot" data-key="copilotEnabled" type="checkbox" ${s.copilotEnabled ? "checked" : ""} />
-      <span class="hint inline">Re-enable the bundled Copilot extension. Toggling prompts a window reload.</span>
-    </div>
-
-    <div class="hint">Settings persist in your VS Code user configuration (chatllm.*). The chat itself lives in the native Chat view \u2014 use the model picker there to switch per-conversation.</div>
-  `;
-    for (const input of grid.querySelectorAll("[data-key]")) {
-      input.addEventListener("change", () => emitSettingChange(input));
-    }
-  }
-  function emitSettingChange(input) {
-    const key = input.dataset.key;
-    let value;
-    if (input instanceof HTMLInputElement && input.type === "checkbox") value = input.checked;
-    else if (input instanceof HTMLInputElement && input.type === "number") value = Number(input.value);
-    else if (input.dataset.list) value = input.value.split(",").map((v) => v.trim()).filter(Boolean);
-    else value = input.value;
-    send({ type: "updateSetting", key, value });
   }
   function ensureCytoscape() {
     if (!graphContainerEl) return null;
@@ -38632,9 +38532,6 @@
   function escapeHtml(value) {
     return value.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] ?? ch);
   }
-  function escapeAttr(value) {
-    return escapeHtml(value);
-  }
   function handleMessage(msg) {
     switch (msg.type) {
       case "init":
@@ -38644,10 +38541,6 @@
         break;
       case "settings":
         state.settings = msg.settings;
-        renderSettings();
-        break;
-      case "openSettings":
-        setSettingsOpen(true);
         break;
       case "features":
         state.features = msg.features;
@@ -38689,7 +38582,7 @@
         break;
       }
       case "log":
-        console.warn("[chatllm]", msg.message);
+        console.warn("[chatllm.pipeline]", msg.message);
         break;
     }
   }
@@ -38714,4 +38607,4 @@ cytoscape/dist/cytoscape.esm.mjs:
   (*! Bezier curve function generator. Copyright Gaetan Renaudeau. MIT License: http://en.wikipedia.org/wiki/MIT_License *)
   (*! Runge-Kutta spring physics function generator. Adapted from Framer.js, copyright Koen Bok. MIT License: http://en.wikipedia.org/wiki/MIT_License *)
 */
-//# sourceMappingURL=webview.js.map
+//# sourceMappingURL=pipeline.js.map

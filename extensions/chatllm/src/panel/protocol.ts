@@ -1,7 +1,5 @@
 import type { ChatllmSettings } from "../settings";
 
-export type Tab = "chat" | "pipeline" | "settings";
-
 export interface FeatureSummary {
   id: string;
   name: string;
@@ -38,28 +36,20 @@ export interface GraphDoneEvent {
   status: string;
 }
 
-export type HostToWebview =
-  | { type: "init"; settings: ChatllmSettings; features: FeatureSummary[]; activeTab: Tab; apiOrigin: string }
+export type PipelineHostToWebview =
+  | { type: "init"; settings: ChatllmSettings; features: FeatureSummary[]; apiOrigin: string }
   | { type: "settings"; settings: ChatllmSettings }
-  | { type: "tab"; tab: Tab }
   | { type: "features"; features: FeatureSummary[]; activeFeature?: { id: string; tasks: TaskSummary[] } }
-  | { type: "chatToken"; token: string }
-  | { type: "chatToolEvent"; name: string; arguments: Record<string, unknown> }
-  | { type: "chatDone"; conversationId?: string }
-  | { type: "chatError"; error: string }
   | { type: "graphStart"; payload: GraphStartEvent }
   | { type: "graphNode"; payload: GraphNodeUpdate }
   | { type: "graphDone"; payload: GraphDoneEvent }
   | { type: "log"; message: string };
 
-export type WebviewToHost =
+export type PipelineWebviewToHost =
   | { type: "ready" }
-  | { type: "switchTab"; tab: Tab }
-  | { type: "sendChat"; content: string; command?: "spec" | "design" | "tasks" }
-  | { type: "cancelChat" }
-  | { type: "updateSetting"; key: keyof ChatllmSettings; value: unknown }
   | { type: "setActiveFeature"; featureId: string }
   | { type: "scaffoldFeature"; name: string }
   | { type: "dispatchFeature"; featureId: string; taskIds?: string[] }
   | { type: "cancelGraph"; graphId: string }
-  | { type: "openTask"; featureId: string; taskId: string };
+  | { type: "openTask"; featureId: string; taskId: string }
+  | { type: "openChat" };

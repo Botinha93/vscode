@@ -1,38 +1,29 @@
 import * as vscode from "vscode";
 import { cancelExecutionGraph, dispatchFeature, subscribeExecutionGraphEvents } from "../dispatch/client";
-import { SPEC_SYSTEM_PROMPTS } from "../chat/commands";
-import { streamChat } from "../chat/stream-client";
-import { onSettingsChange, readSettings, settingsToChatRequest, writeSetting, type ChatllmSettings } from "../settings";
+import { onSettingsChange, readSettings } from "../settings";
 import { computeTaskReadiness, validateDag } from "../spec/dag";
-import { parseTaskContract } from "../spec/schema";
 import type { SpecStore } from "../spec/store";
-import { readTextFile, regenerateTasksIndex, scaffoldFeature, updateTaskStatus, writeTaskContract, writeTextFile } from "../spec/writer";
+import { scaffoldFeature, updateTaskStatus } from "../spec/writer";
 import { getApiOrigin } from "../api";
-import { extractTaskBlocks } from "../chat/commands";
-import type { FeatureSummary, HostToWebview, Tab, TaskSummary, WebviewToHost } from "./protocol";
+import type { FeatureSummary, PipelineHostToWebview, PipelineWebviewToHost, TaskSummary } from "./protocol";
 
 interface ActiveGraph {
   graphId: string;
   dispose: () => void;
 }
 
-export class ChatllmPanelController implements vscode.WebviewViewProvider, vscode.Disposable {
-  static readonly viewType = "chatllm.panel";
+export class ChatllmPipelineController implements vscode.WebviewViewProvider, vscode.Disposable {
+  static readonly viewType = "chatllm.pipeline";
 
   private view?: vscode.WebviewView;
-  private editorPanel?: vscode.WebviewPanel;
   private readonly disposables: vscode.Disposable[] = [];
   private readonly graphs = new Map<string, ActiveGraph>();
-  private chatAbort?: AbortController;
-  private conversationId?: string;
-  private activeTab: Tab = "chat";
 
   constructor(
     private readonly context: vscode.ExtensionContext,
     private readonly store: SpecStore,
     private readonly output: vscode.OutputChannel,
   ) {
-    this.conversationId = context.workspaceState.get("chatllm.conversationId");
     this.disposables.push(
       onSettingsChange((settings) => this.broadcast({ type: "settings", settings })),
       this.store.onDidChange(() => this.broadcastFeatures()),
@@ -47,40 +38,14 @@ export class ChatllmPanelController implements vscode.WebviewViewProvider, vscod
     });
   }
 
-  showAsPanel(tab: Tab = "chat"): void {
-    this.activeTab = tab;
-    if (this.editorPanel) {
-      this.editorPanel.reveal();
-      this.editorPanel.webview.postMessage({ type: "tab", tab } satisfies HostToWebview);
-      return;
-    }
-    const panel = vscode.window.createWebviewPanel(
-      ChatllmPanelController.viewType,
-      "Chatllm",
-      vscode.ViewColumn.Active,
-      this.webviewOptions(),
-    );
-    panel.iconPath = vscode.Uri.joinPath(this.context.extensionUri, "resources", "chatllm.svg");
-    panel.onDidDispose(() => {
-      if (this.editorPanel === panel) this.editorPanel = undefined;
-    });
-    this.editorPanel = panel;
-    this.bindWebview(panel.webview);
-  }
-
-  focusView(tab: Tab = "chat"): void {
-    this.activeTab = tab;
-    void vscode.commands.executeCommand("chatllm.panel.focus").then(() => {
-      this.broadcast({ type: "tab", tab });
-    });
+  show(): void {
+    void vscode.commands.executeCommand(`${ChatllmPipelineController.viewType}.focus`);
   }
 
   dispose(): void {
     for (const d of this.disposables) d.dispose();
     for (const g of this.graphs.values()) g.dispose();
     this.graphs.clear();
-    this.chatAbort?.abort();
-    this.editorPanel?.dispose();
   }
 
   private webviewOptions(): vscode.WebviewPanelOptions & vscode.WebviewOptions {
@@ -97,15 +62,14 @@ export class ChatllmPanelController implements vscode.WebviewViewProvider, vscod
   private bindWebview(webview: vscode.Webview): void {
     webview.options = this.webviewOptions();
     webview.html = this.renderHtml(webview);
-    const sub = webview.onDidReceiveMessage((message: WebviewToHost) => {
+    const sub = webview.onDidReceiveMessage((message: PipelineWebviewToHost) => {
       void this.handleMessage(webview, message);
     });
     this.disposables.push(sub);
   }
 
-  private broadcast(message: HostToWebview): void {
+  private broadcast(message: PipelineHostToWebview): void {
     this.view?.webview.postMessage(message);
-    this.editorPanel?.webview.postMessage(message);
   }
 
   private broadcastFeatures(): void {
@@ -137,7 +101,7 @@ export class ChatllmPanelController implements vscode.WebviewViewProvider, vscod
     return { id: task.id, title: task.title, status: task.status, dependsOn: task.dependsOn, agent: task.agent };
   }
 
-  private async handleMessage(webview: vscode.Webview, message: WebviewToHost): Promise<void> {
+  private async handleMessage(webview: vscode.Webview, message: PipelineWebviewToHost): Promise<void> {
     try {
       switch (message.type) {
         case "ready":
@@ -145,22 +109,9 @@ export class ChatllmPanelController implements vscode.WebviewViewProvider, vscod
             type: "init",
             settings: readSettings(),
             features: this.featureSummaries(),
-            activeTab: this.activeTab,
             apiOrigin: getApiOrigin(),
-          } satisfies HostToWebview);
+          } satisfies PipelineHostToWebview);
           this.broadcastFeatures();
-          break;
-        case "switchTab":
-          this.activeTab = message.tab;
-          break;
-        case "sendChat":
-          await this.sendChat(message.content, message.command);
-          break;
-        case "cancelChat":
-          this.chatAbort?.abort();
-          break;
-        case "updateSetting":
-          await writeSetting(message.key, message.value as ChatllmSettings[typeof message.key]);
           break;
         case "setActiveFeature":
           this.store.setActiveFeature(message.featureId);
@@ -183,82 +134,14 @@ export class ChatllmPanelController implements vscode.WebviewViewProvider, vscod
           if (task) await vscode.window.showTextDocument(task.filePath);
           break;
         }
+        case "openChat":
+          await vscode.commands.executeCommand("chatllm.openChat");
+          break;
       }
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      this.output.appendLine(`[panel] ${msg}`);
+      this.output.appendLine(`[pipeline] ${msg}`);
       this.broadcast({ type: "log", message: msg });
-    }
-  }
-
-  private async sendChat(content: string, command?: "spec" | "design" | "tasks"): Promise<void> {
-    const settings = readSettings();
-    const prompt = await this.composePrompt(content, command);
-    const body = settingsToChatRequest(settings, prompt, this.conversationId);
-    if (command) {
-      body.systemPrompt = SPEC_SYSTEM_PROMPTS[command];
-      body.chatMode = command === "design" || command === "tasks" ? "agent" : body.chatMode;
-      body.toolsEnabled = command === "design" || command === "tasks" ? true : body.toolsEnabled;
-    }
-
-    this.chatAbort?.abort();
-    const abort = new AbortController();
-    this.chatAbort = abort;
-    let buffer = "";
-    try {
-      const response = await streamChat(
-        body,
-        {
-          onToken: (token) => {
-            buffer += token;
-            this.broadcast({ type: "chatToken", token });
-          },
-          onToolEvent: (event) => {
-            this.broadcast({ type: "chatToolEvent", name: event.name, arguments: event.arguments });
-          },
-        },
-        abort.signal,
-      );
-      if (response.conversation?.id) {
-        this.conversationId = response.conversation.id;
-        await this.context.workspaceState.update("chatllm.conversationId", response.conversation.id);
-      }
-      this.broadcast({ type: "chatDone", conversationId: response.conversation?.id });
-      if (command === "tasks") await this.writeGeneratedTasks(buffer);
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      this.broadcast({ type: "chatError", error: msg });
-    } finally {
-      if (this.chatAbort === abort) this.chatAbort = undefined;
-    }
-  }
-
-  private async composePrompt(content: string, command?: "spec" | "design" | "tasks"): Promise<string> {
-    const feature = this.store.getActiveFeature();
-    const parts = [content];
-    if (command === "design" && feature?.requirementsUri) parts.unshift(await readTextFile(feature.requirementsUri));
-    if (command === "tasks" && feature?.requirementsUri) parts.unshift(await readTextFile(feature.requirementsUri));
-    if (command === "tasks" && feature?.designUri) parts.unshift(await readTextFile(feature.designUri));
-    return parts.join("\n\n---\n\n");
-  }
-
-  private async writeGeneratedTasks(text: string): Promise<void> {
-    const feature = this.store.getActiveFeature();
-    if (!feature?.tasksDirUri) return;
-    for (const block of extractTaskBlocks(text)) {
-      const probe = vscode.Uri.joinPath(feature.tasksDirUri, "_probe.md");
-      const task = parseTaskContract(feature.id, probe, block.startsWith("---") ? block : `---\n${block}\n---\n`);
-      if (!task) continue;
-      task.filePath = vscode.Uri.joinPath(
-        feature.tasksDirUri,
-        `${task.id}-${task.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40)}.md`,
-      );
-      await writeTaskContract(task);
-    }
-    await this.store.refresh();
-    const updated = this.store.getFeature(feature.id);
-    if (updated?.tasksDirUri) {
-      await writeTextFile(vscode.Uri.joinPath(updated.tasksDirUri, "index.md"), regenerateTasksIndex(updated.tasks));
     }
   }
 
@@ -288,14 +171,14 @@ export class ChatllmPanelController implements vscode.WebviewViewProvider, vscod
       return;
     }
     const readiness = computeTaskReadiness(feature.tasks);
-    const result = await dispatchFeature(feature, { conversationId: this.conversationId, taskIds });
+    const result = await dispatchFeature(feature, { taskIds });
     const startEvent = {
       graphId: result.graphId,
       featureId: feature.id,
       label: taskIds?.length ? `${feature.name} / ${taskIds.join(", ")}` : feature.name,
       nodes: tasks.map((task) => ({
         id: task.id,
-        label: `${task.id} · ${task.title}`,
+        label: `${task.id} \u00b7 ${task.title}`,
         dependsOn: task.dependsOn,
       })),
     };
@@ -326,7 +209,7 @@ export class ChatllmPanelController implements vscode.WebviewViewProvider, vscod
   }
 
   private renderHtml(webview: vscode.Webview): string {
-    const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "webview.js"));
+    const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "pipeline.js"));
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "webview.css"));
     const nonce = randomNonce();
     const csp = [
@@ -343,7 +226,7 @@ export class ChatllmPanelController implements vscode.WebviewViewProvider, vscod
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy" content="${csp}" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Chatllm</title>
+  <title>Chatllm Pipeline</title>
   <link rel="stylesheet" href="${styleUri}" />
 </head>
 <body>

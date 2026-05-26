@@ -432,6 +432,9 @@ import './contrib/workspace/browser/workspace.contribution.js';
 // Workspaces
 import './contrib/workspaces/browser/workspaces.contribution.js';
 
+// Chatllm (default-disable bundled Copilot, etc.)
+import './contrib/chatllm/browser/chatllm.contribution.js';
+
 // List
 import './contrib/list/browser/list.contribution.js';
 

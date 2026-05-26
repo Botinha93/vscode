@@ -22,10 +22,18 @@ await Promise.all([
   }),
   esbuild.build({
     ...common,
-    entryPoints: [join(__dirname, "src/webview/main.ts")],
+    entryPoints: [join(__dirname, "src/webview/chat-main.ts")],
     platform: "browser",
     format: "iife",
-    outfile: join(__dirname, "media/webview.js"),
+    outfile: join(__dirname, "media/chat.js"),
+    target: "es2022",
+  }),
+  esbuild.build({
+    ...common,
+    entryPoints: [join(__dirname, "src/webview/pipeline-main.ts")],
+    platform: "browser",
+    format: "iife",
+    outfile: join(__dirname, "media/pipeline.js"),
     target: "es2022",
   }),
 ]);

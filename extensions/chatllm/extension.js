@@ -34,7 +34,7 @@ __export(extension_exports, {
   deactivate: () => deactivate
 });
 module.exports = __toCommonJS(extension_exports);
-var vscode9 = __toESM(require("vscode"));
+var vscode10 = __toESM(require("vscode"));
 
 // src/api.ts
 function getApiOrigin() {
@@ -189,58 +189,6 @@ async function cancelExecutionGraph(graphId) {
 // src/panel/panel.ts
 var vscode3 = __toESM(require("vscode"));
 
-// src/chat/commands.ts
-var SPEC_SYSTEM_PROMPTS = {
-  spec: "Draft EARS-style feature requirements in markdown using ## R-N section ids.",
-  design: "Draft design.md from requirements. Use ## D-N section ids and reference R-* ids.",
-  tasks: `Generate task contracts. Each task must be in a fenced \`\`\`task block with YAML frontmatter containing id, title, status, requirement_refs, design_refs, depends_on, expected_files, architecture_hints, acceptance, and agent.`
-};
-function extractTaskBlocks(content) {
-  const blocks = [];
-  const re = /```task\s*([\s\S]*?)```/gi;
-  let match;
-  while ((match = re.exec(content)) !== null) blocks.push(match[1].trim());
-  return blocks;
-}
-
-// src/chat/stream-client.ts
-async function streamChat(body, handlers, signal) {
-  const response = await apiFetch("/api/chat/stream", {
-    method: "POST",
-    body: JSON.stringify(body),
-    signal
-  });
-  if (!response.ok || !response.body) {
-    const err = await response.json().catch(() => ({ error: response.statusText }));
-    throw new Error(err.error ?? response.statusText);
-  }
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let finalResponse;
-  const consume = (rawEvent) => {
-    const event = rawEvent.match(/^event: (.+)$/m)?.[1];
-    const dataLine = rawEvent.match(/^data: (.+)$/m)?.[1];
-    if (!event || !dataLine) return;
-    const data = JSON.parse(dataLine);
-    if (event === "token") handlers.onToken?.(data.token);
-    if (event === "tool") handlers.onToolEvent?.(data);
-    if (event === "error") throw new Error(data.error);
-    if (event === "done") finalResponse = data;
-  };
-  while (true) {
-    const { value, done } = await reader.read();
-    buffer += decoder.decode(value, { stream: !done });
-    const parts = buffer.split("\n\n");
-    buffer = parts.pop() ?? "";
-    for (const part of parts) consume(part);
-    if (done) break;
-  }
-  if (buffer.trim()) consume(buffer);
-  if (!finalResponse) throw new Error("Stream ended before the chat response completed.");
-  return finalResponse;
-}
-
 // src/settings.ts
 var vscode = __toESM(require("vscode"));
 var SECTION = "chatllm";
@@ -258,35 +206,25 @@ function readSettings() {
     mcpServerIds: cfg.get("mcpServerIds") ?? [],
     skillIds: cfg.get("skillIds") ?? [],
     documentIds: cfg.get("documentIds") ?? [],
-    systemPrompt: cfg.get("systemPrompt") ?? ""
+    systemPrompt: cfg.get("systemPrompt") ?? "",
+    copilotEnabled: cfg.get("copilot.enabled") ?? false
   };
 }
+var FLAT_TO_DOTTED = {
+  copilotEnabled: "copilot.enabled"
+};
 async function writeSetting(key, value) {
-  await vscode.workspace.getConfiguration(SECTION).update(key, value, vscode.ConfigurationTarget.Global);
+  const dotted = FLAT_TO_DOTTED[key] ?? key;
+  await vscode.workspace.getConfiguration(SECTION).update(dotted, value, vscode.ConfigurationTarget.Global);
 }
 function onSettingsChange(listener) {
   return vscode.workspace.onDidChangeConfiguration((event) => {
     if (event.affectsConfiguration(SECTION)) listener(readSettings());
   });
 }
-function settingsToChatRequest(settings, content, conversationId) {
-  return {
-    conversationId,
-    provider: settings.provider,
-    model: settings.model,
-    modelSelection: settings.modelSelection,
-    chatMode: settings.chatMode,
-    content,
-    systemPrompt: settings.systemPrompt || void 0,
-    skillIds: settings.skillIds,
-    documentIds: settings.documentIds,
-    useRag: settings.useRag,
-    toolsEnabled: settings.toolsEnabled,
-    mcpServerIds: settings.mcpServerIds,
-    agentIds: settings.agentIds,
-    maxAgentSpawns: settings.maxAgentSpawns
-  };
-}
+
+// src/spec/writer.ts
+var vscode2 = __toESM(require("vscode"));
 
 // src/spec/schema.ts
 var TASK_STATUSES = /* @__PURE__ */ new Set(["pending", "ready", "running", "completed", "blocked", "failed"]);
@@ -358,7 +296,6 @@ function extractSectionIds(markdown, prefix) {
 }
 
 // src/spec/writer.ts
-var vscode2 = __toESM(require("vscode"));
 async function readTextFile(uri) {
   return Buffer.from(await vscode2.workspace.fs.readFile(uri)).toString("utf8");
 }
@@ -419,25 +356,20 @@ function regenerateTasksIndex(tasks) {
 }
 
 // src/panel/panel.ts
-var ChatllmPanelController = class _ChatllmPanelController {
+var ChatllmPipelineController = class _ChatllmPipelineController {
   constructor(context, store2, output) {
     this.context = context;
     this.store = store2;
     this.output = output;
-    this.conversationId = context.workspaceState.get("chatllm.conversationId");
     this.disposables.push(
       onSettingsChange((settings) => this.broadcast({ type: "settings", settings })),
       this.store.onDidChange(() => this.broadcastFeatures())
     );
   }
-  static viewType = "chatllm.panel";
+  static viewType = "chatllm.pipeline";
   view;
-  editorPanel;
   disposables = [];
   graphs = /* @__PURE__ */ new Map();
-  chatAbort;
-  conversationId;
-  activeTab = "chat";
   resolveWebviewView(view) {
     this.view = view;
     this.bindWebview(view.webview);
@@ -445,38 +377,13 @@ var ChatllmPanelController = class _ChatllmPanelController {
       if (this.view === view) this.view = void 0;
     });
   }
-  showAsPanel(tab = "chat") {
-    this.activeTab = tab;
-    if (this.editorPanel) {
-      this.editorPanel.reveal();
-      this.editorPanel.webview.postMessage({ type: "tab", tab });
-      return;
-    }
-    const panel2 = vscode3.window.createWebviewPanel(
-      _ChatllmPanelController.viewType,
-      "Chatllm",
-      vscode3.ViewColumn.Active,
-      this.webviewOptions()
-    );
-    panel2.iconPath = vscode3.Uri.joinPath(this.context.extensionUri, "resources", "chatllm.svg");
-    panel2.onDidDispose(() => {
-      if (this.editorPanel === panel2) this.editorPanel = void 0;
-    });
-    this.editorPanel = panel2;
-    this.bindWebview(panel2.webview);
-  }
-  focusView(tab = "chat") {
-    this.activeTab = tab;
-    void vscode3.commands.executeCommand("chatllm.panel.focus").then(() => {
-      this.broadcast({ type: "tab", tab });
-    });
+  show() {
+    void vscode3.commands.executeCommand(`${_ChatllmPipelineController.viewType}.focus`);
   }
   dispose() {
     for (const d of this.disposables) d.dispose();
     for (const g of this.graphs.values()) g.dispose();
     this.graphs.clear();
-    this.chatAbort?.abort();
-    this.editorPanel?.dispose();
   }
   webviewOptions() {
     return {
@@ -498,7 +405,6 @@ var ChatllmPanelController = class _ChatllmPanelController {
   }
   broadcast(message) {
     this.view?.webview.postMessage(message);
-    this.editorPanel?.webview.postMessage(message);
   }
   broadcastFeatures() {
     const features = this.featureSummaries();
@@ -532,22 +438,9 @@ var ChatllmPanelController = class _ChatllmPanelController {
             type: "init",
             settings: readSettings(),
             features: this.featureSummaries(),
-            activeTab: this.activeTab,
             apiOrigin: getApiOrigin()
           });
           this.broadcastFeatures();
-          break;
-        case "switchTab":
-          this.activeTab = message.tab;
-          break;
-        case "sendChat":
-          await this.sendChat(message.content, message.command);
-          break;
-        case "cancelChat":
-          this.chatAbort?.abort();
-          break;
-        case "updateSetting":
-          await writeSetting(message.key, message.value);
           break;
         case "setActiveFeature":
           this.store.setActiveFeature(message.featureId);
@@ -570,81 +463,14 @@ var ChatllmPanelController = class _ChatllmPanelController {
           if (task) await vscode3.window.showTextDocument(task.filePath);
           break;
         }
+        case "openChat":
+          await vscode3.commands.executeCommand("chatllm.openChat");
+          break;
       }
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      this.output.appendLine(`[panel] ${msg}`);
+      this.output.appendLine(`[pipeline] ${msg}`);
       this.broadcast({ type: "log", message: msg });
-    }
-  }
-  async sendChat(content, command) {
-    const settings = readSettings();
-    const prompt = await this.composePrompt(content, command);
-    const body = settingsToChatRequest(settings, prompt, this.conversationId);
-    if (command) {
-      body.systemPrompt = SPEC_SYSTEM_PROMPTS[command];
-      body.chatMode = command === "design" || command === "tasks" ? "agent" : body.chatMode;
-      body.toolsEnabled = command === "design" || command === "tasks" ? true : body.toolsEnabled;
-    }
-    this.chatAbort?.abort();
-    const abort = new AbortController();
-    this.chatAbort = abort;
-    let buffer = "";
-    try {
-      const response = await streamChat(
-        body,
-        {
-          onToken: (token) => {
-            buffer += token;
-            this.broadcast({ type: "chatToken", token });
-          },
-          onToolEvent: (event) => {
-            this.broadcast({ type: "chatToolEvent", name: event.name, arguments: event.arguments });
-          }
-        },
-        abort.signal
-      );
-      if (response.conversation?.id) {
-        this.conversationId = response.conversation.id;
-        await this.context.workspaceState.update("chatllm.conversationId", response.conversation.id);
-      }
-      this.broadcast({ type: "chatDone", conversationId: response.conversation?.id });
-      if (command === "tasks") await this.writeGeneratedTasks(buffer);
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      this.broadcast({ type: "chatError", error: msg });
-    } finally {
-      if (this.chatAbort === abort) this.chatAbort = void 0;
-    }
-  }
-  async composePrompt(content, command) {
-    const feature = this.store.getActiveFeature();
-    const parts = [content];
-    if (command === "design" && feature?.requirementsUri) parts.unshift(await readTextFile(feature.requirementsUri));
-    if (command === "tasks" && feature?.requirementsUri) parts.unshift(await readTextFile(feature.requirementsUri));
-    if (command === "tasks" && feature?.designUri) parts.unshift(await readTextFile(feature.designUri));
-    return parts.join("\n\n---\n\n");
-  }
-  async writeGeneratedTasks(text) {
-    const feature = this.store.getActiveFeature();
-    if (!feature?.tasksDirUri) return;
-    for (const block of extractTaskBlocks(text)) {
-      const probe = vscode3.Uri.joinPath(feature.tasksDirUri, "_probe.md");
-      const task = parseTaskContract(feature.id, probe, block.startsWith("---") ? block : `---
-${block}
----
-`);
-      if (!task) continue;
-      task.filePath = vscode3.Uri.joinPath(
-        feature.tasksDirUri,
-        `${task.id}-${task.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40)}.md`
-      );
-      await writeTaskContract(task);
-    }
-    await this.store.refresh();
-    const updated = this.store.getFeature(feature.id);
-    if (updated?.tasksDirUri) {
-      await writeTextFile(vscode3.Uri.joinPath(updated.tasksDirUri, "index.md"), regenerateTasksIndex(updated.tasks));
     }
   }
   async scaffold(name) {
@@ -672,7 +498,7 @@ ${block}
       return;
     }
     const readiness = computeTaskReadiness(feature.tasks);
-    const result = await dispatchFeature(feature, { conversationId: this.conversationId, taskIds });
+    const result = await dispatchFeature(feature, { taskIds });
     const startEvent = {
       graphId: result.graphId,
       featureId: feature.id,
@@ -709,7 +535,7 @@ ${block}
     this.graphs.set(result.graphId, { graphId: result.graphId, dispose });
   }
   renderHtml(webview) {
-    const scriptUri = webview.asWebviewUri(vscode3.Uri.joinPath(this.context.extensionUri, "media", "webview.js"));
+    const scriptUri = webview.asWebviewUri(vscode3.Uri.joinPath(this.context.extensionUri, "media", "pipeline.js"));
     const styleUri = webview.asWebviewUri(vscode3.Uri.joinPath(this.context.extensionUri, "media", "webview.css"));
     const nonce = randomNonce();
     const csp = [
@@ -726,7 +552,7 @@ ${block}
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy" content="${csp}" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Chatllm</title>
+  <title>Chatllm Pipeline</title>
   <link rel="stylesheet" href="${styleUri}" />
 </head>
 <body>
@@ -746,20 +572,585 @@ function randomNonce() {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-// src/spec/store.ts
+// src/chat/chat-panel.ts
 var vscode4 = __toESM(require("vscode"));
+
+// src/chat/models.ts
+var KNOWN_MODELS = {
+  openai: [
+    { id: "gpt-4o", name: "GPT-4o", family: "gpt-4o", detail: "OpenAI", maxInputTokens: 128e3, maxOutputTokens: 16384, toolCalling: true, imageInput: true },
+    { id: "gpt-4o-mini", name: "GPT-4o mini", family: "gpt-4o-mini", detail: "OpenAI", maxInputTokens: 128e3, maxOutputTokens: 16384, toolCalling: true, imageInput: true },
+    { id: "gpt-4-turbo", name: "GPT-4 Turbo", family: "gpt-4", detail: "OpenAI", maxInputTokens: 128e3, maxOutputTokens: 4096, toolCalling: true, imageInput: true },
+    { id: "gpt-4.1", name: "GPT-4.1", family: "gpt-4.1", detail: "OpenAI", maxInputTokens: 1e6, maxOutputTokens: 32768, toolCalling: true, imageInput: true },
+    { id: "gpt-4.1-mini", name: "GPT-4.1 mini", family: "gpt-4.1", detail: "OpenAI", maxInputTokens: 1e6, maxOutputTokens: 32768, toolCalling: true, imageInput: true },
+    { id: "o1", name: "o1", family: "o1", detail: "OpenAI reasoning", maxInputTokens: 2e5, maxOutputTokens: 1e5, toolCalling: false },
+    { id: "o1-mini", name: "o1 mini", family: "o1", detail: "OpenAI reasoning", maxInputTokens: 128e3, maxOutputTokens: 65536, toolCalling: false },
+    { id: "o3", name: "o3", family: "o3", detail: "OpenAI reasoning", maxInputTokens: 2e5, maxOutputTokens: 1e5, toolCalling: true },
+    { id: "o3-mini", name: "o3 mini", family: "o3", detail: "OpenAI reasoning", maxInputTokens: 2e5, maxOutputTokens: 1e5, toolCalling: true }
+  ],
+  openrouter: [
+    { id: "anthropic/claude-3.5-sonnet", name: "Claude 3.5 Sonnet", family: "claude-3.5", detail: "OpenRouter \xB7 Anthropic", maxInputTokens: 2e5, maxOutputTokens: 8192, toolCalling: true, imageInput: true },
+    { id: "anthropic/claude-3.5-haiku", name: "Claude 3.5 Haiku", family: "claude-3.5", detail: "OpenRouter \xB7 Anthropic", maxInputTokens: 2e5, maxOutputTokens: 8192, toolCalling: true, imageInput: true },
+    { id: "anthropic/claude-3-opus", name: "Claude 3 Opus", family: "claude-3", detail: "OpenRouter \xB7 Anthropic", maxInputTokens: 2e5, maxOutputTokens: 4096, toolCalling: true, imageInput: true },
+    { id: "openai/gpt-4o", name: "GPT-4o", family: "gpt-4o", detail: "OpenRouter \xB7 OpenAI", maxInputTokens: 128e3, maxOutputTokens: 16384, toolCalling: true, imageInput: true },
+    { id: "openai/gpt-4o-mini", name: "GPT-4o mini", family: "gpt-4o-mini", detail: "OpenRouter \xB7 OpenAI", maxInputTokens: 128e3, maxOutputTokens: 16384, toolCalling: true, imageInput: true },
+    { id: "meta-llama/llama-3.1-405b-instruct", name: "Llama 3.1 405B", family: "llama-3.1", detail: "OpenRouter \xB7 Meta", maxInputTokens: 131072, maxOutputTokens: 4096, toolCalling: true },
+    { id: "meta-llama/llama-3.1-70b-instruct", name: "Llama 3.1 70B", family: "llama-3.1", detail: "OpenRouter \xB7 Meta", maxInputTokens: 131072, maxOutputTokens: 4096, toolCalling: true },
+    { id: "mistralai/mistral-large", name: "Mistral Large", family: "mistral", detail: "OpenRouter \xB7 Mistral", maxInputTokens: 128e3, maxOutputTokens: 4096, toolCalling: true },
+    { id: "deepseek/deepseek-chat", name: "DeepSeek Chat", family: "deepseek", detail: "OpenRouter \xB7 DeepSeek", maxInputTokens: 64e3, maxOutputTokens: 8192, toolCalling: true },
+    { id: "qwen/qwen-2.5-72b-instruct", name: "Qwen 2.5 72B", family: "qwen", detail: "OpenRouter \xB7 Alibaba", maxInputTokens: 32e3, maxOutputTokens: 4096, toolCalling: true }
+  ],
+  google: [
+    { id: "gemini-2.0-flash-exp", name: "Gemini 2.0 Flash (exp)", family: "gemini-2.0", detail: "Google", maxInputTokens: 1048576, maxOutputTokens: 8192, toolCalling: true, imageInput: true },
+    { id: "gemini-1.5-pro", name: "Gemini 1.5 Pro", family: "gemini-1.5", detail: "Google", maxInputTokens: 2097152, maxOutputTokens: 8192, toolCalling: true, imageInput: true },
+    { id: "gemini-1.5-flash", name: "Gemini 1.5 Flash", family: "gemini-1.5", detail: "Google", maxInputTokens: 1048576, maxOutputTokens: 8192, toolCalling: true, imageInput: true },
+    { id: "gemini-1.5-flash-8b", name: "Gemini 1.5 Flash 8B", family: "gemini-1.5", detail: "Google", maxInputTokens: 1048576, maxOutputTokens: 8192, toolCalling: true, imageInput: true }
+  ],
+  ollama: [],
+  llamacpp: [],
+  lmstudio: [],
+  custom: []
+};
+function listKnownModels(provider) {
+  return KNOWN_MODELS[provider] ?? [];
+}
+var ALL_PROVIDERS = ["openai", "openrouter", "google", "ollama", "llamacpp", "lmstudio", "custom"];
+
+// src/chat/commands.ts
+var SPEC_SYSTEM_PROMPTS = {
+  spec: "Draft EARS-style feature requirements in markdown using ## R-N section ids.",
+  design: "Draft design.md from requirements. Use ## D-N section ids and reference R-* ids.",
+  tasks: `Generate task contracts. Each task must be in a fenced \`\`\`task block with YAML frontmatter containing id, title, status, requirement_refs, design_refs, depends_on, expected_files, architecture_hints, acceptance, and agent.`
+};
+function extractTaskBlocks(content) {
+  const blocks = [];
+  const re = /```task\s*([\s\S]*?)```/gi;
+  let match;
+  while ((match = re.exec(content)) !== null) blocks.push(match[1].trim());
+  return blocks;
+}
+
+// src/chat/stream-client.ts
+async function streamChat(body, handlers, signal) {
+  const response = await apiFetch("/api/chat/stream", {
+    method: "POST",
+    body: JSON.stringify(body),
+    signal
+  });
+  if (!response.ok || !response.body) {
+    const err = await response.json().catch(() => ({ error: response.statusText }));
+    throw new Error(err.error ?? response.statusText);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finalResponse;
+  const consume = (rawEvent) => {
+    const event = rawEvent.match(/^event: (.+)$/m)?.[1];
+    const dataLine = rawEvent.match(/^data: (.+)$/m)?.[1];
+    if (!event || !dataLine) return;
+    const data = JSON.parse(dataLine);
+    if (event === "token") handlers.onToken?.(data.token);
+    if (event === "tool") handlers.onToolEvent?.(data);
+    if (event === "error") throw new Error(data.error);
+    if (event === "done") finalResponse = data;
+  };
+  while (true) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value, { stream: !done });
+    const parts = buffer.split("\n\n");
+    buffer = parts.pop() ?? "";
+    for (const part of parts) consume(part);
+    if (done) break;
+  }
+  if (buffer.trim()) consume(buffer);
+  if (!finalResponse) throw new Error("Stream ended before the chat response completed.");
+  return finalResponse;
+}
+
+// src/chat/chat-panel.ts
+var STORAGE_KEY = "chatllm.chat.sessions";
+var ACTIVE_KEY = "chatllm.chat.activeSession";
+var ChatllmChatPanelController = class _ChatllmChatPanelController {
+  constructor(context, store2, output) {
+    this.context = context;
+    this.store = store2;
+    this.output = output;
+    this.loadSessions();
+    this.disposables.push(
+      onSettingsChange((settings) => this.broadcast({ type: "settings", settings }))
+    );
+  }
+  static viewType = "chatllm.chat";
+  view;
+  disposables = [];
+  sessions = /* @__PURE__ */ new Map();
+  activeSessionId = null;
+  streams = /* @__PURE__ */ new Map();
+  resolveWebviewView(view) {
+    this.view = view;
+    this.bindWebview(view.webview);
+    view.onDidDispose(() => {
+      if (this.view === view) this.view = void 0;
+    });
+  }
+  show() {
+    void vscode4.commands.executeCommand(`${_ChatllmChatPanelController.viewType}.focus`);
+  }
+  async newSession() {
+    const session = this.createSession();
+    this.activeSessionId = session.id;
+    await this.persist();
+    this.broadcastSessions();
+    this.broadcastActiveSession();
+    return session;
+  }
+  openSettings() {
+    this.show();
+    this.broadcast({ type: "openSettings" });
+  }
+  dispose() {
+    for (const d of this.disposables) d.dispose();
+    for (const s of this.streams.values()) s.abort.abort();
+    this.streams.clear();
+  }
+  webviewOptions() {
+    return {
+      enableScripts: true,
+      retainContextWhenHidden: true,
+      localResourceRoots: [
+        vscode4.Uri.joinPath(this.context.extensionUri, "media"),
+        vscode4.Uri.joinPath(this.context.extensionUri, "resources")
+      ]
+    };
+  }
+  bindWebview(webview) {
+    webview.options = this.webviewOptions();
+    webview.html = this.renderHtml(webview);
+    const sub = webview.onDidReceiveMessage((message) => {
+      void this.handleMessage(message);
+    });
+    this.disposables.push(sub);
+  }
+  loadSessions() {
+    const raw = this.context.workspaceState.get(STORAGE_KEY, []);
+    this.sessions.clear();
+    for (const s of raw) {
+      this.sessions.set(s.id, this.normalizeSession(s));
+    }
+    this.activeSessionId = this.context.workspaceState.get(ACTIVE_KEY, null);
+    if (this.activeSessionId && !this.sessions.has(this.activeSessionId)) {
+      this.activeSessionId = null;
+    }
+  }
+  normalizeSession(session) {
+    return {
+      ...session,
+      messages: session.messages.map((m) => ({
+        ...m,
+        status: m.status === "streaming" || m.status === "pending" ? "complete" : m.status ?? "complete"
+      })),
+      overrides: session.overrides ?? {}
+    };
+  }
+  async persist() {
+    const list = Array.from(this.sessions.values()).sort((a, b) => b.updatedAt - a.updatedAt);
+    await this.context.workspaceState.update(STORAGE_KEY, list);
+    await this.context.workspaceState.update(ACTIVE_KEY, this.activeSessionId);
+  }
+  createSession() {
+    const now = Date.now();
+    const session = {
+      id: randomId(),
+      title: "New chat",
+      messages: [],
+      overrides: {},
+      createdAt: now,
+      updatedAt: now
+    };
+    this.sessions.set(session.id, session);
+    return session;
+  }
+  getOrCreateActive() {
+    if (this.activeSessionId) {
+      const s = this.sessions.get(this.activeSessionId);
+      if (s) return s;
+    }
+    const created = this.createSession();
+    this.activeSessionId = created.id;
+    return created;
+  }
+  sessionSummaries() {
+    return Array.from(this.sessions.values()).sort((a, b) => b.updatedAt - a.updatedAt).map((s) => ({
+      id: s.id,
+      title: s.title,
+      updatedAt: s.updatedAt,
+      messageCount: s.messages.length,
+      overrides: s.overrides
+    }));
+  }
+  modelCatalog() {
+    return ALL_PROVIDERS.map((provider) => ({
+      provider,
+      label: providerLabel(provider),
+      models: listKnownModels(provider).map((m) => ({
+        provider,
+        modelId: m.id,
+        name: m.name,
+        detail: m.detail
+      }))
+    }));
+  }
+  broadcast(message) {
+    this.view?.webview.postMessage(message);
+  }
+  broadcastSessions() {
+    this.broadcast({
+      type: "sessions",
+      sessions: this.sessionSummaries(),
+      activeSessionId: this.activeSessionId
+    });
+  }
+  broadcastActiveSession() {
+    const session = this.activeSessionId ? this.sessions.get(this.activeSessionId) : null;
+    if (session) this.broadcast({ type: "session", session });
+  }
+  async handleMessage(message) {
+    try {
+      switch (message.type) {
+        case "ready":
+          await this.sendInit();
+          break;
+        case "newSession": {
+          const s = this.createSession();
+          this.activeSessionId = s.id;
+          await this.persist();
+          this.broadcastSessions();
+          this.broadcastActiveSession();
+          break;
+        }
+        case "openSession": {
+          if (this.sessions.has(message.sessionId)) {
+            this.activeSessionId = message.sessionId;
+            await this.persist();
+            this.broadcastSessions();
+            this.broadcastActiveSession();
+          }
+          break;
+        }
+        case "deleteSession": {
+          const stream = this.streams.get(message.sessionId);
+          if (stream) {
+            stream.abort.abort();
+            this.streams.delete(message.sessionId);
+          }
+          this.sessions.delete(message.sessionId);
+          if (this.activeSessionId === message.sessionId) {
+            const next = this.sessionSummaries()[0];
+            this.activeSessionId = next?.id ?? null;
+          }
+          await this.persist();
+          this.broadcastSessions();
+          this.broadcastActiveSession();
+          break;
+        }
+        case "renameSession": {
+          const s = this.sessions.get(message.sessionId);
+          if (s) {
+            s.title = message.title.trim() || "Untitled";
+            s.updatedAt = Date.now();
+            await this.persist();
+            this.broadcastSessions();
+          }
+          break;
+        }
+        case "sendMessage":
+          await this.sendChat(message.sessionId, message.content);
+          break;
+        case "cancelMessage": {
+          const stream = this.streams.get(message.sessionId);
+          if (stream) {
+            stream.abort.abort();
+            this.streams.delete(message.sessionId);
+          }
+          break;
+        }
+        case "setOverrides": {
+          const s = this.sessions.get(message.sessionId);
+          if (s) {
+            s.overrides = { ...s.overrides, ...message.overrides };
+            s.updatedAt = Date.now();
+            await this.persist();
+            this.broadcastSessions();
+            this.broadcastActiveSession();
+          }
+          break;
+        }
+        case "updateSetting":
+          await writeSetting(message.key, message.value);
+          break;
+        case "openSettings":
+          this.broadcast({ type: "openSettings" });
+          break;
+        case "openPipeline":
+          await vscode4.commands.executeCommand("chatllm.openPipeline");
+          break;
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.output.appendLine(`[chat] ${msg}`);
+      this.broadcast({ type: "log", message: msg });
+    }
+  }
+  async sendInit() {
+    if (!this.activeSessionId || !this.sessions.has(this.activeSessionId)) {
+      this.getOrCreateActive();
+      await this.persist();
+    }
+    const active = this.activeSessionId ? this.sessions.get(this.activeSessionId) ?? null : null;
+    this.broadcast({
+      type: "init",
+      settings: readSettings(),
+      sessions: this.sessionSummaries(),
+      activeSessionId: this.activeSessionId,
+      activeSession: active,
+      modelCatalog: this.modelCatalog()
+    });
+  }
+  detectCommand(content) {
+    const trimmed = content.trimStart();
+    const match = trimmed.match(/^\/(spec|design|tasks)(\s|$)/);
+    if (!match) return { rest: content };
+    return {
+      command: match[1],
+      rest: trimmed.slice(match[0].length).trimStart()
+    };
+  }
+  async sendChat(sessionId, content) {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    if (this.streams.has(sessionId)) {
+      this.broadcast({ type: "log", message: "A response is already streaming for this chat." });
+      return;
+    }
+    const settings = readSettings();
+    const { command, rest } = this.detectCommand(content);
+    const userMessage = {
+      id: randomId(),
+      role: "user",
+      content,
+      createdAt: Date.now(),
+      status: "complete"
+    };
+    session.messages.push(userMessage);
+    if (session.messages.length === 1) {
+      session.title = deriveTitle(content);
+    }
+    session.updatedAt = Date.now();
+    this.broadcastActiveSession();
+    this.broadcastSessions();
+    const assistant = {
+      id: randomId(),
+      role: "assistant",
+      content: "",
+      createdAt: Date.now(),
+      status: "streaming"
+    };
+    session.messages.push(assistant);
+    this.broadcastActiveSession();
+    const provider = session.overrides.provider ?? settings.provider;
+    const model = session.overrides.model ?? settings.model;
+    const chatMode = session.overrides.chatMode ?? settings.chatMode;
+    const useRag = session.overrides.useRag ?? settings.useRag;
+    const toolsEnabled = session.overrides.toolsEnabled ?? settings.toolsEnabled;
+    const body = {
+      conversationId: session.conversationId,
+      provider,
+      model,
+      modelSelection: settings.modelSelection,
+      chatMode: command ? command === "spec" ? "normal" : "agent" : chatMode,
+      content: rest || content,
+      systemPrompt: command ? SPEC_SYSTEM_PROMPTS[command] : settings.systemPrompt || void 0,
+      skillIds: settings.skillIds,
+      documentIds: settings.documentIds,
+      useRag,
+      toolsEnabled: command ? command === "spec" ? toolsEnabled : true : toolsEnabled,
+      mcpServerIds: settings.mcpServerIds,
+      agentIds: settings.agentIds,
+      maxAgentSpawns: settings.maxAgentSpawns
+    };
+    const abort = new AbortController();
+    this.streams.set(sessionId, { abort, messageId: assistant.id });
+    let buffer = "";
+    try {
+      const response = await streamChat(
+        body,
+        {
+          onToken: (text) => {
+            buffer += text;
+            assistant.content = buffer;
+            this.broadcast({ type: "messageAppend", sessionId, messageId: assistant.id, chunk: text });
+          },
+          onToolEvent: (event) => {
+            this.broadcast({
+              type: "toolEvent",
+              sessionId,
+              name: event.name,
+              arguments: event.arguments ?? {}
+            });
+          }
+        },
+        abort.signal
+      );
+      if (response.conversation?.id) session.conversationId = response.conversation.id;
+      assistant.status = "complete";
+      assistant.content = buffer;
+      session.updatedAt = Date.now();
+      if (command === "tasks" && buffer) {
+        try {
+          const written = await this.writeGeneratedTasks(buffer);
+          if (written > 0) {
+            const note = `
+
+_Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active feature. Run **Chatllm: Dispatch Feature Tasks** to execute them._`;
+            assistant.content = `${buffer}${note}`;
+            this.broadcast({ type: "messageAppend", sessionId, messageId: assistant.id, chunk: note });
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          this.output.appendLine(`[chat.tasks] ${msg}`);
+        }
+      }
+      this.broadcast({
+        type: "messageComplete",
+        sessionId,
+        messageId: assistant.id,
+        conversationId: session.conversationId
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.output.appendLine(`[chat] ${msg}`);
+      const aborted = abort.signal.aborted;
+      if (aborted) {
+        assistant.status = "complete";
+        assistant.content = `${buffer}${buffer ? "\n\n" : ""}_Cancelled._`;
+        this.broadcast({ type: "messageAppend", sessionId, messageId: assistant.id, chunk: `${buffer ? "\n\n" : ""}_Cancelled._` });
+        this.broadcast({ type: "messageComplete", sessionId, messageId: assistant.id, conversationId: session.conversationId });
+      } else {
+        assistant.status = "error";
+        assistant.error = msg;
+        this.broadcast({ type: "messageError", sessionId, messageId: assistant.id, error: msg });
+      }
+    } finally {
+      this.streams.delete(sessionId);
+      await this.persist();
+      this.broadcastSessions();
+    }
+  }
+  async writeGeneratedTasks(text) {
+    const feature = this.store.getActiveFeature();
+    if (!feature?.tasksDirUri) return 0;
+    let written = 0;
+    for (const block of extractTaskBlocks(text)) {
+      const probe = vscode4.Uri.joinPath(feature.tasksDirUri, "_probe.md");
+      const task = parseTaskContract(feature.id, probe, block.startsWith("---") ? block : `---
+${block}
+---
+`);
+      if (!task) continue;
+      task.filePath = vscode4.Uri.joinPath(
+        feature.tasksDirUri,
+        `${task.id}-${task.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40)}.md`
+      );
+      await writeTaskContract(task);
+      written++;
+    }
+    if (written > 0) {
+      await this.store.refresh();
+      const updated = this.store.getFeature(feature.id);
+      if (updated?.tasksDirUri) {
+        await writeTextFile(
+          vscode4.Uri.joinPath(updated.tasksDirUri, "index.md"),
+          regenerateTasksIndex(updated.tasks)
+        );
+      }
+    }
+    return written;
+  }
+  renderHtml(webview) {
+    const scriptUri = webview.asWebviewUri(vscode4.Uri.joinPath(this.context.extensionUri, "media", "chat.js"));
+    const styleUri = webview.asWebviewUri(vscode4.Uri.joinPath(this.context.extensionUri, "media", "webview.css"));
+    const nonce = randomNonce2();
+    const csp = [
+      `default-src 'none'`,
+      `img-src ${webview.cspSource} https: data:`,
+      `style-src ${webview.cspSource} 'unsafe-inline'`,
+      `font-src ${webview.cspSource}`,
+      `script-src 'nonce-${nonce}'`,
+      `connect-src ${webview.cspSource}`
+    ].join("; ");
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="${csp}" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Chatllm</title>
+  <link rel="stylesheet" href="${styleUri}" />
+</head>
+<body class="chatllm-chat-body">
+  <div id="root"></div>
+  <script nonce="${nonce}" src="${scriptUri}"></script>
+</body>
+</html>`;
+  }
+};
+function providerLabel(provider) {
+  switch (provider) {
+    case "openai":
+      return "OpenAI";
+    case "openrouter":
+      return "OpenRouter";
+    case "google":
+      return "Google";
+    case "ollama":
+      return "Ollama";
+    case "llamacpp":
+      return "llama.cpp";
+    case "lmstudio":
+      return "LM Studio";
+    case "custom":
+      return "Custom";
+  }
+}
+function deriveTitle(text) {
+  const firstLine = text.replace(/\s+/g, " ").trim();
+  if (!firstLine) return "New chat";
+  return firstLine.length > 60 ? `${firstLine.slice(0, 57)}\u2026` : firstLine;
+}
+function randomId() {
+  return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+}
+function randomNonce2() {
+  const bytes = new Uint8Array(16);
+  for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// src/spec/store.ts
+var vscode5 = __toESM(require("vscode"));
 var SpecStore = class {
   constructor(output) {
     this.output = output;
   }
-  changeEmitter = new vscode4.EventEmitter();
+  changeEmitter = new vscode5.EventEmitter();
   onDidChange = this.changeEmitter.event;
   features = /* @__PURE__ */ new Map();
   watcher;
   activeFeatureId;
   async initialize(context) {
     this.activeFeatureId = context.workspaceState.get("chatllm.activeFeatureId");
-    this.watcher = vscode4.workspace.createFileSystemWatcher("**/.chatllm/specs/**/*.md");
+    this.watcher = vscode5.workspace.createFileSystemWatcher("**/.chatllm/specs/**/*.md");
     this.watcher.onDidCreate(() => void this.refresh());
     this.watcher.onDidChange(() => void this.refresh());
     this.watcher.onDidDelete(() => void this.refresh());
@@ -783,11 +1174,11 @@ var SpecStore = class {
   }
   async refresh() {
     this.features.clear();
-    for (const folder of vscode4.workspace.workspaceFolders ?? []) {
-      const root = vscode4.Uri.joinPath(folder.uri, ".chatllm", "specs");
+    for (const folder of vscode5.workspace.workspaceFolders ?? []) {
+      const root = vscode5.Uri.joinPath(folder.uri, ".chatllm", "specs");
       try {
-        for (const [name, type] of await vscode4.workspace.fs.readDirectory(root)) {
-          if (type === vscode4.FileType.Directory) {
+        for (const [name, type] of await vscode5.workspace.fs.readDirectory(root)) {
+          if (type === vscode5.FileType.Directory) {
             const feature = await this.loadFeature(root, name);
             if (feature) this.features.set(feature.id, feature);
           }
@@ -798,11 +1189,11 @@ var SpecStore = class {
     this.changeEmitter.fire();
   }
   async loadFeature(specsRoot, id) {
-    const rootUri = vscode4.Uri.joinPath(specsRoot, id);
-    const featureMdUri = vscode4.Uri.joinPath(rootUri, "feature.md");
-    const requirementsUri = vscode4.Uri.joinPath(rootUri, "requirements.md");
-    const designUri = vscode4.Uri.joinPath(rootUri, "design.md");
-    const tasksDirUri = vscode4.Uri.joinPath(rootUri, "tasks");
+    const rootUri = vscode5.Uri.joinPath(specsRoot, id);
+    const featureMdUri = vscode5.Uri.joinPath(rootUri, "feature.md");
+    const requirementsUri = vscode5.Uri.joinPath(rootUri, "requirements.md");
+    const designUri = vscode5.Uri.joinPath(rootUri, "design.md");
+    const tasksDirUri = vscode5.Uri.joinPath(rootUri, "tasks");
     let name = id;
     let status = "draft";
     try {
@@ -816,9 +1207,9 @@ var SpecStore = class {
     const designIds = await this.readIds(designUri, "D");
     const tasks = [];
     try {
-      for (const [fileName, fileType] of await vscode4.workspace.fs.readDirectory(tasksDirUri)) {
-        if (fileType !== vscode4.FileType.File || !/^T-\d+.*\.md$/i.test(fileName)) continue;
-        const filePath = vscode4.Uri.joinPath(tasksDirUri, fileName);
+      for (const [fileName, fileType] of await vscode5.workspace.fs.readDirectory(tasksDirUri)) {
+        if (fileType !== vscode5.FileType.File || !/^T-\d+.*\.md$/i.test(fileName)) continue;
+        const filePath = vscode5.Uri.joinPath(tasksDirUri, fileName);
         const task = parseTaskContract(id, filePath, await readTextFile(filePath));
         if (task) tasks.push(task);
       }
@@ -840,7 +1231,7 @@ var SpecStore = class {
 };
 
 // src/theme-bridge.ts
-var vscode5 = __toESM(require("vscode"));
+var vscode6 = __toESM(require("vscode"));
 var CHATLLM_TO_VSCODE = {
   "default:light": "Light Modern",
   "default:dark": "Dark Modern",
@@ -868,23 +1259,23 @@ function createThemeBridge(output) {
   async function applyTheme(themeId) {
     if (!themeId) return;
     lastApplied = themeId;
-    await vscode5.workspace.getConfiguration("workbench").update("colorTheme", themeId, vscode5.ConfigurationTarget.Global);
+    await vscode6.workspace.getConfiguration("workbench").update("colorTheme", themeId, vscode6.ConfigurationTarget.Global);
   }
   async function applyColorOverrides(overrides) {
     if (!overrides || Object.keys(overrides).length === 0) return;
     const fingerprint = JSON.stringify(overrides);
     if (fingerprint === lastOverridesKey) return;
     lastOverridesKey = fingerprint;
-    const config = vscode5.workspace.getConfiguration("workbench");
+    const config = vscode6.workspace.getConfiguration("workbench");
     const existing = config.get("colorCustomizations") ?? {};
     const next = { ...overrides };
     for (const [key, value] of Object.entries(existing)) {
       if (key.startsWith("[") && key.endsWith("]")) next[key] = value;
     }
-    await config.update("colorCustomizations", next, vscode5.ConfigurationTarget.Global);
+    await config.update("colorCustomizations", next, vscode6.ConfigurationTarget.Global);
   }
   async function publishTheme() {
-    const themeId = vscode5.workspace.getConfiguration("workbench").get("colorTheme");
+    const themeId = vscode6.workspace.getConfiguration("workbench").get("colorTheme");
     if (!themeId || themeId === lastApplied) {
       lastApplied = void 0;
       return;
@@ -910,7 +1301,7 @@ function createThemeBridge(output) {
   }
   const envTheme = CHATLLM_TO_VSCODE[`${process.env.CHATLLM_THEME_FAMILY}:${process.env.CHATLLM_THEME_MODE === "system" ? "dark" : process.env.CHATLLM_THEME_MODE}`];
   void applyTheme(envTheme);
-  const listener = vscode5.workspace.onDidChangeConfiguration((event) => {
+  const listener = vscode6.workspace.onDidChangeConfiguration((event) => {
     if (event.affectsConfiguration("workbench.colorTheme")) void publishTheme();
   });
   connect();
@@ -923,12 +1314,12 @@ function createThemeBridge(output) {
 }
 
 // src/views/runsTree.ts
-var vscode6 = __toESM(require("vscode"));
+var vscode7 = __toESM(require("vscode"));
 var RunsTreeProvider = class {
   constructor(writeback) {
     this.writeback = writeback;
   }
-  emitter = new vscode6.EventEmitter();
+  emitter = new vscode7.EventEmitter();
   onDidChangeTreeData = this.emitter.event;
   runs = /* @__PURE__ */ new Map();
   refresh() {
@@ -955,11 +1346,11 @@ var RunsTreeProvider = class {
   }
   getTreeItem(item) {
     if (item.kind === "run") {
-      const tree2 = new vscode6.TreeItem(item.run.label, vscode6.TreeItemCollapsibleState.Expanded);
+      const tree2 = new vscode7.TreeItem(item.run.label, vscode7.TreeItemCollapsibleState.Expanded);
       tree2.description = item.run.status;
       return tree2;
     }
-    const tree = new vscode6.TreeItem(item.nodeId);
+    const tree = new vscode7.TreeItem(item.nodeId);
     tree.description = item.status;
     return tree;
   }
@@ -975,27 +1366,27 @@ function mapStatus2(status) {
 }
 
 // src/views/specsTree.ts
-var vscode7 = __toESM(require("vscode"));
+var vscode8 = __toESM(require("vscode"));
 var SpecsTreeProvider = class {
   constructor(store2) {
     this.store = store2;
     store2.onDidChange(() => this.refresh());
   }
-  emitter = new vscode7.EventEmitter();
+  emitter = new vscode8.EventEmitter();
   onDidChangeTreeData = this.emitter.event;
   refresh() {
     this.emitter.fire(void 0);
   }
   getTreeItem(item) {
     if (item.kind === "feature") {
-      const tree2 = new vscode7.TreeItem(item.feature.name, vscode7.TreeItemCollapsibleState.Expanded);
+      const tree2 = new vscode8.TreeItem(item.feature.name, vscode8.TreeItemCollapsibleState.Expanded);
       tree2.description = item.feature.status;
       tree2.contextValue = "feature";
-      tree2.iconPath = new vscode7.ThemeIcon("folder");
+      tree2.iconPath = new vscode8.ThemeIcon("folder");
       tree2.command = { command: "chatllm.setActiveFeature", title: "Set Active", arguments: [item.feature.id] };
       return tree2;
     }
-    const tree = new vscode7.TreeItem(item.label);
+    const tree = new vscode8.TreeItem(item.label);
     tree.resourceUri = item.uri;
     tree.command = { command: "vscode.open", title: "Open", arguments: [item.uri] };
     return tree;
@@ -1007,26 +1398,26 @@ var SpecsTreeProvider = class {
     return [
       f.requirementsUri && { kind: "file", label: `requirements.md (${f.requirementIds.length})`, uri: f.requirementsUri },
       f.designUri && { kind: "file", label: `design.md (${f.designIds.length})`, uri: f.designUri },
-      f.tasksDirUri && { kind: "file", label: `tasks/index.md (${f.tasks.length})`, uri: vscode7.Uri.joinPath(f.tasksDirUri, "index.md") }
+      f.tasksDirUri && { kind: "file", label: `tasks/index.md (${f.tasks.length})`, uri: vscode8.Uri.joinPath(f.tasksDirUri, "index.md") }
     ].filter(Boolean);
   }
 };
 
 // src/views/tasksTree.ts
-var vscode8 = __toESM(require("vscode"));
+var vscode9 = __toESM(require("vscode"));
 var TasksTreeProvider = class {
   constructor(store2) {
     this.store = store2;
     store2.onDidChange(() => this.refresh());
   }
-  emitter = new vscode8.EventEmitter();
+  emitter = new vscode9.EventEmitter();
   onDidChangeTreeData = this.emitter.event;
   refresh() {
     this.emitter.fire(void 0);
   }
   getTreeItem(item) {
-    if (item.kind === "group") return new vscode8.TreeItem(item.label, vscode8.TreeItemCollapsibleState.Expanded);
-    const tree = new vscode8.TreeItem(`${item.task.id}: ${item.task.title}`);
+    if (item.kind === "group") return new vscode9.TreeItem(item.label, vscode9.TreeItemCollapsibleState.Expanded);
+    const tree = new vscode9.TreeItem(`${item.task.id}: ${item.task.title}`);
     tree.description = item.task.status;
     tree.contextValue = "task";
     tree.command = { command: "chatllm.openTask", title: "Open Task", arguments: [{ kind: "task", featureId: item.featureId, task: { id: item.task.id } }] };
@@ -1046,9 +1437,10 @@ var TasksTreeProvider = class {
 
 // src/extension.ts
 var store;
-var panel;
+var pipeline;
+var chat;
 async function activate(context) {
-  const output = vscode9.window.createOutputChannel("Chatllm");
+  const output = vscode10.window.createOutputChannel("Chatllm");
   store = new SpecStore(output);
   await store.initialize(context);
   const specsTree = new SpecsTreeProvider(store);
@@ -1060,39 +1452,48 @@ async function activate(context) {
       await store.refresh();
     }
   });
-  panel = new ChatllmPanelController(context, store, output);
+  pipeline = new ChatllmPipelineController(context, store, output);
+  chat = new ChatllmChatPanelController(context, store, output);
   context.subscriptions.push(
     output,
     store,
-    panel,
-    vscode9.window.registerWebviewViewProvider(ChatllmPanelController.viewType, panel, {
+    pipeline,
+    chat,
+    vscode10.window.registerWebviewViewProvider(ChatllmPipelineController.viewType, pipeline, {
       webviewOptions: { retainContextWhenHidden: true }
     }),
-    vscode9.window.registerTreeDataProvider("chatllm.specs", specsTree),
-    vscode9.window.registerTreeDataProvider("chatllm.tasks", tasksTree),
-    vscode9.window.registerTreeDataProvider("chatllm.runs", runsTree),
+    vscode10.window.registerWebviewViewProvider(ChatllmChatPanelController.viewType, chat, {
+      webviewOptions: { retainContextWhenHidden: true }
+    }),
+    vscode10.window.registerTreeDataProvider("chatllm.specs", specsTree),
+    vscode10.window.registerTreeDataProvider("chatllm.tasks", tasksTree),
+    vscode10.window.registerTreeDataProvider("chatllm.runs", runsTree),
     createThemeBridge(output),
     statusBar(),
-    ...commands3(context, specsTree, tasksTree, runsTree)
+    ...commands4(context, specsTree, tasksTree, runsTree)
   );
 }
-function commands3(context, specsTree, tasksTree, runsTree) {
+function commands4(context, specsTree, tasksTree, runsTree) {
   return [
-    vscode9.commands.registerCommand("chatllm.openChat", () => panel.showAsPanel("chat")),
-    vscode9.commands.registerCommand("chatllm.openSettings", () => panel.showAsPanel("settings")),
-    vscode9.commands.registerCommand("chatllm.openPipeline", () => panel.showAsPanel("pipeline")),
-    vscode9.commands.registerCommand("chatllm.refreshSpecs", async () => {
+    vscode10.commands.registerCommand("chatllm.openChat", () => chat.show()),
+    vscode10.commands.registerCommand("chatllm.newChat", async () => {
+      chat.show();
+      await chat.newSession();
+    }),
+    vscode10.commands.registerCommand("chatllm.openSettings", () => chat.openSettings()),
+    vscode10.commands.registerCommand("chatllm.openPipeline", () => pipeline.show()),
+    vscode10.commands.registerCommand("chatllm.refreshSpecs", async () => {
       await store.refresh();
       specsTree.refresh();
     }),
-    vscode9.commands.registerCommand("chatllm.refreshTasks", async () => {
+    vscode10.commands.registerCommand("chatllm.refreshTasks", async () => {
       await store.refresh();
       tasksTree.refresh();
     }),
-    vscode9.commands.registerCommand("chatllm.refreshRuns", () => runsTree.refresh()),
-    vscode9.commands.registerCommand("chatllm.scaffoldFeature", async () => {
-      const folder = vscode9.workspace.workspaceFolders?.[0];
-      const name = await vscode9.window.showInputBox({ prompt: "Feature name" });
+    vscode10.commands.registerCommand("chatllm.refreshRuns", () => runsTree.refresh()),
+    vscode10.commands.registerCommand("chatllm.scaffoldFeature", async () => {
+      const folder = vscode10.workspace.workspaceFolders?.[0];
+      const name = await vscode10.window.showInputBox({ prompt: "Feature name" });
       if (!folder || !name) return;
       const root = await scaffoldFeature(folder, name);
       const id = root.path.split("/").pop() ?? name;
@@ -1101,44 +1502,44 @@ function commands3(context, specsTree, tasksTree, runsTree) {
       await store.refresh();
       specsTree.refresh();
     }),
-    vscode9.commands.registerCommand("chatllm.setActiveFeature", async (id) => {
+    vscode10.commands.registerCommand("chatllm.setActiveFeature", async (id) => {
       store.setActiveFeature(id);
       await context.workspaceState.update("chatllm.activeFeatureId", id);
       tasksTree.refresh();
     }),
-    vscode9.commands.registerCommand("chatllm.openTask", async (arg) => {
+    vscode10.commands.registerCommand("chatllm.openTask", async (arg) => {
       const task = arg && store.getTask(arg.featureId, arg.task.id);
-      if (task) await vscode9.window.showTextDocument(task.filePath);
+      if (task) await vscode10.window.showTextDocument(task.filePath);
     }),
-    vscode9.commands.registerCommand("chatllm.runTask", async (arg) => {
+    vscode10.commands.registerCommand("chatllm.runTask", async (arg) => {
       const feature = arg && store.getFeature(arg.featureId);
       if (!feature || !arg) return;
-      await panel.dispatch(feature.id, [arg.task.id]);
+      await pipeline.dispatch(feature.id, [arg.task.id]);
     }),
-    vscode9.commands.registerCommand("chatllm.markTaskReady", async (arg) => {
+    vscode10.commands.registerCommand("chatllm.markTaskReady", async (arg) => {
       const task = arg && store.getTask(arg.featureId, arg.task.id);
       if (task) await updateTaskStatus(task.filePath, "ready");
       await store.refresh();
     }),
-    vscode9.commands.registerCommand("chatllm.dispatchFeature", async () => {
+    vscode10.commands.registerCommand("chatllm.dispatchFeature", async () => {
       const feature = store.getActiveFeature();
       if (!feature) return;
-      await panel.dispatch(feature.id);
+      await pipeline.dispatch(feature.id);
     }),
-    vscode9.commands.registerCommand("chatllm.regenerateTasksIndex", async () => {
+    vscode10.commands.registerCommand("chatllm.regenerateTasksIndex", async () => {
       const feature = store.getActiveFeature();
-      if (feature?.tasksDirUri) await writeTextFile(vscode9.Uri.joinPath(feature.tasksDirUri, "index.md"), regenerateTasksIndex(feature.tasks));
+      if (feature?.tasksDirUri) await writeTextFile(vscode10.Uri.joinPath(feature.tasksDirUri, "index.md"), regenerateTasksIndex(feature.tasks));
     }),
-    vscode9.commands.registerCommand("chatllm.cancelRun", async () => {
-      const graphId = await vscode9.window.showInputBox({ prompt: "Graph id to cancel" });
+    vscode10.commands.registerCommand("chatllm.cancelRun", async () => {
+      const graphId = await vscode10.window.showInputBox({ prompt: "Graph id to cancel" });
       if (graphId) await cancelExecutionGraph(graphId);
     })
   ];
 }
 function statusBar() {
-  const item = vscode9.window.createStatusBarItem(vscode9.StatusBarAlignment.Left, 100);
+  const item = vscode10.window.createStatusBarItem(vscode10.StatusBarAlignment.Left, 100);
   item.text = "$(comment-discussion) Chatllm";
-  item.tooltip = "Open Chatllm panel";
+  item.tooltip = "Open Chatllm chat";
   item.command = "chatllm.openChat";
   item.show();
   return item;

@@ -65,6 +65,10 @@ body {
 	/* Panel depth shadows cast onto the editor surface */
 	--vscode-shadow-depth-x: 5px 0 10px -4px rgba(0, 0, 0, 0.05);
 	--vscode-shadow-depth-y: 0 5px 10px -4px rgba(0, 0, 0, 0.04);
+
+	/* Chatllm chrome layout (mirrors web app shell) */
+	--chatllm-chrome-gap: 6px;
+	--chatllm-chrome-radius: 10px;
 }
 
 /* Disable panel/part shadows when the setting is off (preserves floating modals, notifications, etc.) */
@@ -353,4 +357,69 @@ body {
 .monaco-workbench .monaco-action-bar:not(.vertical) .action-item .action-label:hover:not(.disabled) {
 	outline: 1px dashed var(--vscode-toolbar-hoverOutline);
 	outline-offset: -1px;
+}
+
+/* Chatllm chrome: rounded floating parts with gaps between them.
+ * Uses border (not margin) so the workbench grid layout is unchanged. */
+
+.monaco-workbench .part.activitybar,
+.monaco-workbench .part.sidebar,
+.monaco-workbench .part.auxiliarybar,
+.monaco-workbench .part.panel {
+	box-sizing: border-box;
+	border-radius: var(--chatllm-chrome-radius);
+	border-color: var(--vscode-editor-background) !important;
+	border-style: solid !important;
+	border-width: 0;
+}
+
+.monaco-workbench .part.activitybar {
+	border-radius: 0;
+}
+
+/* Sidebar on the left: activity bar -> sidebar -> editor */
+.monaco-workbench:not(.sidebar-right) .part.sidebar {
+	border-left-width: var(--chatllm-chrome-gap) !important;
+	border-right-width: var(--chatllm-chrome-gap) !important;
+}
+
+/* Sidebar on the right: editor -> sidebar -> activity bar */
+.monaco-workbench.sidebar-right .part.sidebar {
+	border-left-width: var(--chatllm-chrome-gap) !important;
+	border-right-width: var(--chatllm-chrome-gap) !important;
+}
+
+/* Auxiliary bar (opposite side of the sidebar) */
+.monaco-workbench:not(.sidebar-right) .part.auxiliarybar {
+	border-left-width: var(--chatllm-chrome-gap) !important;
+}
+
+.monaco-workbench.sidebar-right .part.auxiliarybar {
+	border-right-width: var(--chatllm-chrome-gap) !important;
+}
+
+/* Panel position (default bottom) */
+.monaco-workbench .part.panel {
+	border-top-width: var(--chatllm-chrome-gap) !important;
+}
+
+.monaco-workbench.panel-position-top .part.panel {
+	border-top-width: 0 !important;
+	border-bottom-width: var(--chatllm-chrome-gap) !important;
+}
+
+.monaco-workbench.panel-position-left .part.panel {
+	border-top-width: 0 !important;
+	border-right-width: var(--chatllm-chrome-gap) !important;
+}
+
+.monaco-workbench.panel-position-right .part.panel {
+	border-top-width: 0 !important;
+	border-left-width: var(--chatllm-chrome-gap) !important;
+}
+
+.monaco-workbench .part.titlebar,
+.monaco-workbench .part.titlebar.inactive {
+	height: 36px;
+	border: none;
 }

@@ -42,13 +42,13 @@ import { SwitchCompositeViewAction } from '../compositeBarActions.js';
 
 export class ActivitybarPart extends Part {
 
-	static readonly ACTION_HEIGHT = 48;
+	static readonly ACTION_HEIGHT = 42;
 	static readonly COMPACT_ACTION_HEIGHT = 32;
 
-	static readonly ACTIVITYBAR_WIDTH = 48;
+	static readonly ACTIVITYBAR_WIDTH = 42;
 	static readonly COMPACT_ACTIVITYBAR_WIDTH = 36;
 
-	static readonly ICON_SIZE = 24;
+	static readonly ICON_SIZE = 20;
 	static readonly COMPACT_ICON_SIZE = 16;
 
 	static readonly pinnedViewContainersKey = 'workbench.activity.pinnedViewlets2';

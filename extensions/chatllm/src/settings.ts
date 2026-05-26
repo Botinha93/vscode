@@ -14,6 +14,7 @@ export interface ChatllmSettings {
   skillIds: string[];
   documentIds: string[];
   systemPrompt: string;
+  copilotEnabled: boolean;
 }
 
 const SECTION = "chatllm";
@@ -33,13 +34,19 @@ export function readSettings(): ChatllmSettings {
     skillIds: cfg.get<string[]>("skillIds") ?? [],
     documentIds: cfg.get<string[]>("documentIds") ?? [],
     systemPrompt: cfg.get<string>("systemPrompt") ?? "",
+    copilotEnabled: cfg.get<boolean>("copilot.enabled") ?? false,
   };
 }
 
+const FLAT_TO_DOTTED: Partial<Record<keyof ChatllmSettings, string>> = {
+  copilotEnabled: "copilot.enabled",
+};
+
 export async function writeSetting<K extends keyof ChatllmSettings>(key: K, value: ChatllmSettings[K]): Promise<void> {
+  const dotted = FLAT_TO_DOTTED[key] ?? (key as string);
   await vscode.workspace
     .getConfiguration(SECTION)
-    .update(key, value, vscode.ConfigurationTarget.Global);
+    .update(dotted, value, vscode.ConfigurationTarget.Global);
 }
 
 export function onSettingsChange(listener: (settings: ChatllmSettings) => void): vscode.Disposable {

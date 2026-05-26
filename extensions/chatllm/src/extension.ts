@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { cancelExecutionGraph } from "./dispatch/client";
-import { ChatllmPanelController } from "./panel/panel";
+import { ChatllmPipelineController } from "./panel/panel";
+import { ChatllmChatPanelController } from "./chat/chat-panel";
 import { scaffoldFeature, regenerateTasksIndex, updateTaskStatus, writeTextFile } from "./spec/writer";
 import { SpecStore } from "./spec/store";
 import { createThemeBridge } from "./theme-bridge";
@@ -9,7 +10,8 @@ import { SpecsTreeProvider } from "./views/specsTree";
 import { TasksTreeProvider } from "./views/tasksTree";
 
 let store: SpecStore;
-let panel: ChatllmPanelController;
+let pipeline: ChatllmPipelineController;
+let chat: ChatllmChatPanelController;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const output = vscode.window.createOutputChannel("Chatllm");
@@ -26,13 +28,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
   });
 
-  panel = new ChatllmPanelController(context, store, output);
+  pipeline = new ChatllmPipelineController(context, store, output);
+  chat = new ChatllmChatPanelController(context, store, output);
 
   context.subscriptions.push(
     output,
     store,
-    panel,
-    vscode.window.registerWebviewViewProvider(ChatllmPanelController.viewType, panel, {
+    pipeline,
+    chat,
+    vscode.window.registerWebviewViewProvider(ChatllmPipelineController.viewType, pipeline, {
+      webviewOptions: { retainContextWhenHidden: true },
+    }),
+    vscode.window.registerWebviewViewProvider(ChatllmChatPanelController.viewType, chat, {
       webviewOptions: { retainContextWhenHidden: true },
     }),
     vscode.window.registerTreeDataProvider("chatllm.specs", specsTree),
@@ -51,9 +58,13 @@ function commands(
   runsTree: RunsTreeProvider,
 ): vscode.Disposable[] {
   return [
-    vscode.commands.registerCommand("chatllm.openChat", () => panel.showAsPanel("chat")),
-    vscode.commands.registerCommand("chatllm.openSettings", () => panel.showAsPanel("settings")),
-    vscode.commands.registerCommand("chatllm.openPipeline", () => panel.showAsPanel("pipeline")),
+    vscode.commands.registerCommand("chatllm.openChat", () => chat.show()),
+    vscode.commands.registerCommand("chatllm.newChat", async () => {
+      chat.show();
+      await chat.newSession();
+    }),
+    vscode.commands.registerCommand("chatllm.openSettings", () => chat.openSettings()),
+    vscode.commands.registerCommand("chatllm.openPipeline", () => pipeline.show()),
     vscode.commands.registerCommand("chatllm.refreshSpecs", async () => { await store.refresh(); specsTree.refresh(); }),
     vscode.commands.registerCommand("chatllm.refreshTasks", async () => { await store.refresh(); tasksTree.refresh(); }),
     vscode.commands.registerCommand("chatllm.refreshRuns", () => runsTree.refresh()),
@@ -80,7 +91,7 @@ function commands(
     vscode.commands.registerCommand("chatllm.runTask", async (arg?: { featureId: string; task: { id: string } }) => {
       const feature = arg && store.getFeature(arg.featureId);
       if (!feature || !arg) return;
-      await panel.dispatch(feature.id, [arg.task.id]);
+      await pipeline.dispatch(feature.id, [arg.task.id]);
     }),
     vscode.commands.registerCommand("chatllm.markTaskReady", async (arg?: { featureId: string; task: { id: string } }) => {
       const task = arg && store.getTask(arg.featureId, arg.task.id);
@@ -90,7 +101,7 @@ function commands(
     vscode.commands.registerCommand("chatllm.dispatchFeature", async () => {
       const feature = store.getActiveFeature();
       if (!feature) return;
-      await panel.dispatch(feature.id);
+      await pipeline.dispatch(feature.id);
     }),
     vscode.commands.registerCommand("chatllm.regenerateTasksIndex", async () => {
       const feature = store.getActiveFeature();
@@ -106,7 +117,7 @@ function commands(
 function statusBar(): vscode.StatusBarItem {
   const item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   item.text = "$(comment-discussion) Chatllm";
-  item.tooltip = "Open Chatllm panel";
+  item.tooltip = "Open Chatllm chat";
   item.command = "chatllm.openChat";
   item.show();
   return item;
