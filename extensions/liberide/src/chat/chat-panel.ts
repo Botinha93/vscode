@@ -15,7 +15,12 @@ import {
 } from "../api";
 import { onSettingsChange, readSettings, writeSetting, type LiberideSettings } from "../settings";
 import { detectProjectIdentity, projectFolderName, type ProjectIdentity } from "../project/identity";
-import { SPEC_SYSTEM_PROMPTS, extractTaskBlocks } from "./commands";
+import {
+  PIPELINE_GENERATE_SYSTEM_PROMPT,
+  PIPELINE_INTERVIEW_SYSTEM_PROMPT,
+  SPEC_SYSTEM_PROMPTS,
+  extractTaskBlocks,
+} from "./commands";
 import { defaultEnabledModel, findConfiguredModel, toWireProvider } from "./models";
 import { listCopilotLmModels, streamCopilotChat } from "./copilot-lm";
 import { streamChat } from "./stream-client";
@@ -45,7 +50,7 @@ import type { ToolCallEvent } from "./types";
 import { execFile } from "node:child_process";
 import { parseTaskContract } from "../spec/schema";
 import type { SpecStore } from "../spec/store";
-import { regenerateTasksIndex, writeTaskContract, writeTextFile } from "../spec/writer";
+import { regenerateTasksIndex, scaffoldFeature, writeTaskContract, writeTextFile } from "../spec/writer";
 
 const OVERRIDES_STORAGE_KEY = "liberide.chat.overrides";
 const ACTIVE_SESSION_STORAGE_KEY = "liberide.chat.activeSession";
@@ -204,6 +209,9 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
           break;
         case "setSessionKind":
           await this.updateSessionKind(message.sessionId, message.kind);
+          break;
+        case "generatePipeline":
+          await this.generatePipeline(message.sessionId, message.featureName);
           break;
         case "refreshCatalog":
           await this.refreshCatalog();
@@ -707,13 +715,23 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     this.broadcastSessions();
 
     const overrides = session.overrides;
+    const pipelineMode = !command && session.kind === "pipeline";
     const chatMode = command
       ? (command === "spec" ? "normal" : "agent")
-      : (overrides.chatMode ?? settings.chatMode);
+      : pipelineMode
+        ? "normal"
+        : (overrides.chatMode ?? settings.chatMode);
     const useRag = overrides.useRag ?? settings.useRag;
     const toolsEnabled = command
       ? (command === "spec" ? (overrides.toolsEnabled ?? settings.toolsEnabled) : true)
-      : (overrides.toolsEnabled ?? settings.toolsEnabled);
+      : pipelineMode
+        ? false
+        : (overrides.toolsEnabled ?? settings.toolsEnabled);
+    const systemPrompt = command
+      ? SPEC_SYSTEM_PROMPTS[command]
+      : pipelineMode
+        ? PIPELINE_INTERVIEW_SYSTEM_PROMPT
+        : (settings.systemPrompt || undefined);
 
     const body: ChatRequest = {
       conversationId,
@@ -722,13 +740,13 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       modelSelection: settings.modelSelection,
       chatMode,
       content: rest || content,
-      systemPrompt: command ? SPEC_SYSTEM_PROMPTS[command] : settings.systemPrompt || undefined,
-      skillIds: overrides.skillIds ?? [],
+      systemPrompt,
+      skillIds: pipelineMode ? [] : (overrides.skillIds ?? []),
       documentIds: [],
-      useRag,
+      useRag: pipelineMode ? false : useRag,
       toolsEnabled,
-      mcpServerIds: overrides.mcpServerIds ?? [],
-      agentIds: overrides.agentIds ?? [],
+      mcpServerIds: pipelineMode ? [] : (overrides.mcpServerIds ?? []),
+      agentIds: pipelineMode ? [] : (overrides.agentIds ?? []),
       maxAgentSpawns: this.catalog.maxAgentSpawns,
     };
 
@@ -926,18 +944,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
   private async writeGeneratedTasks(text: string): Promise<number> {
     const feature = this.store.getActiveFeature();
     if (!feature?.tasksDirUri) return 0;
-    let written = 0;
-    for (const block of extractTaskBlocks(text)) {
-      const probe = vscode.Uri.joinPath(feature.tasksDirUri, "_probe.md");
-      const task = parseTaskContract(feature.id, probe, block.startsWith("---") ? block : `---\n${block}\n---\n`);
-      if (!task) continue;
-      task.filePath = vscode.Uri.joinPath(
-        feature.tasksDirUri,
-        `${task.id}-${task.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40)}.md`,
-      );
-      await writeTaskContract(task);
-      written++;
-    }
+    const written = await this.writeTaskContractsForFeature(feature.id, feature.tasksDirUri, text);
     if (written > 0) {
       await this.store.refresh();
       const updated = this.store.getFeature(feature.id);
@@ -949,6 +956,266 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       }
     }
     return written;
+  }
+
+  private async writeTaskContractsForFeature(
+    featureId: string,
+    tasksDirUri: vscode.Uri,
+    text: string,
+  ): Promise<number> {
+    let written = 0;
+    for (const block of extractTaskBlocks(text)) {
+      const probe = vscode.Uri.joinPath(tasksDirUri, "_probe.md");
+      const task = parseTaskContract(
+        featureId,
+        probe,
+        block.startsWith("---") ? block : `---\n${block}\n---\n`,
+      );
+      if (!task) continue;
+      task.filePath = vscode.Uri.joinPath(
+        tasksDirUri,
+        `${task.id}-${task.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40)}.md`,
+      );
+      await writeTaskContract(task);
+      written++;
+    }
+    return written;
+  }
+
+  private async generatePipeline(sessionId: string, featureName: string): Promise<void> {
+    const session = this.findSession(sessionId);
+    if (!session) {
+      this.broadcast({ type: "log", message: "Pipeline generation: session not found." });
+      return;
+    }
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    if (!folder) {
+      this.broadcast({ type: "log", message: "Open a workspace folder to scaffold a feature." });
+      return;
+    }
+    if (!session.remote || !session.conversationId) {
+      this.broadcast({
+        type: "log",
+        message: "Send at least one interview message before generating the pipeline.",
+      });
+      return;
+    }
+    if (this.streams.has(session.conversationId)) {
+      this.broadcast({ type: "log", message: "A response is already streaming for this chat." });
+      return;
+    }
+    const resolved = this.resolveProviderModel(session.overrides);
+    if (!resolved) {
+      this.broadcast({ type: "log", message: "No configured model. Add one in the LiberIDE app first." });
+      return;
+    }
+
+    let root: vscode.Uri;
+    try {
+      root = await scaffoldFeature(folder, featureName);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.output.appendLine(`[chat.pipeline.scaffold] ${msg}`);
+      this.broadcast({ type: "log", message: `Failed to scaffold feature: ${msg}` });
+      return;
+    }
+    const slug = root.path.split("/").pop() ?? featureName;
+    const tasksDirUri = vscode.Uri.joinPath(root, "tasks");
+    const requirementsUri = vscode.Uri.joinPath(root, "requirements.md");
+    const designUri = vscode.Uri.joinPath(root, "design.md");
+
+    const conversationId = session.conversationId;
+    const messages = this.messagesCache.get(conversationId) ?? [];
+    const userPrompt = `Generate the requirements, design, and task contracts for the feature "${featureName}". Emit the marker [[FEATURE_NAME: ${slug}]] on the first line.`;
+
+    const userMessage: ConversationMessage = {
+      id: `local:user:${randomId()}`,
+      conversationId,
+      role: "user",
+      content: userPrompt,
+      createdAt: new Date().toISOString(),
+    };
+    messages.push(userMessage);
+    const assistantMessage: ConversationMessage = {
+      id: `local:asst:${randomId()}`,
+      conversationId,
+      role: "assistant",
+      content: "",
+      createdAt: new Date().toISOString(),
+    };
+    messages.push(assistantMessage);
+    this.messagesCache.set(conversationId, messages);
+    this.broadcastActiveSession();
+    this.broadcastSessions();
+
+    const body: ChatRequest = {
+      conversationId,
+      provider: resolved.provider,
+      model: resolved.model,
+      modelSelection: readSettings().modelSelection,
+      chatMode: "normal",
+      content: userPrompt,
+      systemPrompt: PIPELINE_GENERATE_SYSTEM_PROMPT,
+      skillIds: [],
+      documentIds: [],
+      useRag: false,
+      toolsEnabled: false,
+      mcpServerIds: [],
+      agentIds: [],
+      maxAgentSpawns: this.catalog.maxAgentSpawns,
+    };
+
+    const abort = new AbortController();
+    const streamStartedAt = Date.now();
+    const streamState: ActiveStream = {
+      abort,
+      messageId: assistantMessage.id,
+      startedAt: streamStartedAt,
+      tools: new Map(),
+      edits: new Map(),
+    };
+    this.streams.set(conversationId, streamState);
+    this.broadcast({
+      type: "messageStart",
+      sessionId: conversationId,
+      messageId: assistantMessage.id,
+      startedAt: streamStartedAt,
+    });
+
+    let buffer = "";
+    try {
+      const handlers = {
+        onToken: (text: string) => {
+          buffer += text;
+          assistantMessage.content = buffer;
+          this.broadcast({
+            type: "messageAppend",
+            sessionId: conversationId,
+            messageId: assistantMessage.id,
+            chunk: text,
+          });
+        },
+        onToolEvent: (event: ToolCallEvent) => {
+          const update = applyToolEvent(streamState, event);
+          if (!update) return;
+          this.broadcast({
+            type: "toolUpdate",
+            sessionId: conversationId,
+            messageId: assistantMessage.id,
+            entry: update.entry,
+            editedFiles: update.editedFiles,
+          });
+        },
+      };
+
+      const useLocalCopilot =
+        body.provider === "copilot" &&
+        readSettings().copilotModelsEnabled &&
+        (await listCopilotLmModels().then((m) => m.some((x) => x.modelId === body.model)).catch(() => false));
+      const response = useLocalCopilot
+        ? await streamCopilotChat({
+            modelId: body.model,
+            history: (messages ?? [])
+              .filter((m) => m.role === "user" || m.role === "assistant")
+              .map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
+            prompt: body.content,
+            toolsEnabled: body.toolsEnabled,
+            onToken: handlers.onToken,
+            onToolEvent: handlers.onToolEvent,
+            signal: abort.signal,
+          }).then((r) => ({ assistantMessage: { id: assistantMessage.id, content: r.content } }))
+        : await streamChat(body, handlers, abort.signal);
+
+      const finalConversation = (response as { conversation?: Conversation }).conversation;
+      if (finalConversation) this.conversations.set(finalConversation.id, finalConversation);
+      if (response.assistantMessage?.id) assistantMessage.id = response.assistantMessage.id;
+      if (response.assistantMessage?.content) {
+        assistantMessage.content = response.assistantMessage.content;
+        buffer = assistantMessage.content;
+      }
+
+      let taskCount = 0;
+      try {
+        const sections = parsePipelineSections(buffer);
+        await writeTextFile(requirementsUri, `# Requirements\n\n${sections.requirements}\n`);
+        await writeTextFile(designUri, `# Design\n\n${sections.design}\n`);
+        taskCount = await this.writeTaskContractsForFeature(slug, tasksDirUri, buffer);
+        this.store.setActiveFeature(slug);
+        await this.context.workspaceState.update("liberide.activeFeatureId", slug);
+        await this.store.refresh();
+        const updated = this.store.getFeature(slug);
+        if (updated?.tasksDirUri) {
+          await writeTextFile(
+            vscode.Uri.joinPath(updated.tasksDirUri, "index.md"),
+            regenerateTasksIndex(updated.tasks),
+          );
+        }
+        const note = `\n\n_Scaffolded feature **${featureName}** with **${taskCount}** task${taskCount === 1 ? "" : "s"}. [[OPEN_PIPELINE]]_`;
+        assistantMessage.content += note;
+        this.broadcast({
+          type: "messageAppend",
+          sessionId: conversationId,
+          messageId: assistantMessage.id,
+          chunk: note,
+        });
+        this.broadcast({
+          type: "messageComplete",
+          sessionId: conversationId,
+          messageId: assistantMessage.id,
+          conversationId,
+          completedAt: Date.now(),
+        });
+        void this.refreshSingleConversation(conversationId);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.output.appendLine(`[chat.pipeline.write] ${msg}`);
+        const note = `\n\n_Failed to scaffold pipeline files: ${msg}_`;
+        assistantMessage.content += note;
+        this.broadcast({
+          type: "messageAppend",
+          sessionId: conversationId,
+          messageId: assistantMessage.id,
+          chunk: note,
+        });
+        this.broadcast({
+          type: "messageComplete",
+          sessionId: conversationId,
+          messageId: assistantMessage.id,
+          conversationId,
+          completedAt: Date.now(),
+        });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.output.appendLine(`[chat.pipeline] ${msg}`);
+      if (abort.signal.aborted) {
+        const note = `${buffer ? "\n\n" : ""}_Cancelled._`;
+        assistantMessage.content = `${buffer}${note}`;
+        this.broadcast({
+          type: "messageAppend",
+          sessionId: conversationId,
+          messageId: assistantMessage.id,
+          chunk: note,
+        });
+        this.broadcast({
+          type: "messageComplete",
+          sessionId: conversationId,
+          messageId: assistantMessage.id,
+          conversationId,
+          completedAt: Date.now(),
+        });
+      } else {
+        this.broadcast({
+          type: "messageError",
+          sessionId: conversationId,
+          messageId: assistantMessage.id,
+          error: msg,
+          completedAt: Date.now(),
+        });
+      }
+    } finally {
+      this.streams.delete(conversationId);
+    }
   }
 
   private async copilotGithubLogin(): Promise<void> {
@@ -1013,6 +1280,41 @@ function catalogFromConfig(config: AppConfig, documents: BackendCatalog["documen
     documents,
     maxAgentSpawns: config.maxAgentSpawns ?? 3,
   };
+}
+
+function parsePipelineSections(buffer: string): { requirements: string; design: string } {
+  const lines = buffer.replace(/\r\n?/g, "\n").split("\n");
+  let i = 0;
+  while (i < lines.length && !/^\s*#\s+/.test(lines[i])) i++;
+  const sections = new Map<string, string[]>();
+  let currentKey: string | null = null;
+  for (; i < lines.length; i++) {
+    const line = lines[i];
+    const match = line.match(/^\s*#\s+(.+?)\s*$/);
+    if (match) {
+      const heading = match[1].toLowerCase();
+      if (heading === "requirements" || heading === "design") {
+        currentKey = heading;
+        sections.set(currentKey, []);
+        continue;
+      }
+      currentKey = null;
+      continue;
+    }
+    if (!currentKey) continue;
+    if (/^```task\b/.test(line)) {
+      while (i < lines.length && !/^```\s*$/.test(lines[i])) i++;
+      continue;
+    }
+    sections.get(currentKey)!.push(line);
+  }
+  const trim = (lines: string[] | undefined): string => (lines ?? []).join("\n").replace(/^\s+|\s+$/g, "");
+  const requirements = trim(sections.get("requirements"));
+  const design = trim(sections.get("design"));
+  if (!requirements && !design) {
+    throw new Error("Generated output did not contain # Requirements or # Design sections.");
+  }
+  return { requirements, design };
 }
 
 function deriveTitle(text: string): string {

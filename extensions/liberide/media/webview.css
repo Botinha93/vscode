@@ -272,11 +272,18 @@ button { font: inherit; }
   flex: 1;
   font-weight: 600;
   font-size: 0.92em;
+  padding: 0 6px;
+  cursor: text;
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  min-width: 0;
+}
+.chat-title-text {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  padding: 0 6px;
-  cursor: text;
+  min-width: 0;
 }
 
 .backend-banner {
@@ -347,23 +354,60 @@ button { font: inherit; }
   font-weight: 600;
 }
 .empty-project { font-size: 0.85em; }
-.empty-commands {
+
+.empty-cards {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  margin-top: 4px;
+  gap: 10px;
+  margin-top: 12px;
 }
-.empty-commands button {
+.empty-card {
   background: var(--chatllm-bg-soft);
   border: 1px solid var(--chatllm-border);
   color: var(--vscode-foreground);
-  border-radius: 8px;
-  padding: 8px 12px;
+  border-radius: 12px;
+  padding: 14px 16px;
   cursor: pointer;
   text-align: left;
-  font-size: 0.9em;
+  font: inherit;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: background-color 120ms ease, border-color 120ms ease, transform 80ms ease;
 }
-.empty-commands button:hover { background: var(--chatllm-bg-soft-2); }
+.empty-card:hover {
+  background: var(--chatllm-bg-soft-2);
+  border-color: color-mix(in srgb, var(--chatllm-accent) 40%, var(--chatllm-border));
+}
+.empty-card:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--chatllm-accent) 70%, transparent);
+  outline-offset: 2px;
+}
+.empty-card.primary {
+  border-color: color-mix(in srgb, var(--chatllm-accent) 55%, var(--chatllm-border));
+  background: color-mix(in srgb, var(--chatllm-accent) 8%, var(--chatllm-bg-soft));
+}
+.empty-card-title {
+  font-weight: 600;
+  font-size: 0.95em;
+  color: var(--vscode-foreground);
+}
+.empty-card-sub {
+  font-size: 0.85em;
+  color: var(--chatllm-muted);
+  line-height: 1.45;
+}
+.empty-card-hint {
+  background: var(--chatllm-bg-soft);
+  border: 1px dashed var(--chatllm-border);
+  border-radius: 12px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: left;
+}
+.empty-card-hint .link-btn { align-self: flex-start; font-size: 0.85em; }
 
 /* --- Turns --- */
 .turn { display: flex; min-width: 0; }
@@ -1337,3 +1381,91 @@ section.chatllm-tab.active { display: flex; flex-direction: column; }
 .empty-row {
   padding: 8px;
 }
+
+/* --- Pipeline ready card --- */
+.pipeline-ready-card {
+  margin-top: 8px;
+  border: 1px solid color-mix(in srgb, var(--chatllm-accent) 45%, var(--chatllm-border));
+  background: color-mix(in srgb, var(--chatllm-accent) 6%, transparent);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pipeline-ready-label {
+  font-size: 0.85em;
+  font-weight: 600;
+  color: var(--vscode-foreground);
+}
+.pipeline-ready-input {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--chatllm-border);
+  border-radius: 6px;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  font: inherit;
+  font-size: 0.88em;
+}
+.pipeline-ready-input:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--chatllm-accent) 70%, var(--chatllm-border));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--chatllm-accent) 40%, transparent);
+}
+.pipeline-ready-input:disabled { opacity: 0.6; }
+.pipeline-ready-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+/* --- Generic buttons used by inline cards --- */
+.btn-primary {
+  background: var(--chatllm-accent);
+  color: var(--chatllm-accent-fg);
+  border: 1px solid var(--chatllm-accent);
+  border-radius: 6px;
+  padding: 4px 12px;
+  font: inherit;
+  font-size: 0.85em;
+  font-weight: 600;
+  cursor: pointer;
+}
+.btn-primary:hover:not(:disabled) { filter: brightness(1.08); }
+.btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }
+.btn-secondary {
+  background: transparent;
+  color: var(--vscode-foreground);
+  border: 1px solid var(--chatllm-border);
+  border-radius: 6px;
+  padding: 4px 12px;
+  font: inherit;
+  font-size: 0.85em;
+  cursor: pointer;
+}
+.btn-secondary:hover:not(:disabled) { background: var(--chatllm-bg-soft); }
+.btn-secondary:disabled { opacity: 0.6; cursor: not-allowed; }
+.open-pipeline-btn { margin: 4px 0; }
+
+/* --- Kind pill (chat header + sidebar rows) --- */
+.kind-pill {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.7em;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--chatllm-bg-soft-2);
+  color: var(--chatllm-muted);
+  margin-left: 6px;
+  vertical-align: middle;
+  line-height: 1.5;
+}
+.kind-pill.kind-pipeline {
+  background: color-mix(in srgb, var(--chatllm-accent) 18%, transparent);
+  color: color-mix(in srgb, var(--chatllm-accent) 80%, var(--vscode-foreground));
+  border: 1px solid color-mix(in srgb, var(--chatllm-accent) 40%, transparent);
+}
+.session-row.active .kind-pill { color: inherit; opacity: 0.9; }

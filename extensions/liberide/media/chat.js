@@ -948,10 +948,11 @@
       row.className = "session-row" + (s.id === state.activeSessionId ? " active" : "");
       const time = relativeTime(s.updatedAt);
       const tag = s.remote ? "" : `<span class="session-tag">draft</span>`;
+      const pill = s.kind === "pipeline" ? `<span class="kind-pill kind-pipeline">Pipeline</span>` : "";
       row.innerHTML = `
       <div class="session-row-main">
         <div class="session-row-title">${escapeHtml2(s.title)} ${tag}</div>
-        <div class="session-row-meta">${s.messageCount} \xB7 ${time}</div>
+        <div class="session-row-meta">${s.messageCount} \xB7 ${time}${pill ? " " : ""}${pill}</div>
       </div>
       <button class="icon-btn session-delete" title="Delete" aria-label="Delete">\u2715</button>
     `;
@@ -972,10 +973,12 @@
     const title = root.querySelector("#chat-title");
     if (!title) return;
     const t = state.activeSession?.title || "New chat";
-    title.textContent = t;
+    const isPipeline = state.activeSession?.kind === "pipeline";
+    title.innerHTML = `<span class="chat-title-text">${escapeHtml2(t)}</span>${isPipeline ? `<span class="kind-pill kind-pipeline">Pipeline</span>` : ""}`;
     title.title = "Click to rename";
-    title.onclick = () => {
+    title.onclick = (event) => {
       if (!state.activeSession) return;
+      if (event.target.closest(".kind-pill")) return;
       const next = window.prompt("Rename chat", state.activeSession.title);
       if (next != null) send({ type: "renameSession", sessionId: state.activeSession.id, title: next });
     };
@@ -1018,23 +1021,50 @@
     const el = document.createElement("div");
     el.className = "empty-state";
     const projectLine = state.project && state.project.source !== "none" ? `<div class="empty-project">Chats here live with <strong>${escapeHtml2(state.project.name)}</strong>${state.project.source === "git" ? " (git project)" : ""}.</div>` : "";
+    if (state.activeSession?.kind === "pipeline") {
+      el.innerHTML = `
+      <h2>Guided feature builder</h2>
+      ${projectLine}
+      <div class="empty-cards">
+        <div class="empty-card-hint">
+          <div class="empty-card-title">Describe the feature or system you want to build.</div>
+          <div class="empty-card-sub">I'll ask follow-up questions before scaffolding the pipeline.</div>
+          <button class="link-btn" id="switch-to-vibe" type="button">Switch to free chat</button>
+        </div>
+      </div>
+    `;
+      el.querySelector("#switch-to-vibe")?.addEventListener("click", () => {
+        if (!state.activeSession) return;
+        send({ type: "setSessionKind", sessionId: state.activeSession.id, kind: "vibe" });
+        const composer = root.querySelector("#composer");
+        composer?.focus();
+      });
+      return el;
+    }
     el.innerHTML = `
     <h2>What can I build for you?</h2>
     ${projectLine}
-    <div class="empty-commands">
-      <button data-prompt="/spec ">/spec   draft EARS requirements</button>
-      <button data-prompt="/design ">/design   draft design.md</button>
-      <button data-prompt="/tasks ">/tasks   generate task contracts</button>
+    <div class="empty-cards">
+      <button class="empty-card" type="button" data-card="vibe">
+        <span class="empty-card-title">Free chat</span>
+        <span class="empty-card-sub">Ask, brainstorm, or pair-program. The model can edit files and run tools.</span>
+      </button>
+      <button class="empty-card primary" type="button" data-card="pipeline">
+        <span class="empty-card-title">Guided feature builder</span>
+        <span class="empty-card-sub">I'll ask focused questions, then scaffold requirements, design, and tasks for you to dispatch.</span>
+      </button>
     </div>
   `;
-    for (const b of el.querySelectorAll(".empty-commands button")) {
-      b.addEventListener("click", () => {
-        const composer = root.querySelector("#composer");
-        composer.value = b.dataset.prompt ?? "";
-        composer.focus();
-        autosize(composer);
-      });
-    }
+    el.querySelector('[data-card="vibe"]')?.addEventListener("click", () => {
+      const composer = root.querySelector("#composer");
+      composer?.focus();
+    });
+    el.querySelector('[data-card="pipeline"]')?.addEventListener("click", () => {
+      if (!state.activeSession) return;
+      send({ type: "setSessionKind", sessionId: state.activeSession.id, kind: "pipeline" });
+      const composer = root.querySelector("#composer");
+      composer?.focus();
+    });
     return el;
   }
   function renderMessage(message) {
@@ -1056,6 +1086,7 @@
     const timelineHtml = renderTimelineBlock(message);
     const editCardHtml = renderEditCard(message);
     const showWorking = message.status === "streaming" && !message.content && !message.tools?.length;
+    const { visibleContent, readyFeatureName, hasOpenPipeline } = extractPipelineMarkers(message);
     turn.innerHTML = `
     <div class="assistant-meta">
       ${timelineHtml}
@@ -1072,8 +1103,12 @@
     </div>` : ""}
   `;
     const content = turn.querySelector(".turn-content");
-    content.innerHTML = renderMarkdownish(message.content);
+    content.innerHTML = renderMarkdownish(visibleContent);
     bindMarkdownExtras(content);
+    if (hasOpenPipeline) mountOpenPipelineButtons(content);
+    if (readyFeatureName !== null && state.activeSession?.kind === "pipeline" && message.status !== "streaming") {
+      mountPipelineReadyCard(turn, message, readyFeatureName);
+    }
     bindAssistantMeta(turn, message);
     turn.querySelector('[data-act="copy"]')?.addEventListener("click", async () => {
       try {
@@ -1082,6 +1117,66 @@
       }
     });
     return turn;
+  }
+  var OPEN_PIPELINE_PLACEHOLDER = "OPENPIPELINEBUTTONMOUNTx7n3v8q2t";
+  function extractPipelineMarkers(message) {
+    let visible = message.content ?? "";
+    let readyFeatureName = null;
+    if (state.activeSession?.kind === "pipeline") {
+      const readyMatch = visible.match(/\n?\s*\[\[PIPELINE_READY:\s*([^\]\n]+)\]\]\s*$/);
+      if (readyMatch) {
+        readyFeatureName = readyMatch[1].trim();
+        visible = visible.slice(0, readyMatch.index).replace(/\s+$/, "");
+      }
+    }
+    const hasOpenPipeline = /\[\[OPEN_PIPELINE\]\]/.test(visible);
+    if (hasOpenPipeline) {
+      visible = visible.replace(/\[\[OPEN_PIPELINE\]\]/g, OPEN_PIPELINE_PLACEHOLDER);
+    }
+    return { visibleContent: visible, readyFeatureName, hasOpenPipeline };
+  }
+  function mountOpenPipelineButtons(scope) {
+    const buttonHtml = `<button class="btn-primary open-pipeline-btn" type="button">Open pipeline</button>`;
+    if (!scope.innerHTML.includes(OPEN_PIPELINE_PLACEHOLDER)) return;
+    scope.innerHTML = scope.innerHTML.replaceAll(OPEN_PIPELINE_PLACEHOLDER, buttonHtml);
+    for (const btn of scope.querySelectorAll(".open-pipeline-btn")) {
+      btn.addEventListener("click", () => send({ type: "openPipeline" }));
+    }
+  }
+  function mountPipelineReadyCard(turn, message, featureName) {
+    const sessionId = state.activeSession?.id;
+    if (!sessionId) return;
+    const card = document.createElement("div");
+    card.className = "pipeline-ready-card";
+    card.innerHTML = `
+    <div class="pipeline-ready-label">Ready to scaffold the feature pipeline.</div>
+    <input type="text" class="pipeline-ready-input" value="${escapeAttr(featureName)}" placeholder="feature-name" />
+    <div class="pipeline-ready-actions">
+      <button class="btn-secondary pipeline-ready-keep" type="button">Keep chatting</button>
+      <button class="btn-primary pipeline-ready-generate" type="button">Generate pipeline</button>
+    </div>
+  `;
+    const input = card.querySelector(".pipeline-ready-input");
+    const generateBtn = card.querySelector(".pipeline-ready-generate");
+    const keepBtn = card.querySelector(".pipeline-ready-keep");
+    generateBtn.addEventListener("click", () => {
+      const name = input.value.trim();
+      if (!name) {
+        input.focus();
+        return;
+      }
+      generateBtn.disabled = true;
+      keepBtn.disabled = true;
+      input.disabled = true;
+      send({ type: "generatePipeline", sessionId, featureName: name });
+    });
+    keepBtn.addEventListener("click", () => card.remove());
+    const contentEl = turn.querySelector(".turn-content");
+    if (contentEl?.nextSibling) {
+      turn.insertBefore(card, contentEl.nextSibling);
+    } else {
+      turn.appendChild(card);
+    }
   }
   function renderTimelineBlock(message) {
     const tools = message.tools ?? [];
@@ -1813,8 +1908,10 @@
     const session = state.activeSession;
     const fullMessage = session?.messages.find((m) => m.id === messageId);
     if (fullMessage) {
-      turn.innerHTML = renderMarkdownish(fullMessage.content);
+      const { visibleContent, hasOpenPipeline } = extractPipelineMarkers(fullMessage);
+      turn.innerHTML = renderMarkdownish(visibleContent);
       bindMarkdownExtras(turn);
+      if (hasOpenPipeline) mountOpenPipelineButtons(turn);
     } else {
       if (turn.querySelector(".placeholder")) turn.innerHTML = "";
       turn.appendChild(document.createTextNode(chunk));

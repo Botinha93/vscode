@@ -747,6 +747,83 @@ var SPEC_SYSTEM_PROMPTS = {
   design: "Draft design.md from requirements. Use ## D-N section ids and reference R-* ids.",
   tasks: `Generate task contracts. Each task must be in a fenced \`\`\`task block with YAML frontmatter containing id, title, status, requirement_refs, design_refs, depends_on, expected_files, architecture_hints, acceptance, and agent.`
 };
+var PIPELINE_INTERVIEW_SYSTEM_PROMPT = `You are a feature-pipeline interviewer for a software team. Your job is to gather just enough information to draft a feature pipeline (requirements, design, and task contracts) for the user's idea.
+
+Conduct a focused interview:
+- Ask SHORT clarifying questions, grouped one batch per turn (2-5 questions max), covering:
+  - scope (what's in vs out),
+  - target users / use cases,
+  - inputs and outputs (data, files, APIs),
+  - constraints (performance, security, compatibility, deadlines),
+  - integrations and existing systems to touch.
+- Respond in plain markdown only. Do NOT edit files, run tools, or emit code blocks. This is a planning conversation.
+- Acknowledge what the user already told you before asking more. Avoid repeating questions.
+- Do not fabricate facts. If the user is vague, ask follow-ups instead of guessing.
+
+When you have enough information to draft requirements, design, and tasks (and ONLY then), end your message with a single line of exactly this form, nothing after it:
+
+[[PIPELINE_READY: <kebab-case-feature-name>]]
+
+The marker must appear on its own line as the very last line of the message. Never emit the marker before you have sufficient information to draft the pipeline.`;
+var PIPELINE_GENERATE_SYSTEM_PROMPT = `You are generating a complete feature pipeline on this single turn. Emit plain markdown structured EXACTLY as follows, with no prose outside this structure:
+
+[[FEATURE_NAME: <kebab-case-feature-name>]]
+
+# Requirements
+
+## R-1 <short title>
+<EARS-style requirement statement, e.g. "When <trigger>, the <system> shall <response>.">
+
+## R-2 <short title>
+<...>
+
+# Design
+
+## D-1 <short title>
+<design note referencing R-* ids where applicable>
+
+## D-2 <short title>
+<...>
+
+\`\`\`task
+id: T-1
+title: <imperative title>
+status: ready
+requirement_refs: [R-1, R-2]
+design_refs: [D-1]
+depends_on: []
+expected_files: [path/to/file.ts]
+architecture_hints: |
+  Multi-line hints describing the approach,
+  data flow, and components to touch.
+acceptance: [First acceptance bullet, Second acceptance bullet]
+agent: coder
+\`\`\`
+
+\`\`\`task
+id: T-2
+title: <...>
+status: ready
+requirement_refs: [R-2]
+design_refs: [D-2]
+depends_on: [T-1]
+expected_files: [path/to/other.ts]
+architecture_hints: |
+  ...
+acceptance: [<bullet 1>, <bullet 2>]
+agent: coder
+\`\`\`
+
+Rules:
+- The first line MUST be the [[FEATURE_NAME: ...]] marker. No leading whitespace, no other text on that line.
+- Use EARS-style requirement statements ("When X, the system shall Y" / "While X, ..." / "Where X, ...").
+- Every \`## R-N\` and \`## D-N\` heading must use a unique id.
+- Emit one or more fenced \`\`\`task blocks. Each block must contain valid YAML frontmatter with: id, title, status, requirement_refs, design_refs, depends_on, expected_files, architecture_hints, acceptance, agent.
+- All list fields (\`requirement_refs\`, \`design_refs\`, \`depends_on\`, \`expected_files\`, \`acceptance\`) MUST use inline-array syntax: \`key: [item1, item2]\`. Use \`[]\` for empty lists.
+- \`architecture_hints\` MUST be a YAML block string introduced by \`|\` and its continuation lines indented by two spaces.
+- Tasks must form a valid DAG: every id in \`depends_on\` must reference an earlier task's \`id\`.
+- Use status \`ready\`.
+- Do NOT emit a [[PIPELINE_READY]] marker. Do NOT add prose before or after the structure above.`;
 function extractTaskBlocks(content) {
   const blocks = [];
   const re = /```task\s*([\s\S]*?)```/gi;
@@ -1061,6 +1138,9 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
           break;
         case "setSessionKind":
           await this.updateSessionKind(message.sessionId, message.kind);
+          break;
+        case "generatePipeline":
+          await this.generatePipeline(message.sessionId, message.featureName);
           break;
         case "refreshCatalog":
           await this.refreshCatalog();
@@ -1519,9 +1599,11 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     this.broadcastActiveSession();
     this.broadcastSessions();
     const overrides = session.overrides;
-    const chatMode = command ? command === "spec" ? "normal" : "agent" : overrides.chatMode ?? settings.chatMode;
+    const pipelineMode = !command && session.kind === "pipeline";
+    const chatMode = command ? command === "spec" ? "normal" : "agent" : pipelineMode ? "normal" : overrides.chatMode ?? settings.chatMode;
     const useRag = overrides.useRag ?? settings.useRag;
-    const toolsEnabled = command ? command === "spec" ? overrides.toolsEnabled ?? settings.toolsEnabled : true : overrides.toolsEnabled ?? settings.toolsEnabled;
+    const toolsEnabled = command ? command === "spec" ? overrides.toolsEnabled ?? settings.toolsEnabled : true : pipelineMode ? false : overrides.toolsEnabled ?? settings.toolsEnabled;
+    const systemPrompt = command ? SPEC_SYSTEM_PROMPTS[command] : pipelineMode ? PIPELINE_INTERVIEW_SYSTEM_PROMPT : settings.systemPrompt || void 0;
     const body = {
       conversationId,
       provider: resolved.provider,
@@ -1529,13 +1611,13 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
       modelSelection: settings.modelSelection,
       chatMode,
       content: rest || content,
-      systemPrompt: command ? SPEC_SYSTEM_PROMPTS[command] : settings.systemPrompt || void 0,
-      skillIds: overrides.skillIds ?? [],
+      systemPrompt,
+      skillIds: pipelineMode ? [] : overrides.skillIds ?? [],
       documentIds: [],
-      useRag,
+      useRag: pipelineMode ? false : useRag,
       toolsEnabled,
-      mcpServerIds: overrides.mcpServerIds ?? [],
-      agentIds: overrides.agentIds ?? [],
+      mcpServerIds: pipelineMode ? [] : overrides.mcpServerIds ?? [],
+      agentIds: pipelineMode ? [] : overrides.agentIds ?? [],
       maxAgentSpawns: this.catalog.maxAgentSpawns
     };
     const abort = new AbortController();
@@ -1719,21 +1801,7 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
   async writeGeneratedTasks(text) {
     const feature = this.store.getActiveFeature();
     if (!feature?.tasksDirUri) return 0;
-    let written = 0;
-    for (const block of extractTaskBlocks(text)) {
-      const probe = vscode6.Uri.joinPath(feature.tasksDirUri, "_probe.md");
-      const task = parseTaskContract(feature.id, probe, block.startsWith("---") ? block : `---
-${block}
----
-`);
-      if (!task) continue;
-      task.filePath = vscode6.Uri.joinPath(
-        feature.tasksDirUri,
-        `${task.id}-${task.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40)}.md`
-      );
-      await writeTaskContract(task);
-      written++;
-    }
+    const written = await this.writeTaskContractsForFeature(feature.id, feature.tasksDirUri, text);
     if (written > 0) {
       await this.store.refresh();
       const updated = this.store.getFeature(feature.id);
@@ -1745,6 +1813,257 @@ ${block}
       }
     }
     return written;
+  }
+  async writeTaskContractsForFeature(featureId, tasksDirUri, text) {
+    let written = 0;
+    for (const block of extractTaskBlocks(text)) {
+      const probe = vscode6.Uri.joinPath(tasksDirUri, "_probe.md");
+      const task = parseTaskContract(
+        featureId,
+        probe,
+        block.startsWith("---") ? block : `---
+${block}
+---
+`
+      );
+      if (!task) continue;
+      task.filePath = vscode6.Uri.joinPath(
+        tasksDirUri,
+        `${task.id}-${task.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40)}.md`
+      );
+      await writeTaskContract(task);
+      written++;
+    }
+    return written;
+  }
+  async generatePipeline(sessionId, featureName) {
+    const session = this.findSession(sessionId);
+    if (!session) {
+      this.broadcast({ type: "log", message: "Pipeline generation: session not found." });
+      return;
+    }
+    const folder = vscode6.workspace.workspaceFolders?.[0];
+    if (!folder) {
+      this.broadcast({ type: "log", message: "Open a workspace folder to scaffold a feature." });
+      return;
+    }
+    if (!session.remote || !session.conversationId) {
+      this.broadcast({
+        type: "log",
+        message: "Send at least one interview message before generating the pipeline."
+      });
+      return;
+    }
+    if (this.streams.has(session.conversationId)) {
+      this.broadcast({ type: "log", message: "A response is already streaming for this chat." });
+      return;
+    }
+    const resolved = this.resolveProviderModel(session.overrides);
+    if (!resolved) {
+      this.broadcast({ type: "log", message: "No configured model. Add one in the LiberIDE app first." });
+      return;
+    }
+    let root;
+    try {
+      root = await scaffoldFeature(folder, featureName);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.output.appendLine(`[chat.pipeline.scaffold] ${msg}`);
+      this.broadcast({ type: "log", message: `Failed to scaffold feature: ${msg}` });
+      return;
+    }
+    const slug = root.path.split("/").pop() ?? featureName;
+    const tasksDirUri = vscode6.Uri.joinPath(root, "tasks");
+    const requirementsUri = vscode6.Uri.joinPath(root, "requirements.md");
+    const designUri = vscode6.Uri.joinPath(root, "design.md");
+    const conversationId = session.conversationId;
+    const messages = this.messagesCache.get(conversationId) ?? [];
+    const userPrompt = `Generate the requirements, design, and task contracts for the feature "${featureName}". Emit the marker [[FEATURE_NAME: ${slug}]] on the first line.`;
+    const userMessage = {
+      id: `local:user:${randomId()}`,
+      conversationId,
+      role: "user",
+      content: userPrompt,
+      createdAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    messages.push(userMessage);
+    const assistantMessage = {
+      id: `local:asst:${randomId()}`,
+      conversationId,
+      role: "assistant",
+      content: "",
+      createdAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    messages.push(assistantMessage);
+    this.messagesCache.set(conversationId, messages);
+    this.broadcastActiveSession();
+    this.broadcastSessions();
+    const body = {
+      conversationId,
+      provider: resolved.provider,
+      model: resolved.model,
+      modelSelection: readSettings().modelSelection,
+      chatMode: "normal",
+      content: userPrompt,
+      systemPrompt: PIPELINE_GENERATE_SYSTEM_PROMPT,
+      skillIds: [],
+      documentIds: [],
+      useRag: false,
+      toolsEnabled: false,
+      mcpServerIds: [],
+      agentIds: [],
+      maxAgentSpawns: this.catalog.maxAgentSpawns
+    };
+    const abort = new AbortController();
+    const streamStartedAt = Date.now();
+    const streamState = {
+      abort,
+      messageId: assistantMessage.id,
+      startedAt: streamStartedAt,
+      tools: /* @__PURE__ */ new Map(),
+      edits: /* @__PURE__ */ new Map()
+    };
+    this.streams.set(conversationId, streamState);
+    this.broadcast({
+      type: "messageStart",
+      sessionId: conversationId,
+      messageId: assistantMessage.id,
+      startedAt: streamStartedAt
+    });
+    let buffer = "";
+    try {
+      const handlers = {
+        onToken: (text) => {
+          buffer += text;
+          assistantMessage.content = buffer;
+          this.broadcast({
+            type: "messageAppend",
+            sessionId: conversationId,
+            messageId: assistantMessage.id,
+            chunk: text
+          });
+        },
+        onToolEvent: (event) => {
+          const update = applyToolEvent(streamState, event);
+          if (!update) return;
+          this.broadcast({
+            type: "toolUpdate",
+            sessionId: conversationId,
+            messageId: assistantMessage.id,
+            entry: update.entry,
+            editedFiles: update.editedFiles
+          });
+        }
+      };
+      const useLocalCopilot = body.provider === "copilot" && readSettings().copilotModelsEnabled && await listCopilotLmModels().then((m) => m.some((x) => x.modelId === body.model)).catch(() => false);
+      const response = useLocalCopilot ? await streamCopilotChat({
+        modelId: body.model,
+        history: (messages ?? []).filter((m) => m.role === "user" || m.role === "assistant").map((m) => ({ role: m.role, content: m.content })),
+        prompt: body.content,
+        toolsEnabled: body.toolsEnabled,
+        onToken: handlers.onToken,
+        onToolEvent: handlers.onToolEvent,
+        signal: abort.signal
+      }).then((r) => ({ assistantMessage: { id: assistantMessage.id, content: r.content } })) : await streamChat(body, handlers, abort.signal);
+      const finalConversation = response.conversation;
+      if (finalConversation) this.conversations.set(finalConversation.id, finalConversation);
+      if (response.assistantMessage?.id) assistantMessage.id = response.assistantMessage.id;
+      if (response.assistantMessage?.content) {
+        assistantMessage.content = response.assistantMessage.content;
+        buffer = assistantMessage.content;
+      }
+      let taskCount = 0;
+      try {
+        const sections = parsePipelineSections(buffer);
+        await writeTextFile(requirementsUri, `# Requirements
+
+${sections.requirements}
+`);
+        await writeTextFile(designUri, `# Design
+
+${sections.design}
+`);
+        taskCount = await this.writeTaskContractsForFeature(slug, tasksDirUri, buffer);
+        this.store.setActiveFeature(slug);
+        await this.context.workspaceState.update("liberide.activeFeatureId", slug);
+        await this.store.refresh();
+        const updated = this.store.getFeature(slug);
+        if (updated?.tasksDirUri) {
+          await writeTextFile(
+            vscode6.Uri.joinPath(updated.tasksDirUri, "index.md"),
+            regenerateTasksIndex(updated.tasks)
+          );
+        }
+        const note = `
+
+_Scaffolded feature **${featureName}** with **${taskCount}** task${taskCount === 1 ? "" : "s"}. [[OPEN_PIPELINE]]_`;
+        assistantMessage.content += note;
+        this.broadcast({
+          type: "messageAppend",
+          sessionId: conversationId,
+          messageId: assistantMessage.id,
+          chunk: note
+        });
+        this.broadcast({
+          type: "messageComplete",
+          sessionId: conversationId,
+          messageId: assistantMessage.id,
+          conversationId,
+          completedAt: Date.now()
+        });
+        void this.refreshSingleConversation(conversationId);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.output.appendLine(`[chat.pipeline.write] ${msg}`);
+        const note = `
+
+_Failed to scaffold pipeline files: ${msg}_`;
+        assistantMessage.content += note;
+        this.broadcast({
+          type: "messageAppend",
+          sessionId: conversationId,
+          messageId: assistantMessage.id,
+          chunk: note
+        });
+        this.broadcast({
+          type: "messageComplete",
+          sessionId: conversationId,
+          messageId: assistantMessage.id,
+          conversationId,
+          completedAt: Date.now()
+        });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.output.appendLine(`[chat.pipeline] ${msg}`);
+      if (abort.signal.aborted) {
+        const note = `${buffer ? "\n\n" : ""}_Cancelled._`;
+        assistantMessage.content = `${buffer}${note}`;
+        this.broadcast({
+          type: "messageAppend",
+          sessionId: conversationId,
+          messageId: assistantMessage.id,
+          chunk: note
+        });
+        this.broadcast({
+          type: "messageComplete",
+          sessionId: conversationId,
+          messageId: assistantMessage.id,
+          conversationId,
+          completedAt: Date.now()
+        });
+      } else {
+        this.broadcast({
+          type: "messageError",
+          sessionId: conversationId,
+          messageId: assistantMessage.id,
+          error: msg,
+          completedAt: Date.now()
+        });
+      }
+    } finally {
+      this.streams.delete(conversationId);
+    }
   }
   async copilotGithubLogin() {
     try {
@@ -1804,6 +2123,40 @@ function catalogFromConfig(config, documents) {
     documents,
     maxAgentSpawns: config.maxAgentSpawns ?? 3
   };
+}
+function parsePipelineSections(buffer) {
+  const lines = buffer.replace(/\r\n?/g, "\n").split("\n");
+  let i = 0;
+  while (i < lines.length && !/^\s*#\s+/.test(lines[i])) i++;
+  const sections = /* @__PURE__ */ new Map();
+  let currentKey = null;
+  for (; i < lines.length; i++) {
+    const line = lines[i];
+    const match = line.match(/^\s*#\s+(.+?)\s*$/);
+    if (match) {
+      const heading = match[1].toLowerCase();
+      if (heading === "requirements" || heading === "design") {
+        currentKey = heading;
+        sections.set(currentKey, []);
+        continue;
+      }
+      currentKey = null;
+      continue;
+    }
+    if (!currentKey) continue;
+    if (/^```task\b/.test(line)) {
+      while (i < lines.length && !/^```\s*$/.test(lines[i])) i++;
+      continue;
+    }
+    sections.get(currentKey).push(line);
+  }
+  const trim = (lines2) => (lines2 ?? []).join("\n").replace(/^\s+|\s+$/g, "");
+  const requirements = trim(sections.get("requirements"));
+  const design = trim(sections.get("design"));
+  if (!requirements && !design) {
+    throw new Error("Generated output did not contain # Requirements or # Design sections.");
+  }
+  return { requirements, design };
 }
 function deriveTitle(text) {
   const firstLine = text.replace(/\s+/g, " ").trim();
