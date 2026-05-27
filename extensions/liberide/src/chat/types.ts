@@ -63,7 +63,7 @@ export interface DocumentRecord {
   name: string;
   mimeType: string;
   size: number;
-  contentKind: "text" | "image";
+  contentKind: "text" | "image" | "audio";
   indexedAt?: string;
   createdAt: string;
 }

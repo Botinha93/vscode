@@ -3,7 +3,15 @@ import type { ChatRequest, ChatResponse, ToolCallEvent } from "./types";
 
 export async function streamChat(
   body: ChatRequest,
-  handlers: { onToken?: (token: string) => void; onToolEvent?: (event: ToolCallEvent) => void },
+  handlers: {
+    onToken?: (token: string) => void;
+    onToolEvent?: (event: ToolCallEvent) => void;
+    onMarkdown?: (content: string) => void;
+    onDiff?: (payload: Record<string, unknown>) => void;
+    onPlan?: (payload: Record<string, unknown>) => void;
+    onTodo?: (payload: Record<string, unknown>) => void;
+    onFollowUp?: (payload: Record<string, unknown>) => void;
+  },
   signal?: AbortSignal,
 ): Promise<ChatResponse> {
   const response = await apiFetch("/api/chat/stream", {
@@ -28,6 +36,11 @@ export async function streamChat(
     const data = JSON.parse(dataLine) as unknown;
     if (event === "token") handlers.onToken?.((data as { token: string }).token);
     if (event === "tool") handlers.onToolEvent?.(data as ToolCallEvent);
+    if (event === "markdown") handlers.onMarkdown?.((data as { content: string }).content);
+    if (event === "diff") handlers.onDiff?.(data as Record<string, unknown>);
+    if (event === "plan") handlers.onPlan?.(data as Record<string, unknown>);
+    if (event === "todo") handlers.onTodo?.(data as Record<string, unknown>);
+    if (event === "follow_up") handlers.onFollowUp?.(data as Record<string, unknown>);
     if (event === "error") throw new Error((data as { error: string }).error);
     if (event === "done") finalResponse = data as ChatResponse;
   };

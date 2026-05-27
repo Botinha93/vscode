@@ -182,6 +182,18 @@ export async function listDocuments(): Promise<DocumentRecord[]> {
   return readJson<DocumentRecord[]>(await apiFetch("/api/documents"));
 }
 
+export async function uploadDocument(file: { name: string; bytes: Uint8Array; mimeType?: string }): Promise<DocumentRecord> {
+  const form = new FormData();
+  const blob = new Blob([file.bytes], { type: file.mimeType ?? "application/octet-stream" });
+  form.append("file", blob, file.name);
+  const token = getAuthToken();
+  const headers: Record<string, string> = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const response = await apiFetch("/api/documents", { method: "POST", body: form, headers });
+  const payload = await readJson<{ document: DocumentRecord }>(response);
+  return payload.document;
+}
+
 export async function pingBackend(): Promise<boolean> {
   return (await probeBackend()) === "ok";
 }

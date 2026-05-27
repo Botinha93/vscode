@@ -742,8 +742,19 @@
       toolsEnabled: true,
       agentIds: o.agentIds ?? [],
       skillIds: o.skillIds ?? [],
-      mcpServerIds: o.mcpServerIds ?? []
+      mcpServerIds: o.mcpServerIds ?? [],
+      documentIds: o.documentIds ?? []
     };
+  }
+  function selectedAttachments() {
+    const ids = state.activeSession?.overrides.documentIds ?? [];
+    if (!ids.length) return [];
+    return state.catalog.documents.filter((document2) => ids.includes(document2.id));
+  }
+  function formatFileSize(bytes) {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   }
   function setOverrides(partial) {
     if (!state.activeSession) return;
@@ -759,6 +770,7 @@
     renderHeader();
     renderTranscript();
     renderComposer();
+    renderComposerAttachments();
     applySettings();
     applyModelPicker();
     applyAgentPicker();
@@ -786,6 +798,7 @@
         <section class="chat-transcript" id="transcript"></section>
         <footer class="chat-composer">
           <div class="composer-card">
+            <div class="composer-attachments" id="composer-attachments" hidden></div>
             <textarea id="composer" placeholder="Ask for follow-up changes\u2026" rows="1"></textarea>
             <div class="composer-toolbar" id="chip-row"></div>
           </div>
@@ -1313,7 +1326,7 @@
     const modelLabel = describeModel(eff.provider, eff.model);
     const agentCount = eff.agentIds.length;
     toolbar.innerHTML = `
-    <button class="composer-icon-btn" id="attach-btn" title="Attach files (coming soon)" aria-label="Attach">+</button>
+    <button class="composer-icon-btn" id="attach-btn" title="Attach files for chat and RAG" aria-label="Attach">+</button>
     <button class="chip${agentCount > 0 ? " chip-on" : ""}" id="chip-agents" title="Attach agents from LiberIDE" ${state.catalog.agents.length === 0 ? "disabled" : ""}>
       \u269B Agents${agentCount ? ` (${agentCount})` : ""}
     </button>
@@ -1333,6 +1346,10 @@
       applyAgentPicker();
     });
     toolbar.querySelector("#send-btn")?.addEventListener("click", () => submit());
+    toolbar.querySelector("#attach-btn")?.addEventListener("click", () => {
+      if (!state.activeSession || state.streaming) return;
+      send({ type: "attachFiles", sessionId: state.activeSession.id });
+    });
     const ragBtn = root.querySelector("#chip-rag");
     if (ragBtn) {
       ragBtn.classList.toggle("chip-on", eff.useRag);
@@ -1347,6 +1364,30 @@
       sendBtn.title = state.streaming ? "Stop" : "Send";
     }
     renderComposerHints();
+  }
+  function renderComposerAttachments() {
+    const container = root.querySelector("#composer-attachments");
+    if (!container) return;
+    const attachments = selectedAttachments();
+    if (!attachments.length) {
+      container.hidden = true;
+      container.innerHTML = "";
+      return;
+    }
+    container.hidden = false;
+    container.innerHTML = attachments.map((document2) => `
+    <span class="composer-attachment" data-id="${escapeAttr(document2.id)}">
+      <span class="composer-attachment-name" title="${escapeAttr(document2.name)}">${escapeHtml2(document2.name)}</span>
+      <span class="composer-attachment-meta">${escapeHtml2(document2.contentKind)} \xB7 ${escapeHtml2(formatFileSize(document2.size))}</span>
+      <button type="button" class="composer-attachment-remove" data-id="${escapeAttr(document2.id)}" title="Remove" aria-label="Remove">\u2715</button>
+    </span>
+  `).join("");
+    for (const button of container.querySelectorAll(".composer-attachment-remove")) {
+      button.addEventListener("click", () => {
+        if (!state.activeSession) return;
+        send({ type: "removeAttachment", sessionId: state.activeSession.id, documentId: button.dataset.id ?? "" });
+      });
+    }
   }
   function renderComposerHints() {
     const hints = root.querySelector("#composer-hints");
@@ -1930,6 +1971,7 @@
         state.catalog = msg.catalog;
         state.backendStatus = msg.backendStatus;
         renderComposer();
+        renderComposerAttachments();
         renderBackendBanner();
         if (state.modelPickerOpen) renderModelPicker();
         if (state.agentPickerOpen) renderAgentPicker();
@@ -1954,6 +1996,7 @@
         renderHeader();
         renderTranscript();
         renderComposer();
+        renderComposerAttachments();
         break;
       case "messageStart":
         if (state.activeSession && state.activeSession.id === msg.sessionId) {

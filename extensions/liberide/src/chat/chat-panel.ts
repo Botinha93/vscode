@@ -13,6 +13,7 @@ import {
   listFolders,
   patchConversation,
   probeBackend,
+  uploadDocument,
 } from "../api";
 import { onSettingsChange, readSettings, writeSetting, type LiberideSettings } from "../settings";
 import {
@@ -55,6 +56,7 @@ import type {
 } from "./chat-protocol";
 import type { ToolCallEvent } from "./types";
 import { execFile } from "node:child_process";
+import { basename } from "node:path";
 import { parseTaskContract } from "../spec/schema";
 import type { SpecStore } from "../spec/store";
 import { regenerateTasksIndex, scaffoldFeature, writeTaskContract, writeTextFile } from "../spec/writer";
@@ -214,6 +216,12 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
           break;
         case "sendMessage":
           await this.sendChat(message.sessionId, message.content);
+          break;
+        case "attachFiles":
+          await this.attachFiles(message.sessionId);
+          break;
+        case "removeAttachment":
+          await this.removeAttachment(message.sessionId, message.documentId);
           break;
         case "cancelMessage": {
           const stream = this.streams.get(message.sessionId);
@@ -548,6 +556,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       agentIds: conv.agentIds ?? stored.agentIds,
       skillIds: stored.skillIds,
       mcpServerIds: stored.mcpServerIds,
+      documentIds: stored.documentIds ?? [],
     };
   }
 
@@ -663,6 +672,55 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     await this.persistSessionKinds();
     this.broadcastSessions();
     this.broadcastActiveSession();
+  }
+
+  private async attachFiles(sessionId: string): Promise<void> {
+    if (this.backendStatus !== "ok") {
+      this.broadcast({ type: "log", message: "Connect to the LiberIDE backend before attaching files." });
+      return;
+    }
+    const uris = await vscode.window.showOpenDialog({ canSelectMany: true, openLabel: "Attach to chat" });
+    if (!uris?.length) return;
+
+    const uploadedIds: string[] = [];
+    for (const uri of uris) {
+      try {
+        const bytes = await vscode.workspace.fs.readFile(uri);
+        const name = basename(uri.fsPath);
+        const document = await uploadDocument({ name, bytes });
+        uploadedIds.push(document.id);
+        if (!this.catalog.documents.some((entry) => entry.id === document.id)) {
+          this.catalog = { ...this.catalog, documents: [document, ...this.catalog.documents] };
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.output.appendLine(`[chat.attach] ${msg}`);
+        this.broadcast({ type: "log", message: `Failed to attach ${basename(uri.fsPath)}: ${msg}` });
+      }
+    }
+    if (!uploadedIds.length) return;
+
+    const session = sessionId.startsWith("draft:") && this.draftSession?.id === sessionId
+      ? this.draftSession
+      : this.conversations.has(sessionId)
+        ? this.sessionFromConversation(this.conversations.get(sessionId)!)
+        : null;
+    if (!session) return;
+
+    const current = session.overrides.documentIds ?? [];
+    await this.updateOverrides(sessionId, { documentIds: [...new Set([...current, ...uploadedIds])] });
+    this.broadcast({ type: "catalog", catalog: this.catalog, backendStatus: this.backendStatus });
+  }
+
+  private async removeAttachment(sessionId: string, documentId: string): Promise<void> {
+    const session = sessionId.startsWith("draft:") && this.draftSession?.id === sessionId
+      ? this.draftSession
+      : this.conversations.has(sessionId)
+        ? this.sessionFromConversation(this.conversations.get(sessionId)!)
+        : null;
+    if (!session) return;
+    const next = (session.overrides.documentIds ?? []).filter((id) => id !== documentId);
+    await this.updateOverrides(sessionId, { documentIds: next });
   }
 
   private async updateOverrides(id: string, overrides: ChatOverrides): Promise<void> {
@@ -808,7 +866,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       content: rest || content,
       systemPrompt,
       skillIds: pipelineMode ? [] : (overrides.skillIds ?? []),
-      documentIds: [],
+      documentIds: pipelineMode ? [] : (overrides.documentIds ?? []),
       useRag: pipelineMode ? false : useRag,
       toolsEnabled,
       mcpServerIds: pipelineMode ? [] : (overrides.mcpServerIds ?? []),

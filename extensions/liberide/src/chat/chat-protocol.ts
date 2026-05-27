@@ -53,11 +53,13 @@ export interface ChatOverrides {
   provider?: ConfiguredProvider;
   model?: string;
   chatMode?: ConversationChatMode;
+  toolGroupIds?: string[];
   useRag?: boolean;
   toolsEnabled?: boolean;
   agentIds?: string[];
   skillIds?: string[];
   mcpServerIds?: string[];
+  documentIds?: string[];
 }
 
 export type ChatSessionKind = "vibe" | "pipeline";
@@ -102,6 +104,11 @@ export interface BackendCatalog {
   mcpServers: McpServer[];
   documents: DocumentRecord[];
   maxAgentSpawns: number;
+  toolGroups?: Array<{ id: string; name: string; description: string; toolIds: string[] }>;
+  promptTemplates?: Array<{ id: string; title: string; content: string; applyTo?: string }>;
+  chatModes?: ConversationChatMode[];
+  permissionPolicies?: Array<{ id: string; scope: string; autopilot?: boolean }>;
+  sessionOrigins?: Array<"web" | "cli" | "cloud" | "extension" | "webhook">;
 }
 
 export type BackendStatus = "ok" | "unauthorized" | "unreachable" | "unconfigured";
@@ -138,6 +145,8 @@ export type ChatWebviewToHost =
   | { type: "deleteSession"; sessionId: string }
   | { type: "renameSession"; sessionId: string; title: string }
   | { type: "sendMessage"; sessionId: string; content: string }
+  | { type: "attachFiles"; sessionId: string }
+  | { type: "removeAttachment"; sessionId: string; documentId: string }
   | { type: "cancelMessage"; sessionId: string }
   | { type: "setOverrides"; sessionId: string; overrides: ChatOverrides }
   | { type: "setSessionKind"; sessionId: string; kind: ChatSessionKind }

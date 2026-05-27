@@ -7,6 +7,7 @@ export class SpecStore implements vscode.Disposable {
   readonly onDidChange = this.changeEmitter.event;
   private features = new Map<string, FeatureSpec>();
   private watcher?: vscode.FileSystemWatcher;
+  private promptWatcher?: vscode.FileSystemWatcher;
   private activeFeatureId?: string;
 
   constructor(private readonly output: vscode.OutputChannel) {}
@@ -18,6 +19,20 @@ export class SpecStore implements vscode.Disposable {
     this.watcher.onDidChange(() => void this.refresh());
     this.watcher.onDidDelete(() => void this.refresh());
     context.subscriptions.push(this.watcher);
+    this.promptWatcher = vscode.workspace.createFileSystemWatcher("**/.chatllm/**/*.md");
+    const syncPrompts = () => {
+      const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      if (!root) return;
+      void fetch(`${process.env.CHATLLM_API_ORIGIN ?? "http://127.0.0.1:3000"}/api/skills/import-from-workspace`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rootPath: root }),
+      }).catch(() => undefined);
+    };
+    this.promptWatcher.onDidCreate(syncPrompts);
+    this.promptWatcher.onDidChange(syncPrompts);
+    this.promptWatcher.onDidDelete(syncPrompts);
+    context.subscriptions.push(this.promptWatcher);
     await this.refresh();
   }
 
@@ -82,6 +97,7 @@ export class SpecStore implements vscode.Disposable {
 
   dispose(): void {
     this.watcher?.dispose();
+    this.promptWatcher?.dispose();
     this.changeEmitter.dispose();
   }
 }

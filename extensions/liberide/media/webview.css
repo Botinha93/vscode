@@ -860,6 +860,44 @@ button { font: inherit; }
   gap: 6px;
   transition: border-color 120ms ease, box-shadow 120ms ease;
 }
+.composer-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-bottom: 2px;
+}
+.composer-attachment {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--chatllm-border);
+  background: var(--chatllm-bg-soft);
+  font-size: 0.78em;
+}
+.composer-attachment-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 12rem;
+}
+.composer-attachment-meta {
+  color: var(--chatllm-muted);
+  white-space: nowrap;
+}
+.composer-attachment-remove {
+  border: none;
+  background: transparent;
+  color: var(--chatllm-muted);
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+}
+.composer-attachment-remove:hover {
+  color: var(--vscode-foreground);
+}
 .composer-card:focus-within {
   border-color: color-mix(in srgb, var(--chatllm-accent) 70%, var(--chatllm-border));
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--chatllm-accent) 40%, transparent);

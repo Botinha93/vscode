@@ -12,7 +12,7 @@ import type {
   SessionSummary,
   ToolTimelineEntry,
 } from "../chat/chat-protocol";
-import type { ConfiguredProvider } from "../chat/types";
+import type { ConfiguredProvider, DocumentRecord } from "../chat/types";
 import { highlightCode } from "./highlight";
 
 interface VsCodeApi {
@@ -98,6 +98,7 @@ interface ResolvedSelections {
   agentIds: string[];
   skillIds: string[];
   mcpServerIds: string[];
+  documentIds: string[];
 }
 
 function effective(): ResolvedSelections {
@@ -113,7 +114,20 @@ function effective(): ResolvedSelections {
     agentIds: o.agentIds ?? [],
     skillIds: o.skillIds ?? [],
     mcpServerIds: o.mcpServerIds ?? [],
+    documentIds: o.documentIds ?? [],
   };
+}
+
+function selectedAttachments(): DocumentRecord[] {
+  const ids = state.activeSession?.overrides.documentIds ?? [];
+  if (!ids.length) return [];
+  return state.catalog.documents.filter((document) => ids.includes(document.id));
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function setOverrides(partial: ChatOverrides): void {
@@ -135,6 +149,7 @@ function render(): void {
   renderHeader();
   renderTranscript();
   renderComposer();
+  renderComposerAttachments();
   applySettings();
   applyModelPicker();
   applyAgentPicker();
@@ -163,6 +178,7 @@ function shellHtml(): string {
         <section class="chat-transcript" id="transcript"></section>
         <footer class="chat-composer">
           <div class="composer-card">
+            <div class="composer-attachments" id="composer-attachments" hidden></div>
             <textarea id="composer" placeholder="Ask for follow-up changes\u2026" rows="1"></textarea>
             <div class="composer-toolbar" id="chip-row"></div>
           </div>
@@ -758,7 +774,7 @@ function renderComposer(): void {
   const agentCount = eff.agentIds.length;
 
   toolbar.innerHTML = `
-    <button class="composer-icon-btn" id="attach-btn" title="Attach files (coming soon)" aria-label="Attach">+</button>
+    <button class="composer-icon-btn" id="attach-btn" title="Attach files for chat and RAG" aria-label="Attach">+</button>
     <button class="chip${agentCount > 0 ? " chip-on" : ""}" id="chip-agents" title="Attach agents from LiberIDE" ${state.catalog.agents.length === 0 ? "disabled" : ""}>
       \u269B Agents${agentCount ? ` (${agentCount})` : ""}
     </button>
@@ -778,6 +794,10 @@ function renderComposer(): void {
     applyAgentPicker();
   });
   toolbar.querySelector<HTMLButtonElement>("#send-btn")?.addEventListener("click", () => submit());
+  toolbar.querySelector<HTMLButtonElement>("#attach-btn")?.addEventListener("click", () => {
+    if (!state.activeSession || state.streaming) return;
+    send({ type: "attachFiles", sessionId: state.activeSession.id });
+  });
 
   const ragBtn = root.querySelector<HTMLButtonElement>("#chip-rag");
   if (ragBtn) {
@@ -794,6 +814,31 @@ function renderComposer(): void {
     sendBtn.title = state.streaming ? "Stop" : "Send";
   }
   renderComposerHints();
+}
+
+function renderComposerAttachments(): void {
+  const container = root.querySelector<HTMLDivElement>("#composer-attachments");
+  if (!container) return;
+  const attachments = selectedAttachments();
+  if (!attachments.length) {
+    container.hidden = true;
+    container.innerHTML = "";
+    return;
+  }
+  container.hidden = false;
+  container.innerHTML = attachments.map((document) => `
+    <span class="composer-attachment" data-id="${escapeAttr(document.id)}">
+      <span class="composer-attachment-name" title="${escapeAttr(document.name)}">${escapeHtml(document.name)}</span>
+      <span class="composer-attachment-meta">${escapeHtml(document.contentKind)} \u00b7 ${escapeHtml(formatFileSize(document.size))}</span>
+      <button type="button" class="composer-attachment-remove" data-id="${escapeAttr(document.id)}" title="Remove" aria-label="Remove">\u2715</button>
+    </span>
+  `).join("");
+  for (const button of container.querySelectorAll<HTMLButtonElement>(".composer-attachment-remove")) {
+    button.addEventListener("click", () => {
+      if (!state.activeSession) return;
+      send({ type: "removeAttachment", sessionId: state.activeSession.id, documentId: button.dataset.id ?? "" });
+    });
+  }
 }
 
 function renderComposerHints(): void {
@@ -1448,6 +1493,7 @@ function handleMessage(msg: ChatHostToWebview): void {
       state.catalog = msg.catalog;
       state.backendStatus = msg.backendStatus;
       renderComposer();
+      renderComposerAttachments();
       renderBackendBanner();
       if (state.modelPickerOpen) renderModelPicker();
       if (state.agentPickerOpen) renderAgentPicker();
@@ -1472,6 +1518,7 @@ function handleMessage(msg: ChatHostToWebview): void {
       renderHeader();
       renderTranscript();
       renderComposer();
+      renderComposerAttachments();
       break;
     case "messageStart":
       if (state.activeSession && state.activeSession.id === msg.sessionId) {

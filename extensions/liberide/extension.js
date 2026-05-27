@@ -162,6 +162,17 @@ async function addConversationToFolder(folderId, conversationId) {
 async function listDocuments() {
   return readJson(await apiFetch("/api/documents"));
 }
+async function uploadDocument(file) {
+  const form = new FormData();
+  const blob = new Blob([file.bytes], { type: file.mimeType ?? "application/octet-stream" });
+  form.append("file", blob, file.name);
+  const token = getAuthToken();
+  const headers = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const response = await apiFetch("/api/documents", { method: "POST", body: form, headers });
+  const payload = await readJson(response);
+  return payload.document;
+}
 
 // src/spec/dag.ts
 function validateDag(tasks) {
@@ -1026,6 +1037,11 @@ async function streamChat(body, handlers, signal) {
     const data = JSON.parse(dataLine);
     if (event === "token") handlers.onToken?.(data.token);
     if (event === "tool") handlers.onToolEvent?.(data);
+    if (event === "markdown") handlers.onMarkdown?.(data.content);
+    if (event === "diff") handlers.onDiff?.(data);
+    if (event === "plan") handlers.onPlan?.(data);
+    if (event === "todo") handlers.onTodo?.(data);
+    if (event === "follow_up") handlers.onFollowUp?.(data);
     if (event === "error") throw new Error(data.error);
     if (event === "done") finalResponse = data;
   };
@@ -1044,6 +1060,7 @@ async function streamChat(body, handlers, signal) {
 
 // src/chat/chat-panel.ts
 var import_node_child_process2 = require("node:child_process");
+var import_node_path2 = require("node:path");
 var OVERRIDES_STORAGE_KEY = "liberide.chat.overrides";
 var ACTIVE_SESSION_STORAGE_KEY = "liberide.chat.activeSession";
 var LiberideChatPanelController = class _LiberideChatPanelController {
@@ -1167,6 +1184,12 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
           break;
         case "sendMessage":
           await this.sendChat(message.sessionId, message.content);
+          break;
+        case "attachFiles":
+          await this.attachFiles(message.sessionId);
+          break;
+        case "removeAttachment":
+          await this.removeAttachment(message.sessionId, message.documentId);
           break;
         case "cancelMessage": {
           const stream = this.streams.get(message.sessionId);
@@ -1477,7 +1500,8 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
       toolsEnabled: true,
       agentIds: conv.agentIds ?? stored.agentIds,
       skillIds: stored.skillIds,
-      mcpServerIds: stored.mcpServerIds
+      mcpServerIds: stored.mcpServerIds,
+      documentIds: stored.documentIds ?? []
     };
   }
   projectInfo() {
@@ -1584,6 +1608,42 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     await this.persistSessionKinds();
     this.broadcastSessions();
     this.broadcastActiveSession();
+  }
+  async attachFiles(sessionId) {
+    if (this.backendStatus !== "ok") {
+      this.broadcast({ type: "log", message: "Connect to the LiberIDE backend before attaching files." });
+      return;
+    }
+    const uris = await vscode6.window.showOpenDialog({ canSelectMany: true, openLabel: "Attach to chat" });
+    if (!uris?.length) return;
+    const uploadedIds = [];
+    for (const uri of uris) {
+      try {
+        const bytes = await vscode6.workspace.fs.readFile(uri);
+        const name = (0, import_node_path2.basename)(uri.fsPath);
+        const document = await uploadDocument({ name, bytes });
+        uploadedIds.push(document.id);
+        if (!this.catalog.documents.some((entry) => entry.id === document.id)) {
+          this.catalog = { ...this.catalog, documents: [document, ...this.catalog.documents] };
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.output.appendLine(`[chat.attach] ${msg}`);
+        this.broadcast({ type: "log", message: `Failed to attach ${(0, import_node_path2.basename)(uri.fsPath)}: ${msg}` });
+      }
+    }
+    if (!uploadedIds.length) return;
+    const session = sessionId.startsWith("draft:") && this.draftSession?.id === sessionId ? this.draftSession : this.conversations.has(sessionId) ? this.sessionFromConversation(this.conversations.get(sessionId)) : null;
+    if (!session) return;
+    const current = session.overrides.documentIds ?? [];
+    await this.updateOverrides(sessionId, { documentIds: [.../* @__PURE__ */ new Set([...current, ...uploadedIds])] });
+    this.broadcast({ type: "catalog", catalog: this.catalog, backendStatus: this.backendStatus });
+  }
+  async removeAttachment(sessionId, documentId) {
+    const session = sessionId.startsWith("draft:") && this.draftSession?.id === sessionId ? this.draftSession : this.conversations.has(sessionId) ? this.sessionFromConversation(this.conversations.get(sessionId)) : null;
+    if (!session) return;
+    const next = (session.overrides.documentIds ?? []).filter((id) => id !== documentId);
+    await this.updateOverrides(sessionId, { documentIds: next });
   }
   async updateOverrides(id, overrides) {
     const normalizedOverrides = { ...overrides };
@@ -1706,7 +1766,7 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
       content: rest || content,
       systemPrompt,
       skillIds: pipelineMode ? [] : overrides.skillIds ?? [],
-      documentIds: [],
+      documentIds: pipelineMode ? [] : overrides.documentIds ?? [],
       useRag: pipelineMode ? false : useRag,
       toolsEnabled,
       mcpServerIds: pipelineMode ? [] : overrides.mcpServerIds ?? [],
@@ -2389,6 +2449,7 @@ var SpecStore = class {
   onDidChange = this.changeEmitter.event;
   features = /* @__PURE__ */ new Map();
   watcher;
+  promptWatcher;
   activeFeatureId;
   async initialize(context) {
     this.activeFeatureId = context.workspaceState.get("liberide.activeFeatureId");
@@ -2397,6 +2458,20 @@ var SpecStore = class {
     this.watcher.onDidChange(() => void this.refresh());
     this.watcher.onDidDelete(() => void this.refresh());
     context.subscriptions.push(this.watcher);
+    this.promptWatcher = vscode7.workspace.createFileSystemWatcher("**/.chatllm/**/*.md");
+    const syncPrompts = () => {
+      const root = vscode7.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      if (!root) return;
+      void fetch(`${process.env.CHATLLM_API_ORIGIN ?? "http://127.0.0.1:3000"}/api/skills/import-from-workspace`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rootPath: root })
+      }).catch(() => void 0);
+    };
+    this.promptWatcher.onDidCreate(syncPrompts);
+    this.promptWatcher.onDidChange(syncPrompts);
+    this.promptWatcher.onDidDelete(syncPrompts);
+    context.subscriptions.push(this.promptWatcher);
     await this.refresh();
   }
   getFeatures() {
@@ -2468,6 +2543,7 @@ var SpecStore = class {
   }
   dispose() {
     this.watcher?.dispose();
+    this.promptWatcher?.dispose();
     this.changeEmitter.dispose();
   }
 };

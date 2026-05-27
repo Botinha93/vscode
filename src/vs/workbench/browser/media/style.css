@@ -477,3 +477,6 @@ body {
 .monaco-workbench .part.statusbar:not(:focus).status-border-top::after {
 	display: none;
 }
+.monaco-pane-view .pane > .pane-body {
+	background-color: var(--chatllm-panel-background) !important;
+}
