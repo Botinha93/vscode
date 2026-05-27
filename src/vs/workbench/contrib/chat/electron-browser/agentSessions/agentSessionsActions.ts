@@ -28,7 +28,7 @@ import { IWorkbenchContribution } from '../../../../common/contributions.js';
 import { CHAT_CATEGORY } from '../../browser/actions/chatActions.js';
 import { OPEN_WORKSPACE_IN_AGENTS_WINDOW_COMMAND_ID, OPEN_AGENTS_WINDOW_PRECONDITION, OPEN_AGENTS_WINDOW_COMMAND_ID } from '../../common/constants.js';
 
-const showNativeOpenInAgentsButton = product.applicationName !== 'chatllm';
+const showNativeOpenInAgentsButton = product.applicationName !== 'liberide';
 
 export class OpenWorkspaceInAgentsWindowAction extends Action2 {
 	constructor() {

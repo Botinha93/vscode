@@ -38,7 +38,7 @@ import { ChatViewPane } from './widgetHosts/viewPane/chatViewPane.js';
 
 const chatViewIcon = registerIcon('chat-view-icon', Codicon.chatSparkle, localize('chatViewIcon', 'View icon of the chat view.'));
 const nativeChatViewWhen = ContextKeyExpr.and(
-	product.applicationName === 'chatllm' ? ContextKeyExpr.equals('config.chatllm.copilot.enabled', true) : ContextKeyExpr.true(),
+	product.applicationName === 'liberide' ? ContextKeyExpr.equals('config.liberide.copilot.enabled', true) : ContextKeyExpr.true(),
 	ChatContextKeys.accountPolicyGateActive.negate(),
 	ContextKeyExpr.or(
 		ContextKeyExpr.and(

@@ -1,0 +1,297 @@
+{
+  "name": "liberide",
+  "displayName": "LiberIDE",
+  "description": "LiberIDE chat, pipeline, and spec workflow integration for the bundled VS Code workspace.",
+  "version": "0.3.0",
+  "publisher": "nexus",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": ["AI", "Other"],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js",
+  "scripts": {
+    "build": "node esbuild.mjs"
+  },
+  "capabilities": {
+    "virtualWorkspaces": true,
+    "untrustedWorkspaces": {
+      "supported": true
+    }
+  },
+  "contributes": {
+    "configuration": {
+      "title": "LiberIDE",
+      "properties": {
+        "liberide.modelSelection": {
+          "type": "string",
+          "enum": ["auto", "manual"],
+          "default": "manual",
+          "description": "Local override for model selection mode. When 'auto', the backend may upgrade the model based on the request. Configure models in the VoxChat app."
+        },
+        "liberide.chatMode": {
+          "type": "string",
+          "enum": ["normal", "agent"],
+          "default": "normal",
+          "description": "Local default chat mode for new chats. Can be overridden per chat."
+        },
+        "liberide.useRag": {
+          "type": "boolean",
+          "default": false,
+          "description": "Local default for RAG on new chats. Can be overridden per chat."
+        },
+        "liberide.toolsEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Local default for tool calling on new chats. Can be overridden per chat."
+        },
+        "liberide.systemPrompt": {
+          "type": "string",
+          "default": "",
+          "description": "Optional local system prompt appended to every LiberIDE chat request."
+        },
+        "liberide.copilot.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Re-enable the bundled Copilot extension UI surfaces. Recommended to keep disabled while using LiberIDE's UI."
+        },
+        "liberide.copilot.modelsEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable Copilot model access via VS Code's Language Model API (vscode.lm). Requires the Copilot model provider to be available."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "liberide.openChat",
+        "title": "Open LiberIDE Chat",
+        "category": "LiberIDE",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "liberide.newChat",
+        "title": "New Chat",
+        "category": "LiberIDE",
+        "icon": "$(add)"
+      },
+      {
+        "command": "liberide.openSettings",
+        "title": "Open LiberIDE Settings",
+        "category": "LiberIDE",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "liberide.openPipeline",
+        "title": "Open LiberIDE Pipeline",
+        "category": "LiberIDE",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "liberide.scaffoldFeature",
+        "title": "Scaffold Spec Feature",
+        "category": "LiberIDE"
+      },
+      {
+        "command": "liberide.setActiveFeature",
+        "title": "Set Active Spec Feature",
+        "category": "LiberIDE"
+      },
+      {
+        "command": "liberide.openTask",
+        "title": "Open Task Contract",
+        "category": "LiberIDE"
+      },
+      {
+        "command": "liberide.runTask",
+        "title": "Run Task",
+        "category": "LiberIDE"
+      },
+      {
+        "command": "liberide.markTaskReady",
+        "title": "Mark Task Ready",
+        "category": "LiberIDE"
+      },
+      {
+        "command": "liberide.dispatchFeature",
+        "title": "Dispatch Feature Tasks",
+        "category": "LiberIDE"
+      },
+      {
+        "command": "liberide.regenerateTasksIndex",
+        "title": "Regenerate Tasks Index",
+        "category": "LiberIDE"
+      },
+      {
+        "command": "liberide.cancelRun",
+        "title": "Cancel Active Run",
+        "category": "LiberIDE"
+      },
+      {
+        "command": "liberide.refreshSpecs",
+        "title": "Refresh Specs",
+        "category": "LiberIDE"
+      },
+      {
+        "command": "liberide.refreshTasks",
+        "title": "Refresh Tasks",
+        "category": "LiberIDE"
+      },
+      {
+        "command": "liberide.refreshRuns",
+        "title": "Refresh Runs",
+        "category": "LiberIDE"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "liberide",
+          "title": "LiberIDE",
+          "icon": "resources/liberide.svg"
+        }
+      ],
+      "secondarySidebar": [
+        {
+          "id": "liberide-chat",
+          "title": "LiberIDE",
+          "icon": "resources/liberide.svg"
+        }
+      ]
+    },
+    "views": {
+      "liberide-chat": [
+        {
+          "type": "webview",
+          "id": "liberide.chat",
+          "name": "Chat",
+          "icon": "resources/liberide.svg",
+          "contextualTitle": "LiberIDE"
+        }
+      ],
+      "liberide": [
+        {
+          "type": "webview",
+          "id": "liberide.pipeline",
+          "name": "Pipeline",
+          "icon": "resources/liberide.svg",
+          "contextualTitle": "LiberIDE"
+        },
+        {
+          "id": "liberide.specs",
+          "name": "Specs"
+        },
+        {
+          "id": "liberide.tasks",
+          "name": "Tasks"
+        },
+        {
+          "id": "liberide.runs",
+          "name": "Agent Runs"
+        }
+      ]
+    },
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "liberide.openChat"
+        },
+        {
+          "command": "liberide.newChat"
+        },
+        {
+          "command": "liberide.openSettings"
+        },
+        {
+          "command": "liberide.openPipeline"
+        },
+        {
+          "command": "liberide.scaffoldFeature"
+        },
+        {
+          "command": "liberide.dispatchFeature"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "liberide.newChat",
+          "when": "view == liberide.chat",
+          "group": "navigation@1"
+        },
+        {
+          "command": "liberide.openSettings",
+          "when": "view == liberide.chat",
+          "group": "navigation@2"
+        },
+        {
+          "command": "liberide.openPipeline",
+          "when": "view == liberide.chat",
+          "group": "navigation@3"
+        },
+        {
+          "command": "liberide.refreshSpecs",
+          "when": "view == liberide.specs",
+          "group": "navigation"
+        },
+        {
+          "command": "liberide.scaffoldFeature",
+          "when": "view == liberide.specs",
+          "group": "navigation"
+        },
+        {
+          "command": "liberide.refreshTasks",
+          "when": "view == liberide.tasks",
+          "group": "navigation"
+        },
+        {
+          "command": "liberide.dispatchFeature",
+          "when": "view == liberide.tasks",
+          "group": "navigation"
+        },
+        {
+          "command": "liberide.refreshRuns",
+          "when": "view == liberide.runs",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "liberide.openTask",
+          "when": "view == liberide.tasks && viewItem == task",
+          "group": "navigation"
+        },
+        {
+          "command": "liberide.runTask",
+          "when": "view == liberide.tasks && viewItem == task",
+          "group": "inline"
+        },
+        {
+          "command": "liberide.markTaskReady",
+          "when": "view == liberide.tasks && viewItem == task",
+          "group": "inline"
+        },
+        {
+          "command": "liberide.setActiveFeature",
+          "when": "view == liberide.specs && viewItem == feature",
+          "group": "inline"
+        }
+      ]
+    }
+  },
+  "dependencies": {
+    "cytoscape": "^3.30.0",
+    "cytoscape-dagre": "^2.5.0",
+    "mermaid": "^11.15.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/vscode": "^1.90.0",
+    "@types/cytoscape": "^3.21.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.0"
+  }
+}
