@@ -4,6 +4,7 @@ export const PROVIDER_LABELS: Record<ConfiguredProvider, string> = {
   openai: "OpenAI",
   openrouter: "OpenRouter",
   google: "Google",
+  copilot: "GitHub Copilot",
   ollama: "Ollama",
   "ollama-internal": "Ollama (internal)",
   llamacpp: "llama.cpp",

@@ -34,7 +34,7 @@ __export(extension_exports, {
   deactivate: () => deactivate
 });
 module.exports = __toCommonJS(extension_exports);
-var vscode11 = __toESM(require("vscode"));
+var vscode12 = __toESM(require("vscode"));
 
 // src/api.ts
 var import_node_fs = require("node:fs");
@@ -79,7 +79,7 @@ function authHeaders(extra) {
   if (token) headers.Authorization = `Bearer ${token}`;
   return headers;
 }
-async function apiFetch(path, init) {
+async function apiFetch2(path, init) {
   const origin = getApiOrigin();
   if (!origin) throw new Error("CHATLLM_API_ORIGIN is not set.");
   return fetch(path.startsWith("http") ? path : `${origin}${path}`, {
@@ -90,7 +90,7 @@ async function apiFetch(path, init) {
 async function probeBackend() {
   if (!getApiOrigin()) return "unconfigured";
   try {
-    const res = await apiFetch("/api/config");
+    const res = await apiFetch2("/api/config");
     if (res.ok) return "ok";
     if (res.status === 401 || res.status === 403) return "unauthorized";
     return "unreachable";
@@ -112,19 +112,19 @@ async function readNothing(res) {
   }
 }
 async function fetchConfig() {
-  return readJson(await apiFetch("/api/config"));
+  return readJson(await apiFetch2("/api/config"));
 }
 async function listConversations() {
-  return readJson(await apiFetch("/api/conversations"));
+  return readJson(await apiFetch2("/api/conversations"));
 }
 async function createConversation(title) {
   return readJson(
-    await apiFetch("/api/conversations", { method: "POST", body: JSON.stringify({ title }) })
+    await apiFetch2("/api/conversations", { method: "POST", body: JSON.stringify({ title }) })
   );
 }
 async function patchConversation(id, partial) {
   return readJson(
-    await apiFetch(`/api/conversations/${encodeURIComponent(id)}`, {
+    await apiFetch2(`/api/conversations/${encodeURIComponent(id)}`, {
       method: "PATCH",
       body: JSON.stringify(partial)
     })
@@ -132,34 +132,34 @@ async function patchConversation(id, partial) {
 }
 async function deleteConversation(id) {
   await readNothing(
-    await apiFetch(`/api/conversations/${encodeURIComponent(id)}`, { method: "DELETE" })
+    await apiFetch2(`/api/conversations/${encodeURIComponent(id)}`, { method: "DELETE" })
   );
 }
 async function listConversationMessages(id) {
   return readJson(
-    await apiFetch(`/api/conversations/${encodeURIComponent(id)}/messages`)
+    await apiFetch2(`/api/conversations/${encodeURIComponent(id)}/messages`)
   );
 }
 async function listFolders(filter = "mine") {
   return readJson(
-    await apiFetch(`/api/folders?filter=${encodeURIComponent(filter)}`)
+    await apiFetch2(`/api/folders?filter=${encodeURIComponent(filter)}`)
   );
 }
 async function createFolder(input) {
   return readJson(
-    await apiFetch("/api/folders", { method: "POST", body: JSON.stringify(input) })
+    await apiFetch2("/api/folders", { method: "POST", body: JSON.stringify(input) })
   );
 }
 async function addConversationToFolder(folderId, conversationId) {
   await readNothing(
-    await apiFetch(
+    await apiFetch2(
       `/api/folders/${encodeURIComponent(folderId)}/conversations/${encodeURIComponent(conversationId)}`,
       { method: "POST" }
     )
   );
 }
 async function listDocuments() {
-  return readJson(await apiFetch("/api/documents"));
+  return readJson(await apiFetch2("/api/documents"));
 }
 
 // src/spec/dag.ts
@@ -227,7 +227,7 @@ async function dispatchFeature(feature, options = {}) {
   const tasks = options.taskIds?.length ? feature.tasks.filter((task) => options.taskIds.includes(task.id)) : feature.tasks;
   const validation = validateDag(tasks);
   if (!validation.ok) throw new Error(validation.error);
-  const response = await apiFetch("/api/specs/dispatch", {
+  const response = await apiFetch2("/api/specs/dispatch", {
     method: "POST",
     body: JSON.stringify({
       feature: feature.id,
@@ -287,7 +287,7 @@ function subscribeExecutionGraphEvents(graphId, onEvent) {
   return () => controller.abort();
 }
 async function cancelExecutionGraph(graphId) {
-  await apiFetch(`/api/execution-graphs/${graphId}/cancel`, { method: "POST" });
+  await apiFetch2(`/api/execution-graphs/${graphId}/cancel`, { method: "POST" });
 }
 
 // src/panel/panel.ts
@@ -304,11 +304,13 @@ function readSettings() {
     useRag: cfg.get("useRag") ?? false,
     toolsEnabled: cfg.get("toolsEnabled") ?? true,
     systemPrompt: cfg.get("systemPrompt") ?? "",
-    copilotEnabled: cfg.get("copilot.enabled") ?? false
+    copilotUiEnabled: cfg.get("copilot.enabled") ?? false,
+    copilotModelsEnabled: cfg.get("copilot.modelsEnabled") ?? true
   };
 }
 var FLAT_TO_DOTTED = {
-  copilotEnabled: "copilot.enabled"
+  copilotUiEnabled: "copilot.enabled",
+  copilotModelsEnabled: "copilot.modelsEnabled"
 };
 async function writeSetting(key, value) {
   const dotted = FLAT_TO_DOTTED[key] ?? key;
@@ -670,7 +672,7 @@ function randomNonce() {
 }
 
 // src/chat/chat-panel.ts
-var vscode5 = __toESM(require("vscode"));
+var vscode6 = __toESM(require("vscode"));
 
 // src/project/identity.ts
 var vscode4 = __toESM(require("vscode"));
@@ -753,6 +755,17 @@ function extractTaskBlocks(content) {
 }
 
 // src/chat/models.ts
+var PROVIDER_LABELS = {
+  openai: "OpenAI",
+  openrouter: "OpenRouter",
+  google: "Google",
+  copilot: "GitHub Copilot",
+  ollama: "Ollama",
+  "ollama-internal": "Ollama (internal)",
+  llamacpp: "llama.cpp",
+  lmstudio: "LM Studio",
+  custom: "Custom"
+};
 function toWireProvider(provider) {
   return provider === "ollama-internal" ? "ollama" : provider;
 }
@@ -764,9 +777,126 @@ function defaultEnabledModel(models) {
   return models.find((m) => m.enabled && m.apiKeyConfigured) ?? models.find((m) => m.enabled) ?? models[0];
 }
 
+// src/chat/copilot-lm.ts
+var vscode5 = __toESM(require("vscode"));
+async function listCopilotLmModels() {
+  const models = await vscode5.lm.selectChatModels({ vendor: "copilot" });
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  return models.map((m) => ({
+    id: `lm:copilot:${m.id}`,
+    provider: "copilot",
+    modelId: m.id,
+    displayName: m.name || `${PROVIDER_LABELS.copilot} \xB7 ${m.id}`,
+    description: m.family ? `${m.family}${m.version ? ` \xB7 ${m.version}` : ""}` : void 0,
+    capabilities: capabilitiesFromLm(m),
+    apiKeyConfigured: true,
+    contextWindow: m.maxInputTokens,
+    enabled: true,
+    createdAt: now,
+    updatedAt: now
+  }));
+}
+function capabilitiesFromLm(model) {
+  const caps = /* @__PURE__ */ new Set(["chat", "tools"]);
+  const id = `${model.vendor}/${model.family}/${model.id}`.toLowerCase();
+  if (id.includes("vision") || id.includes("vl") || id.includes("4o")) caps.add("vision");
+  if (id.includes("code") || id.includes("coder")) caps.add("code");
+  if (model.maxInputTokens && model.maxInputTokens >= 128e3) caps.add("long-context");
+  return [...caps];
+}
+function toLmMessages(history) {
+  return history.map(
+    (m) => m.role === "user" ? vscode5.LanguageModelChatMessage.User(m.content) : vscode5.LanguageModelChatMessage.Assistant(m.content)
+  );
+}
+async function streamCopilotChat(input) {
+  const [model] = await vscode5.lm.selectChatModels({ vendor: "copilot", id: input.modelId });
+  if (!model) throw new Error(`Copilot model not available: ${input.modelId}`);
+  const toolEvents = [];
+  let content = "";
+  const cancellation = new vscode5.CancellationTokenSource();
+  if (input.signal) {
+    if (input.signal.aborted) cancellation.cancel();
+    else input.signal.addEventListener("abort", () => cancellation.cancel(), { once: true });
+  }
+  const tools = input.toolsEnabled ? await buildToolStubs() : [];
+  const messages = [
+    ...toLmMessages(input.history),
+    vscode5.LanguageModelChatMessage.User(input.prompt)
+  ];
+  const runOnce = async () => {
+    return model.sendRequest(messages, { tools, toolMode: vscode5.LanguageModelChatToolMode.Auto }, cancellation.token);
+  };
+  let response = await runOnce();
+  for await (const part of response.stream) {
+    if (typeof part === "string") continue;
+    if (part.type === "text") {
+      const text = part.value;
+      content += text;
+      input.onToken(text);
+      continue;
+    }
+    if (part.type === "tool_call") {
+      const call = part;
+      const event = {
+        id: call.callId,
+        name: call.name,
+        arguments: call.input,
+        createdAt: (/* @__PURE__ */ new Date()).toISOString()
+      };
+      toolEvents.push(event);
+      input.onToolEvent(event);
+      const result = await invokeBackendTool({
+        name: call.name,
+        arguments: call.input
+      });
+      const done = { ...event, result: result.result ?? JSON.stringify(result), createdAt: event.createdAt };
+      toolEvents.push(done);
+      input.onToolEvent(done);
+      messages.push(vscode5.LanguageModelChatMessage.Assistant([call]));
+      messages.push(vscode5.LanguageModelChatMessage.User([new vscode5.LanguageModelToolResultPart(call.callId, result.result ?? "")]));
+      response = await runOnce();
+    }
+  }
+  if (!content) {
+    for await (const token of response.text) {
+      content += token;
+      input.onToken(token);
+    }
+  }
+  return { content, toolEvents };
+}
+async function buildToolStubs() {
+  const names = [
+    "ide_read_file",
+    "ide_edit_file",
+    "ide_write_file",
+    "ide_list_directory",
+    "ide_search_code",
+    "ide_run_command"
+  ];
+  return names.map((name) => ({
+    name,
+    description: `Invoke ${name} via ChatLLM backend`,
+    inputSchema: { type: "object" }
+  }));
+}
+async function invokeBackendTool(body) {
+  const response = await apiFetch2("/api/tools/invoke", {
+    method: "POST",
+    body: JSON.stringify(body)
+  });
+  if (!response.ok) {
+    const err = await response.text().catch(() => response.statusText);
+    throw new Error(err || response.statusText);
+  }
+  const event = await response.json();
+  return { result: event.result };
+}
+
 // src/chat/stream-client.ts
 async function streamChat(body, handlers, signal) {
-  const response = await apiFetch("/api/chat/stream", {
+  const response = await apiFetch2("/api/chat/stream", {
     method: "POST",
     body: JSON.stringify(body),
     signal
@@ -813,6 +943,8 @@ var ChatllmChatPanelController = class _ChatllmChatPanelController {
     this.output = output;
     this.overrides = this.context.workspaceState.get(OVERRIDES_STORAGE_KEY, {});
     this.activeSessionId = this.context.workspaceState.get(ACTIVE_SESSION_STORAGE_KEY, null);
+    const storedKinds = this.context.workspaceState.get("chatllm.chat.sessionKinds", {});
+    for (const [id, kind] of Object.entries(storedKinds)) this.sessionKinds.set(id, kind);
     this.disposables.push(
       onSettingsChange((settings) => this.broadcast({ type: "settings", settings }))
     );
@@ -829,6 +961,7 @@ var ChatllmChatPanelController = class _ChatllmChatPanelController {
   conversations = /* @__PURE__ */ new Map();
   messagesCache = /* @__PURE__ */ new Map();
   overrides = {};
+  sessionKinds = /* @__PURE__ */ new Map();
   /** Locally-staged session for "new chat" before the first message creates it on the backend. */
   draftSession = null;
   activeSessionId = null;
@@ -840,7 +973,7 @@ var ChatllmChatPanelController = class _ChatllmChatPanelController {
     });
   }
   show() {
-    void vscode5.commands.executeCommand(`${_ChatllmChatPanelController.viewType}.focus`);
+    void vscode6.commands.executeCommand(`${_ChatllmChatPanelController.viewType}.focus`);
   }
   async newSession() {
     this.draftSession = this.makeDraft();
@@ -866,8 +999,8 @@ var ChatllmChatPanelController = class _ChatllmChatPanelController {
       enableScripts: true,
       retainContextWhenHidden: true,
       localResourceRoots: [
-        vscode5.Uri.joinPath(this.context.extensionUri, "media"),
-        vscode5.Uri.joinPath(this.context.extensionUri, "resources")
+        vscode6.Uri.joinPath(this.context.extensionUri, "media"),
+        vscode6.Uri.joinPath(this.context.extensionUri, "resources")
       ]
     };
   }
@@ -938,7 +1071,10 @@ var ChatllmChatPanelController = class _ChatllmChatPanelController {
           this.broadcast({ type: "openSettings" });
           break;
         case "openPipeline":
-          await vscode5.commands.executeCommand("chatllm.openPipeline");
+          await vscode6.commands.executeCommand("chatllm.openPipeline");
+          break;
+        case "copilotGithubLogin":
+          await this.copilotGithubLogin();
           break;
         case "revealFile":
           await this.revealFile(message.path);
@@ -1001,6 +1137,15 @@ var ChatllmChatPanelController = class _ChatllmChatPanelController {
     try {
       const [config, documents] = await Promise.all([fetchConfig(), listDocuments().catch(() => [])]);
       this.catalog = catalogFromConfig(config, documents);
+      try {
+        if (!readSettings().copilotModelsEnabled) throw new Error("Copilot LM disabled");
+        const localCopilot = await listCopilotLmModels();
+        const merged = /* @__PURE__ */ new Map();
+        for (const m of this.catalog.models) merged.set(`${m.provider}:${m.modelId}`, m);
+        for (const m of localCopilot) merged.set(`${m.provider}:${m.modelId}`, m);
+        this.catalog.models = [...merged.values()];
+      } catch {
+      }
       this.backendStatus = "ok";
     } catch (err) {
       this.output.appendLine(`[chat.catalog] ${err instanceof Error ? err.message : String(err)}`);
@@ -1078,14 +1223,19 @@ var ChatllmChatPanelController = class _ChatllmChatPanelController {
   // ---------------------------------------------------------------------------
   makeDraft() {
     const now = Date.now();
+    const id = `draft:${randomId()}`;
+    const kind = "vibe";
+    this.sessionKinds.set(id, kind);
+    void this.persistSessionKinds();
     return {
-      id: `draft:${randomId()}`,
+      id,
       title: "New chat",
       messages: [],
       overrides: {},
       remote: false,
       createdAt: now,
-      updatedAt: now
+      updatedAt: now,
+      kind
     };
   }
   sessionSummaries() {
@@ -1097,7 +1247,8 @@ var ChatllmChatPanelController = class _ChatllmChatPanelController {
         updatedAt: this.draftSession.updatedAt,
         messageCount: this.draftSession.messages.length,
         overrides: this.draftSession.overrides,
-        remote: false
+        remote: false,
+        kind: this.draftSession.kind
       });
     }
     for (const c of this.conversations.values()) {
@@ -1108,7 +1259,8 @@ var ChatllmChatPanelController = class _ChatllmChatPanelController {
         updatedAt: new Date(c.updatedAt).getTime() || Date.now(),
         messageCount: this.messagesCache.get(c.id)?.length ?? 0,
         overrides: this.conversationOverrides(c),
-        remote: true
+        remote: true,
+        kind: this.sessionKinds.get(c.id) ?? "vibe"
       });
     }
     summaries.sort((a, b) => b.updatedAt - a.updatedAt);
@@ -1130,6 +1282,7 @@ var ChatllmChatPanelController = class _ChatllmChatPanelController {
       createdAt: new Date(m.createdAt).getTime() || Date.now(),
       status: "complete"
     }));
+    const kind = this.sessionKinds.get(conv.id) ?? "vibe";
     return {
       id: conv.id,
       conversationId: conv.id,
@@ -1138,7 +1291,8 @@ var ChatllmChatPanelController = class _ChatllmChatPanelController {
       overrides: this.conversationOverrides(conv),
       remote: true,
       createdAt: new Date(conv.createdAt).getTime() || Date.now(),
-      updatedAt: new Date(conv.updatedAt).getTime() || Date.now()
+      updatedAt: new Date(conv.updatedAt).getTime() || Date.now(),
+      kind
     };
   }
   conversationOverrides(conv) {
@@ -1376,28 +1530,34 @@ var ChatllmChatPanelController = class _ChatllmChatPanelController {
     });
     let buffer = "";
     try {
-      const response = await streamChat(
-        body,
-        {
-          onToken: (text) => {
-            buffer += text;
-            assistantMessage.content = buffer;
-            this.broadcast({ type: "messageAppend", sessionId: conversationId, messageId: assistantMessage.id, chunk: text });
-          },
-          onToolEvent: (event) => {
-            const update = applyToolEvent(streamState, event);
-            if (!update) return;
-            this.broadcast({
-              type: "toolUpdate",
-              sessionId: conversationId,
-              messageId: assistantMessage.id,
-              entry: update.entry,
-              editedFiles: update.editedFiles
-            });
-          }
+      const handlers = {
+        onToken: (text) => {
+          buffer += text;
+          assistantMessage.content = buffer;
+          this.broadcast({ type: "messageAppend", sessionId: conversationId, messageId: assistantMessage.id, chunk: text });
         },
-        abort.signal
-      );
+        onToolEvent: (event) => {
+          const update = applyToolEvent(streamState, event);
+          if (!update) return;
+          this.broadcast({
+            type: "toolUpdate",
+            sessionId: conversationId,
+            messageId: assistantMessage.id,
+            entry: update.entry,
+            editedFiles: update.editedFiles
+          });
+        }
+      };
+      const useLocalCopilot = body.provider === "copilot" && readSettings().copilotModelsEnabled && await listCopilotLmModels().then((m) => m.some((x) => x.modelId === body.model)).catch(() => false);
+      const response = useLocalCopilot ? await streamCopilotChat({
+        modelId: body.model,
+        history: (messages ?? []).filter((m) => m.role === "user" || m.role === "assistant").map((m) => ({ role: m.role, content: m.content })),
+        prompt: body.content,
+        toolsEnabled: body.toolsEnabled,
+        onToken: handlers.onToken,
+        onToolEvent: handlers.onToolEvent,
+        signal: abort.signal
+      }).then((r) => ({ assistantMessage: { id: assistantMessage.id, content: r.content } })) : await streamChat(body, handlers, abort.signal);
       const finalConversation = response.conversation;
       if (finalConversation) this.conversations.set(finalConversation.id, finalConversation);
       if (response.assistantMessage?.id) assistantMessage.id = response.assistantMessage.id;
@@ -1498,21 +1658,21 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
     }
   }
   async revealFile(relativePath) {
-    const root = vscode5.workspace.workspaceFolders?.[0]?.uri;
+    const root = vscode6.workspace.workspaceFolders?.[0]?.uri;
     if (!root) {
       this.broadcast({ type: "log", message: "No workspace folder open." });
       return;
     }
-    const target = vscode5.Uri.joinPath(root, relativePath.replace(/^\/+/, ""));
+    const target = vscode6.Uri.joinPath(root, relativePath.replace(/^\/+/, ""));
     try {
-      const doc = await vscode5.workspace.openTextDocument(target);
-      await vscode5.window.showTextDocument(doc, { preview: false });
+      const doc = await vscode6.workspace.openTextDocument(target);
+      await vscode6.window.showTextDocument(doc, { preview: false });
     } catch (err) {
       this.broadcast({ type: "log", message: `Could not open ${relativePath}: ${err instanceof Error ? err.message : err}` });
     }
   }
   async undoEdit(relativePath) {
-    const root = vscode5.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const root = vscode6.workspace.workspaceFolders?.[0]?.uri.fsPath;
     if (!root) {
       this.broadcast({ type: "log", message: "No workspace folder open." });
       return;
@@ -1535,13 +1695,13 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
     if (!feature?.tasksDirUri) return 0;
     let written = 0;
     for (const block of extractTaskBlocks(text)) {
-      const probe = vscode5.Uri.joinPath(feature.tasksDirUri, "_probe.md");
+      const probe = vscode6.Uri.joinPath(feature.tasksDirUri, "_probe.md");
       const task = parseTaskContract(feature.id, probe, block.startsWith("---") ? block : `---
 ${block}
 ---
 `);
       if (!task) continue;
-      task.filePath = vscode5.Uri.joinPath(
+      task.filePath = vscode6.Uri.joinPath(
         feature.tasksDirUri,
         `${task.id}-${task.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40)}.md`
       );
@@ -1553,20 +1713,34 @@ ${block}
       const updated = this.store.getFeature(feature.id);
       if (updated?.tasksDirUri) {
         await writeTextFile(
-          vscode5.Uri.joinPath(updated.tasksDirUri, "index.md"),
+          vscode6.Uri.joinPath(updated.tasksDirUri, "index.md"),
           regenerateTasksIndex(updated.tasks)
         );
       }
     }
     return written;
   }
+  async copilotGithubLogin() {
+    try {
+      const session = await vscode6.authentication.getSession("github", ["read:user"], { createIfNone: true });
+      if (!session?.accessToken) throw new Error("GitHub authentication did not return an access token.");
+      await apiFetch("/api/copilot/link/ide", {
+        method: "POST",
+        body: JSON.stringify({ accessToken: session.accessToken })
+      });
+      this.broadcast({ type: "log", message: "GitHub linked for Copilot." });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.broadcast({ type: "log", message: `GitHub sign-in failed: ${msg}` });
+    }
+  }
   // ---------------------------------------------------------------------------
   // HTML
   // ---------------------------------------------------------------------------
   renderHtml(webview) {
-    const scriptUri = webview.asWebviewUri(vscode5.Uri.joinPath(this.context.extensionUri, "media", "chat.js"));
-    const styleUri = webview.asWebviewUri(vscode5.Uri.joinPath(this.context.extensionUri, "media", "webview.css"));
-    const mermaidUri = webview.asWebviewUri(vscode5.Uri.joinPath(this.context.extensionUri, "media", "mermaid.js"));
+    const scriptUri = webview.asWebviewUri(vscode6.Uri.joinPath(this.context.extensionUri, "media", "chat.js"));
+    const styleUri = webview.asWebviewUri(vscode6.Uri.joinPath(this.context.extensionUri, "media", "webview.css"));
+    const mermaidUri = webview.asWebviewUri(vscode6.Uri.joinPath(this.context.extensionUri, "media", "mermaid.js"));
     const nonce = randomNonce2();
     const csp = [
       `default-src 'none'`,
@@ -1717,19 +1891,19 @@ function randomNonce2() {
 }
 
 // src/spec/store.ts
-var vscode6 = __toESM(require("vscode"));
+var vscode7 = __toESM(require("vscode"));
 var SpecStore = class {
   constructor(output) {
     this.output = output;
   }
-  changeEmitter = new vscode6.EventEmitter();
+  changeEmitter = new vscode7.EventEmitter();
   onDidChange = this.changeEmitter.event;
   features = /* @__PURE__ */ new Map();
   watcher;
   activeFeatureId;
   async initialize(context) {
     this.activeFeatureId = context.workspaceState.get("chatllm.activeFeatureId");
-    this.watcher = vscode6.workspace.createFileSystemWatcher("**/.chatllm/specs/**/*.md");
+    this.watcher = vscode7.workspace.createFileSystemWatcher("**/.chatllm/specs/**/*.md");
     this.watcher.onDidCreate(() => void this.refresh());
     this.watcher.onDidChange(() => void this.refresh());
     this.watcher.onDidDelete(() => void this.refresh());
@@ -1753,11 +1927,11 @@ var SpecStore = class {
   }
   async refresh() {
     this.features.clear();
-    for (const folder of vscode6.workspace.workspaceFolders ?? []) {
-      const root = vscode6.Uri.joinPath(folder.uri, ".chatllm", "specs");
+    for (const folder of vscode7.workspace.workspaceFolders ?? []) {
+      const root = vscode7.Uri.joinPath(folder.uri, ".chatllm", "specs");
       try {
-        for (const [name, type] of await vscode6.workspace.fs.readDirectory(root)) {
-          if (type === vscode6.FileType.Directory) {
+        for (const [name, type] of await vscode7.workspace.fs.readDirectory(root)) {
+          if (type === vscode7.FileType.Directory) {
             const feature = await this.loadFeature(root, name);
             if (feature) this.features.set(feature.id, feature);
           }
@@ -1768,11 +1942,11 @@ var SpecStore = class {
     this.changeEmitter.fire();
   }
   async loadFeature(specsRoot, id) {
-    const rootUri = vscode6.Uri.joinPath(specsRoot, id);
-    const featureMdUri = vscode6.Uri.joinPath(rootUri, "feature.md");
-    const requirementsUri = vscode6.Uri.joinPath(rootUri, "requirements.md");
-    const designUri = vscode6.Uri.joinPath(rootUri, "design.md");
-    const tasksDirUri = vscode6.Uri.joinPath(rootUri, "tasks");
+    const rootUri = vscode7.Uri.joinPath(specsRoot, id);
+    const featureMdUri = vscode7.Uri.joinPath(rootUri, "feature.md");
+    const requirementsUri = vscode7.Uri.joinPath(rootUri, "requirements.md");
+    const designUri = vscode7.Uri.joinPath(rootUri, "design.md");
+    const tasksDirUri = vscode7.Uri.joinPath(rootUri, "tasks");
     let name = id;
     let status = "draft";
     try {
@@ -1786,9 +1960,9 @@ var SpecStore = class {
     const designIds = await this.readIds(designUri, "D");
     const tasks = [];
     try {
-      for (const [fileName, fileType] of await vscode6.workspace.fs.readDirectory(tasksDirUri)) {
-        if (fileType !== vscode6.FileType.File || !/^T-\d+.*\.md$/i.test(fileName)) continue;
-        const filePath = vscode6.Uri.joinPath(tasksDirUri, fileName);
+      for (const [fileName, fileType] of await vscode7.workspace.fs.readDirectory(tasksDirUri)) {
+        if (fileType !== vscode7.FileType.File || !/^T-\d+.*\.md$/i.test(fileName)) continue;
+        const filePath = vscode7.Uri.joinPath(tasksDirUri, fileName);
         const task = parseTaskContract(id, filePath, await readTextFile(filePath));
         if (task) tasks.push(task);
       }
@@ -1810,7 +1984,7 @@ var SpecStore = class {
 };
 
 // src/theme-bridge.ts
-var vscode7 = __toESM(require("vscode"));
+var vscode8 = __toESM(require("vscode"));
 var CHATLLM_TO_VSCODE = {
   "default:light": "Light Modern",
   "default:dark": "Dark Modern",
@@ -1843,27 +2017,27 @@ function createThemeBridge(output) {
   async function applyTheme(themeId) {
     if (!themeId) return;
     lastApplied = themeId;
-    await vscode7.workspace.getConfiguration("workbench").update("colorTheme", themeId, vscode7.ConfigurationTarget.Global);
+    await vscode8.workspace.getConfiguration("workbench").update("colorTheme", themeId, vscode8.ConfigurationTarget.Global);
   }
   async function applyColorOverrides(overrides) {
     if (!overrides || Object.keys(overrides).length === 0) return;
     const fingerprint = JSON.stringify(overrides);
     if (fingerprint === lastOverridesKey) return;
     lastOverridesKey = fingerprint;
-    const config = vscode7.workspace.getConfiguration("workbench");
+    const config = vscode8.workspace.getConfiguration("workbench");
     const existing = config.get("colorCustomizations") ?? {};
     const next = { ...overrides };
     for (const [key, value] of Object.entries(existing)) {
       if (key.startsWith("[") && key.endsWith("]")) next[key] = value;
     }
-    await config.update("colorCustomizations", next, vscode7.ConfigurationTarget.Global);
+    await config.update("colorCustomizations", next, vscode8.ConfigurationTarget.Global);
   }
   async function applyTokenColorOverrides(overrides) {
     if (!overrides || !overrides.textMateRules || overrides.textMateRules.length === 0) return;
     const fingerprint = JSON.stringify(overrides);
     if (fingerprint === lastTokenOverridesKey) return;
     lastTokenOverridesKey = fingerprint;
-    const config = vscode7.workspace.getConfiguration("editor");
+    const config = vscode8.workspace.getConfiguration("editor");
     const existing = config.get("tokenColorCustomizations") ?? {};
     const next = {
       textMateRules: overrides.textMateRules,
@@ -1875,17 +2049,17 @@ function createThemeBridge(output) {
     for (const [key, value] of Object.entries(existing)) {
       if (key.startsWith("[") && key.endsWith("]")) next[key] = value;
     }
-    await config.update("tokenColorCustomizations", next, vscode7.ConfigurationTarget.Global);
+    await config.update("tokenColorCustomizations", next, vscode8.ConfigurationTarget.Global);
   }
   async function publishTheme() {
-    const themeId = vscode7.workspace.getConfiguration("workbench").get("colorTheme");
+    const themeId = vscode8.workspace.getConfiguration("workbench").get("colorTheme");
     if (!themeId || themeId === lastApplied) {
       lastApplied = void 0;
       return;
     }
     const mapped = VSCODE_TO_CHATLLM[themeId];
     if (!mapped) return;
-    await apiFetch("/api/theme", {
+    await apiFetch2("/api/theme", {
       method: "PUT",
       body: JSON.stringify({ kind: "name", family: mapped.family, mode: mapped.mode, vsCodeThemeId: themeId, source: "vscode" })
     }).catch((error) => output.appendLine(`Theme publish error: ${error instanceof Error ? error.message : String(error)}`));
@@ -1904,7 +2078,7 @@ function createThemeBridge(output) {
   }
   const envTheme = CHATLLM_TO_VSCODE[`${process.env.CHATLLM_THEME_FAMILY}:${process.env.CHATLLM_THEME_MODE === "system" ? "dark" : process.env.CHATLLM_THEME_MODE}`];
   void applyTheme(envTheme);
-  const listener = vscode7.workspace.onDidChangeConfiguration((event) => {
+  const listener = vscode8.workspace.onDidChangeConfiguration((event) => {
     if (event.affectsConfiguration("workbench.colorTheme")) void publishTheme();
   });
   connect();
@@ -1917,12 +2091,12 @@ function createThemeBridge(output) {
 }
 
 // src/views/runsTree.ts
-var vscode8 = __toESM(require("vscode"));
+var vscode9 = __toESM(require("vscode"));
 var RunsTreeProvider = class {
   constructor(writeback) {
     this.writeback = writeback;
   }
-  emitter = new vscode8.EventEmitter();
+  emitter = new vscode9.EventEmitter();
   onDidChangeTreeData = this.emitter.event;
   runs = /* @__PURE__ */ new Map();
   refresh() {
@@ -1949,11 +2123,11 @@ var RunsTreeProvider = class {
   }
   getTreeItem(item) {
     if (item.kind === "run") {
-      const tree2 = new vscode8.TreeItem(item.run.label, vscode8.TreeItemCollapsibleState.Expanded);
+      const tree2 = new vscode9.TreeItem(item.run.label, vscode9.TreeItemCollapsibleState.Expanded);
       tree2.description = item.run.status;
       return tree2;
     }
-    const tree = new vscode8.TreeItem(item.nodeId);
+    const tree = new vscode9.TreeItem(item.nodeId);
     tree.description = item.status;
     return tree;
   }
@@ -1969,27 +2143,27 @@ function mapStatus2(status) {
 }
 
 // src/views/specsTree.ts
-var vscode9 = __toESM(require("vscode"));
+var vscode10 = __toESM(require("vscode"));
 var SpecsTreeProvider = class {
   constructor(store2) {
     this.store = store2;
     store2.onDidChange(() => this.refresh());
   }
-  emitter = new vscode9.EventEmitter();
+  emitter = new vscode10.EventEmitter();
   onDidChangeTreeData = this.emitter.event;
   refresh() {
     this.emitter.fire(void 0);
   }
   getTreeItem(item) {
     if (item.kind === "feature") {
-      const tree2 = new vscode9.TreeItem(item.feature.name, vscode9.TreeItemCollapsibleState.Expanded);
+      const tree2 = new vscode10.TreeItem(item.feature.name, vscode10.TreeItemCollapsibleState.Expanded);
       tree2.description = item.feature.status;
       tree2.contextValue = "feature";
-      tree2.iconPath = new vscode9.ThemeIcon("folder");
+      tree2.iconPath = new vscode10.ThemeIcon("folder");
       tree2.command = { command: "chatllm.setActiveFeature", title: "Set Active", arguments: [item.feature.id] };
       return tree2;
     }
-    const tree = new vscode9.TreeItem(item.label);
+    const tree = new vscode10.TreeItem(item.label);
     tree.resourceUri = item.uri;
     tree.command = { command: "vscode.open", title: "Open", arguments: [item.uri] };
     return tree;
@@ -2001,26 +2175,26 @@ var SpecsTreeProvider = class {
     return [
       f.requirementsUri && { kind: "file", label: `requirements.md (${f.requirementIds.length})`, uri: f.requirementsUri },
       f.designUri && { kind: "file", label: `design.md (${f.designIds.length})`, uri: f.designUri },
-      f.tasksDirUri && { kind: "file", label: `tasks/index.md (${f.tasks.length})`, uri: vscode9.Uri.joinPath(f.tasksDirUri, "index.md") }
+      f.tasksDirUri && { kind: "file", label: `tasks/index.md (${f.tasks.length})`, uri: vscode10.Uri.joinPath(f.tasksDirUri, "index.md") }
     ].filter(Boolean);
   }
 };
 
 // src/views/tasksTree.ts
-var vscode10 = __toESM(require("vscode"));
+var vscode11 = __toESM(require("vscode"));
 var TasksTreeProvider = class {
   constructor(store2) {
     this.store = store2;
     store2.onDidChange(() => this.refresh());
   }
-  emitter = new vscode10.EventEmitter();
+  emitter = new vscode11.EventEmitter();
   onDidChangeTreeData = this.emitter.event;
   refresh() {
     this.emitter.fire(void 0);
   }
   getTreeItem(item) {
-    if (item.kind === "group") return new vscode10.TreeItem(item.label, vscode10.TreeItemCollapsibleState.Expanded);
-    const tree = new vscode10.TreeItem(`${item.task.id}: ${item.task.title}`);
+    if (item.kind === "group") return new vscode11.TreeItem(item.label, vscode11.TreeItemCollapsibleState.Expanded);
+    const tree = new vscode11.TreeItem(`${item.task.id}: ${item.task.title}`);
     tree.description = item.task.status;
     tree.contextValue = "task";
     tree.command = { command: "chatllm.openTask", title: "Open Task", arguments: [{ kind: "task", featureId: item.featureId, task: { id: item.task.id } }] };
@@ -2044,7 +2218,7 @@ var pipeline;
 var chat;
 async function activate(context) {
   initApiFromContext(context);
-  const output = vscode11.window.createOutputChannel("Chatllm");
+  const output = vscode12.window.createOutputChannel("Chatllm");
   store = new SpecStore(output);
   await store.initialize(context);
   const specsTree = new SpecsTreeProvider(store);
@@ -2063,15 +2237,15 @@ async function activate(context) {
     store,
     pipeline,
     chat,
-    vscode11.window.registerWebviewViewProvider(ChatllmPipelineController.viewType, pipeline, {
+    vscode12.window.registerWebviewViewProvider(ChatllmPipelineController.viewType, pipeline, {
       webviewOptions: { retainContextWhenHidden: true }
     }),
-    vscode11.window.registerWebviewViewProvider(ChatllmChatPanelController.viewType, chat, {
+    vscode12.window.registerWebviewViewProvider(ChatllmChatPanelController.viewType, chat, {
       webviewOptions: { retainContextWhenHidden: true }
     }),
-    vscode11.window.registerTreeDataProvider("chatllm.specs", specsTree),
-    vscode11.window.registerTreeDataProvider("chatllm.tasks", tasksTree),
-    vscode11.window.registerTreeDataProvider("chatllm.runs", runsTree),
+    vscode12.window.registerTreeDataProvider("chatllm.specs", specsTree),
+    vscode12.window.registerTreeDataProvider("chatllm.tasks", tasksTree),
+    vscode12.window.registerTreeDataProvider("chatllm.runs", runsTree),
     createThemeBridge(output),
     statusBar(),
     ...commands4(context, specsTree, tasksTree, runsTree)
@@ -2079,25 +2253,25 @@ async function activate(context) {
 }
 function commands4(context, specsTree, tasksTree, runsTree) {
   return [
-    vscode11.commands.registerCommand("chatllm.openChat", () => chat.show()),
-    vscode11.commands.registerCommand("chatllm.newChat", async () => {
+    vscode12.commands.registerCommand("chatllm.openChat", () => chat.show()),
+    vscode12.commands.registerCommand("chatllm.newChat", async () => {
       chat.show();
       await chat.newSession();
     }),
-    vscode11.commands.registerCommand("chatllm.openSettings", () => chat.openSettings()),
-    vscode11.commands.registerCommand("chatllm.openPipeline", () => pipeline.show()),
-    vscode11.commands.registerCommand("chatllm.refreshSpecs", async () => {
+    vscode12.commands.registerCommand("chatllm.openSettings", () => chat.openSettings()),
+    vscode12.commands.registerCommand("chatllm.openPipeline", () => pipeline.show()),
+    vscode12.commands.registerCommand("chatllm.refreshSpecs", async () => {
       await store.refresh();
       specsTree.refresh();
     }),
-    vscode11.commands.registerCommand("chatllm.refreshTasks", async () => {
+    vscode12.commands.registerCommand("chatllm.refreshTasks", async () => {
       await store.refresh();
       tasksTree.refresh();
     }),
-    vscode11.commands.registerCommand("chatllm.refreshRuns", () => runsTree.refresh()),
-    vscode11.commands.registerCommand("chatllm.scaffoldFeature", async () => {
-      const folder = vscode11.workspace.workspaceFolders?.[0];
-      const name = await vscode11.window.showInputBox({ prompt: "Feature name" });
+    vscode12.commands.registerCommand("chatllm.refreshRuns", () => runsTree.refresh()),
+    vscode12.commands.registerCommand("chatllm.scaffoldFeature", async () => {
+      const folder = vscode12.workspace.workspaceFolders?.[0];
+      const name = await vscode12.window.showInputBox({ prompt: "Feature name" });
       if (!folder || !name) return;
       const root = await scaffoldFeature(folder, name);
       const id = root.path.split("/").pop() ?? name;
@@ -2106,42 +2280,42 @@ function commands4(context, specsTree, tasksTree, runsTree) {
       await store.refresh();
       specsTree.refresh();
     }),
-    vscode11.commands.registerCommand("chatllm.setActiveFeature", async (id) => {
+    vscode12.commands.registerCommand("chatllm.setActiveFeature", async (id) => {
       store.setActiveFeature(id);
       await context.workspaceState.update("chatllm.activeFeatureId", id);
       tasksTree.refresh();
     }),
-    vscode11.commands.registerCommand("chatllm.openTask", async (arg) => {
+    vscode12.commands.registerCommand("chatllm.openTask", async (arg) => {
       const task = arg && store.getTask(arg.featureId, arg.task.id);
-      if (task) await vscode11.window.showTextDocument(task.filePath);
+      if (task) await vscode12.window.showTextDocument(task.filePath);
     }),
-    vscode11.commands.registerCommand("chatllm.runTask", async (arg) => {
+    vscode12.commands.registerCommand("chatllm.runTask", async (arg) => {
       const feature = arg && store.getFeature(arg.featureId);
       if (!feature || !arg) return;
       await pipeline.dispatch(feature.id, [arg.task.id]);
     }),
-    vscode11.commands.registerCommand("chatllm.markTaskReady", async (arg) => {
+    vscode12.commands.registerCommand("chatllm.markTaskReady", async (arg) => {
       const task = arg && store.getTask(arg.featureId, arg.task.id);
       if (task) await updateTaskStatus(task.filePath, "ready");
       await store.refresh();
     }),
-    vscode11.commands.registerCommand("chatllm.dispatchFeature", async () => {
+    vscode12.commands.registerCommand("chatllm.dispatchFeature", async () => {
       const feature = store.getActiveFeature();
       if (!feature) return;
       await pipeline.dispatch(feature.id);
     }),
-    vscode11.commands.registerCommand("chatllm.regenerateTasksIndex", async () => {
+    vscode12.commands.registerCommand("chatllm.regenerateTasksIndex", async () => {
       const feature = store.getActiveFeature();
-      if (feature?.tasksDirUri) await writeTextFile(vscode11.Uri.joinPath(feature.tasksDirUri, "index.md"), regenerateTasksIndex(feature.tasks));
+      if (feature?.tasksDirUri) await writeTextFile(vscode12.Uri.joinPath(feature.tasksDirUri, "index.md"), regenerateTasksIndex(feature.tasks));
     }),
-    vscode11.commands.registerCommand("chatllm.cancelRun", async () => {
-      const graphId = await vscode11.window.showInputBox({ prompt: "Graph id to cancel" });
+    vscode12.commands.registerCommand("chatllm.cancelRun", async () => {
+      const graphId = await vscode12.window.showInputBox({ prompt: "Graph id to cancel" });
       if (graphId) await cancelExecutionGraph(graphId);
     })
   ];
 }
 function statusBar() {
-  const item = vscode11.window.createStatusBarItem(vscode11.StatusBarAlignment.Left, 100);
+  const item = vscode12.window.createStatusBarItem(vscode12.StatusBarAlignment.Left, 100);
   item.text = "$(comment-discussion) Chatllm";
   item.tooltip = "Open Chatllm chat";
   item.command = "chatllm.openChat";

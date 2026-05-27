@@ -6,7 +6,8 @@ export interface ChatllmSettings {
   useRag: boolean;
   toolsEnabled: boolean;
   systemPrompt: string;
-  copilotEnabled: boolean;
+  copilotUiEnabled: boolean;
+  copilotModelsEnabled: boolean;
 }
 
 const SECTION = "chatllm";
@@ -19,12 +20,14 @@ export function readSettings(): ChatllmSettings {
     useRag: cfg.get<boolean>("useRag") ?? false,
     toolsEnabled: cfg.get<boolean>("toolsEnabled") ?? true,
     systemPrompt: cfg.get<string>("systemPrompt") ?? "",
-    copilotEnabled: cfg.get<boolean>("copilot.enabled") ?? false,
+    copilotUiEnabled: cfg.get<boolean>("copilot.enabled") ?? false,
+    copilotModelsEnabled: cfg.get<boolean>("copilot.modelsEnabled") ?? true,
   };
 }
 
 const FLAT_TO_DOTTED: Partial<Record<keyof ChatllmSettings, string>> = {
-  copilotEnabled: "copilot.enabled",
+  copilotUiEnabled: "copilot.enabled",
+  copilotModelsEnabled: "copilot.modelsEnabled",
 };
 
 export async function writeSetting<K extends keyof ChatllmSettings>(key: K, value: ChatllmSettings[K]): Promise<void> {

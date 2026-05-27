@@ -867,8 +867,18 @@ function renderSettings(): void {
     <h2>Integrations</h2>
     <label for="set-copilot">GitHub Copilot</label>
     <div>
-      <input id="set-copilot" data-key="copilot.enabled" type="checkbox" ${s.copilotEnabled?"checked":""} />
-      <span class="hint inline">Re-enable the bundled Copilot extension and the native Chat view. Toggling prompts a window reload.</span>
+      <div>
+        <input id="set-copilot-models" data-key="copilot.modelsEnabled" type="checkbox" ${s.copilotModelsEnabled?"checked":""} />
+        <span class="hint inline">Enable Copilot model access (vscode.lm). Native Copilot UI stays hidden.</span>
+      </div>
+      <div>
+        <input id="set-copilot-ui" data-key="copilot.enabled" type="checkbox" ${s.copilotUiEnabled?"checked":""} />
+        <span class="hint inline">Re-enable native Copilot UI. Toggling prompts a window reload.</span>
+      </div>
+      <div style="margin-top: 8px">
+        <button class="btn" id="copilot-github-login" type="button">Sign in to GitHub for Copilot</button>
+        <span class="hint inline">Uses VS Code GitHub auth, then links it to ChatLLM.</span>
+      </div>
     </div>
 
     <div class="hint">Models, agents, MCP servers, and skills are managed in the Chatllm app. Per-chat picks are stored on the conversation.</div>
@@ -876,6 +886,8 @@ function renderSettings(): void {
   for (const input of grid.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>("[data-key]")) {
     input.addEventListener("change", () => emitSettingChange(input));
   }
+  const loginBtn = grid.querySelector<HTMLButtonElement>("#copilot-github-login");
+  if (loginBtn) loginBtn.addEventListener("click", () => send({ type: "copilotGithubLogin" } as any));
 }
 
 function emitSettingChange(input: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement): void {

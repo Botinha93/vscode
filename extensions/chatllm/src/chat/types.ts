@@ -1,4 +1,4 @@
-export type Provider = "openai" | "openrouter" | "google" | "ollama" | "llamacpp" | "lmstudio" | "custom";
+export type Provider = "openai" | "openrouter" | "google" | "copilot" | "ollama" | "llamacpp" | "lmstudio" | "custom";
 export type ConfiguredProvider = Provider | "ollama-internal";
 export type Role = "system" | "user" | "assistant" | "tool";
 export type ChatModelSelectionMode = "auto" | "manual";

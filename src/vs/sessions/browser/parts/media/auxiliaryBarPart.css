@@ -33,6 +33,7 @@
 
 .agent-sessions-workbench .part.auxiliarybar > .content,
 .agent-sessions-workbench .part.auxiliarybar > .content .pane-body,
+.agent-sessions-workbench .part.auxiliarybar > .content .monaco-list,
 .agent-sessions-workbench .part.auxiliarybar > .content .monaco-list-rows {
 	background-color: var(--vscode-agentsPanel-background);
 }

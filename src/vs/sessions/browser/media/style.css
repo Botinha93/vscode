@@ -133,7 +133,7 @@
 }
 
 .agent-sessions-workbench .part.sidebar.mobile-overlay-sidebar {
-	background: var(--vscode-agents-background) !important;
+	background: var(--vscode-agentsPanel-background) !important;
 }
 
 .agent-sessions-workbench .part.chatbar {

@@ -142,6 +142,7 @@ export type ChatWebviewToHost =
   | { type: "refreshCatalog" }
   | { type: "refreshSessions" }
   | { type: "updateSetting"; key: string; value: unknown }
+  | { type: "copilotGithubLogin" }
   | { type: "openSettings" }
   | { type: "openPipeline" }
   | { type: "revealFile"; path: string }

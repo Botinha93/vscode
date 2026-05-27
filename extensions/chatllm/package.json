@@ -53,6 +53,16 @@
           "type": "string",
           "default": "",
           "description": "Optional local system prompt appended to every Chatllm chat request."
+        },
+        "chatllm.copilot.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Re-enable the bundled Copilot extension UI surfaces. Recommended to keep disabled while using Chatllm's UI."
+        },
+        "chatllm.copilot.modelsEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable Copilot model access via VS Code's Language Model API (vscode.lm). Requires the Copilot model provider to be available."
         }
       }
     },

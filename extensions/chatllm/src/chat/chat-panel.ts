@@ -17,6 +17,7 @@ import { onSettingsChange, readSettings, writeSetting, type ChatllmSettings } fr
 import { detectProjectIdentity, projectFolderName, type ProjectIdentity } from "../project/identity";
 import { SPEC_SYSTEM_PROMPTS, extractTaskBlocks } from "./commands";
 import { defaultEnabledModel, findConfiguredModel, toWireProvider } from "./models";
+import { listCopilotLmModels, streamCopilotChat } from "./copilot-lm";
 import { streamChat } from "./stream-client";
 import type {
   AppConfig,
@@ -216,6 +217,9 @@ export class ChatllmChatPanelController implements vscode.WebviewViewProvider, v
         case "openPipeline":
           await vscode.commands.executeCommand("chatllm.openPipeline");
           break;
+        case "copilotGithubLogin":
+          await this.copilotGithubLogin();
+          break;
         case "revealFile":
           await this.revealFile(message.path);
           break;
@@ -280,6 +284,18 @@ export class ChatllmChatPanelController implements vscode.WebviewViewProvider, v
     try {
       const [config, documents] = await Promise.all([fetchConfig(), listDocuments().catch(() => [])]);
       this.catalog = catalogFromConfig(config, documents);
+      // Merge locally-available Copilot LM models (VS Code vendor provider) into the catalog.
+      // This lets the model picker show Copilot models even if the backend hasn't synced them yet.
+      try {
+        if (!readSettings().copilotModelsEnabled) throw new Error("Copilot LM disabled");
+        const localCopilot = await listCopilotLmModels();
+        const merged = new Map<string, (typeof this.catalog.models)[number]>();
+        for (const m of this.catalog.models) merged.set(`${m.provider}:${m.modelId}`, m);
+        for (const m of localCopilot) merged.set(`${m.provider}:${m.modelId}`, m);
+        this.catalog.models = [...merged.values()];
+      } catch {
+        // Ignore if VS Code LM API is unavailable or Copilot provider isn't active.
+      }
       this.backendStatus = "ok";
     } catch (err) {
       this.output.appendLine(`[chat.catalog] ${err instanceof Error ? err.message : String(err)}`);
@@ -707,28 +723,43 @@ export class ChatllmChatPanelController implements vscode.WebviewViewProvider, v
     });
     let buffer = "";
     try {
-      const response = await streamChat(
-        body,
-        {
-          onToken: (text) => {
-            buffer += text;
-            assistantMessage.content = buffer;
-            this.broadcast({ type: "messageAppend", sessionId: conversationId, messageId: assistantMessage.id, chunk: text });
-          },
-          onToolEvent: (event) => {
-            const update = applyToolEvent(streamState, event);
-            if (!update) return;
-            this.broadcast({
-              type: "toolUpdate",
-              sessionId: conversationId,
-              messageId: assistantMessage.id,
-              entry: update.entry,
-              editedFiles: update.editedFiles,
-            });
-          },
+      const handlers = {
+        onToken: (text: string) => {
+          buffer += text;
+          assistantMessage.content = buffer;
+          this.broadcast({ type: "messageAppend", sessionId: conversationId, messageId: assistantMessage.id, chunk: text });
         },
-        abort.signal,
-      );
+        onToolEvent: (event: ToolCallEvent) => {
+          const update = applyToolEvent(streamState, event);
+          if (!update) return;
+          this.broadcast({
+            type: "toolUpdate",
+            sessionId: conversationId,
+            messageId: assistantMessage.id,
+            entry: update.entry,
+            editedFiles: update.editedFiles,
+          });
+        },
+      };
+
+      const useLocalCopilot =
+        body.provider === "copilot" &&
+        readSettings().copilotModelsEnabled &&
+        (await listCopilotLmModels().then((m) => m.some((x) => x.modelId === body.model)).catch(() => false));
+      const response = useLocalCopilot
+        ? await streamCopilotChat({
+            modelId: body.model,
+            history: (messages ?? [])
+              .filter((m) => m.role === "user" || m.role === "assistant")
+              .map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
+            prompt: body.content,
+            toolsEnabled: body.toolsEnabled,
+            onToken: handlers.onToken,
+            onToolEvent: handlers.onToolEvent,
+            signal: abort.signal,
+          }).then((r) => ({ assistantMessage: { id: assistantMessage.id, content: r.content } }))
+        : await streamChat(body, handlers, abort.signal);
+
       const finalConversation = response.conversation as Conversation | undefined;
       if (finalConversation) this.conversations.set(finalConversation.id, finalConversation);
       if (response.assistantMessage?.id) assistantMessage.id = response.assistantMessage.id;
@@ -891,6 +922,21 @@ export class ChatllmChatPanelController implements vscode.WebviewViewProvider, v
       }
     }
     return written;
+  }
+
+  private async copilotGithubLogin(): Promise<void> {
+    try {
+      const session = await vscode.authentication.getSession("github", ["read:user"], { createIfNone: true });
+      if (!session?.accessToken) throw new Error("GitHub authentication did not return an access token.");
+      await apiFetch("/api/copilot/link/ide", {
+        method: "POST",
+        body: JSON.stringify({ accessToken: session.accessToken }),
+      });
+      this.broadcast({ type: "log", message: "GitHub linked for Copilot." });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.broadcast({ type: "log", message: `GitHub sign-in failed: ${msg}` });
+    }
   }
 
   // ---------------------------------------------------------------------------

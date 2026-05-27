@@ -16,6 +16,7 @@
 
 .agent-sessions-workbench .part.sidebar > .content,
 .agent-sessions-workbench .part.sidebar > .content .pane-body,
+.agent-sessions-workbench .part.sidebar > .content .monaco-list,
 .agent-sessions-workbench .part.sidebar > .content .monaco-list-rows,
 .agent-sessions-workbench .part.sidebar > .sidebar-footer {
 	background-color: var(--vscode-agentsPanel-background);
