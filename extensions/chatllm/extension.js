@@ -1817,7 +1817,11 @@ var CHATLLM_TO_VSCODE = {
   "cursor:light": "Light 2026",
   "cursor:dark": "Dark 2026",
   "github:light": "Light+",
-  "github:dark": "Dark+"
+  "github:dark": "Dark+",
+  // Nord doesn't ship its own built-in theme; the published color +
+  // tokenColor overrides repaint the workbench and syntax to Nord.
+  "nord:light": "Light Modern",
+  "nord:dark": "Dark Modern"
 };
 var VSCODE_TO_CHATLLM = {
   "Light Modern": { family: "default", mode: "light" },
@@ -1835,6 +1839,7 @@ function createThemeBridge(output) {
   let disposed = false;
   let lastApplied;
   let lastOverridesKey;
+  let lastTokenOverridesKey;
   async function applyTheme(themeId) {
     if (!themeId) return;
     lastApplied = themeId;
@@ -1852,6 +1857,25 @@ function createThemeBridge(output) {
       if (key.startsWith("[") && key.endsWith("]")) next[key] = value;
     }
     await config.update("colorCustomizations", next, vscode7.ConfigurationTarget.Global);
+  }
+  async function applyTokenColorOverrides(overrides) {
+    if (!overrides || !overrides.textMateRules || overrides.textMateRules.length === 0) return;
+    const fingerprint = JSON.stringify(overrides);
+    if (fingerprint === lastTokenOverridesKey) return;
+    lastTokenOverridesKey = fingerprint;
+    const config = vscode7.workspace.getConfiguration("editor");
+    const existing = config.get("tokenColorCustomizations") ?? {};
+    const next = {
+      textMateRules: overrides.textMateRules,
+      semanticHighlighting: overrides.semanticHighlighting ?? true
+    };
+    if (overrides.semanticTokenColors) {
+      next.semanticTokenColors = overrides.semanticTokenColors;
+    }
+    for (const [key, value] of Object.entries(existing)) {
+      if (key.startsWith("[") && key.endsWith("]")) next[key] = value;
+    }
+    await config.update("tokenColorCustomizations", next, vscode7.ConfigurationTarget.Global);
   }
   async function publishTheme() {
     const themeId = vscode7.workspace.getConfiguration("workbench").get("colorTheme");
@@ -1874,7 +1898,7 @@ function createThemeBridge(output) {
       if (payload.type !== "theme" || payload.snapshot?.source === "vscode") return;
       const snapshot = payload.snapshot;
       const themeId = snapshot?.vsCodeThemeId ?? CHATLLM_TO_VSCODE[`${snapshot?.family}:${snapshot?.mode}`];
-      void applyTheme(themeId).then(() => applyColorOverrides(snapshot?.colorOverrides));
+      void applyTheme(themeId).then(() => applyColorOverrides(snapshot?.colorOverrides)).then(() => applyTokenColorOverrides(snapshot?.tokenColorOverrides));
     });
     ws.addEventListener("close", () => setTimeout(connect, 1e3));
   }

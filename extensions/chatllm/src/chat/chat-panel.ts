@@ -77,6 +77,7 @@ export class ChatllmChatPanelController implements vscode.WebviewViewProvider, v
   private conversations = new Map<string, Conversation>();
   private messagesCache = new Map<string, ConversationMessage[]>();
   private overrides: OverridesCache = {};
+  private sessionKinds = new Map<string, ChatSession["kind"]>();
 
   /** Locally-staged session for "new chat" before the first message creates it on the backend. */
   private draftSession: ChatSession | null = null;
@@ -89,6 +90,8 @@ export class ChatllmChatPanelController implements vscode.WebviewViewProvider, v
   ) {
     this.overrides = this.context.workspaceState.get<OverridesCache>(OVERRIDES_STORAGE_KEY, {});
     this.activeSessionId = this.context.workspaceState.get<string | null>(ACTIVE_SESSION_STORAGE_KEY, null);
+    const storedKinds = this.context.workspaceState.get<Record<string, ChatSession["kind"]>>("chatllm.chat.sessionKinds", {});
+    for (const [id, kind] of Object.entries(storedKinds)) this.sessionKinds.set(id, kind);
     this.disposables.push(
       onSettingsChange((settings) => this.broadcast({ type: "settings", settings })),
     );
@@ -360,14 +363,19 @@ export class ChatllmChatPanelController implements vscode.WebviewViewProvider, v
 
   private makeDraft(): ChatSession {
     const now = Date.now();
+    const id = `draft:${randomId()}`;
+    const kind: ChatSession["kind"] = "vibe";
+    this.sessionKinds.set(id, kind);
+    void this.persistSessionKinds();
     return {
-      id: `draft:${randomId()}`,
+      id,
       title: "New chat",
       messages: [],
       overrides: {},
       remote: false,
       createdAt: now,
       updatedAt: now,
+      kind,
     };
   }
 
@@ -381,6 +389,7 @@ export class ChatllmChatPanelController implements vscode.WebviewViewProvider, v
         messageCount: this.draftSession.messages.length,
         overrides: this.draftSession.overrides,
         remote: false,
+        kind: this.draftSession.kind,
       });
     }
     for (const c of this.conversations.values()) {
@@ -392,6 +401,7 @@ export class ChatllmChatPanelController implements vscode.WebviewViewProvider, v
         messageCount: this.messagesCache.get(c.id)?.length ?? 0,
         overrides: this.conversationOverrides(c),
         remote: true,
+        kind: this.sessionKinds.get(c.id) ?? "vibe",
       });
     }
     summaries.sort((a, b) => b.updatedAt - a.updatedAt);
@@ -417,6 +427,7 @@ export class ChatllmChatPanelController implements vscode.WebviewViewProvider, v
         createdAt: new Date(m.createdAt).getTime() || Date.now(),
         status: "complete",
       }));
+    const kind = this.sessionKinds.get(conv.id) ?? "vibe";
     return {
       id: conv.id,
       conversationId: conv.id,
@@ -426,6 +437,7 @@ export class ChatllmChatPanelController implements vscode.WebviewViewProvider, v
       remote: true,
       createdAt: new Date(conv.createdAt).getTime() || Date.now(),
       updatedAt: new Date(conv.updatedAt).getTime() || Date.now(),
+      kind,
     };
   }
 

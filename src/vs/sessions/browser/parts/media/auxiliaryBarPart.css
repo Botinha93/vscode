@@ -31,6 +31,12 @@
 	background-color: var(--vscode-agentsPanel-background);
 }
 
+.agent-sessions-workbench .part.auxiliarybar > .content,
+.agent-sessions-workbench .part.auxiliarybar > .content .pane-body,
+.agent-sessions-workbench .part.auxiliarybar > .content .monaco-list-rows {
+	background-color: var(--vscode-agentsPanel-background);
+}
+
 /* Hide the underline indicator for non-focused items, but keep it for keyboard focus */
 .agent-sessions-workbench .part.auxiliarybar > .title > .composite-bar-container > .composite-bar > .monaco-action-bar .action-item:not(:focus-visible) .active-item-indicator:before {
 	display: none !important;

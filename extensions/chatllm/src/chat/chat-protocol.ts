@@ -58,6 +58,8 @@ export interface ChatOverrides {
   mcpServerIds?: string[];
 }
 
+export type ChatSessionKind = "vibe" | "pipeline";
+
 export interface ChatSession {
   id: string;
   conversationId?: string;
@@ -67,6 +69,7 @@ export interface ChatSession {
   remote: boolean;
   createdAt: number;
   updatedAt: number;
+  kind: ChatSessionKind;
 }
 
 export interface SessionSummary {
@@ -77,6 +80,7 @@ export interface SessionSummary {
   messageCount: number;
   overrides: ChatOverrides;
   remote: boolean;
+  kind: ChatSessionKind;
 }
 
 export interface ProjectInfo {
@@ -133,6 +137,8 @@ export type ChatWebviewToHost =
   | { type: "sendMessage"; sessionId: string; content: string }
   | { type: "cancelMessage"; sessionId: string }
   | { type: "setOverrides"; sessionId: string; overrides: ChatOverrides }
+  | { type: "setSessionKind"; sessionId: string; kind: ChatSessionKind }
+  | { type: "generatePipeline"; sessionId: string; featureName: string }
   | { type: "refreshCatalog" }
   | { type: "refreshSessions" }
   | { type: "updateSetting"; key: string; value: unknown }

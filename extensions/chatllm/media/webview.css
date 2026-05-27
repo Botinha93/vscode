@@ -1132,30 +1132,66 @@ section.chatllm-tab {
 section.chatllm-tab.active { display: flex; flex-direction: column; }
 
 .pipeline-shell {
-  display: grid;
-  grid-template-columns: 280px 1fr;
+  display: flex;
+  flex-direction: column;
   flex: 1;
   overflow: hidden;
 }
 
-.pipeline-side {
-  border-right: 1px solid var(--chatllm-border);
-  overflow-y: auto;
-  padding: 10px;
+.pipeline-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--chatllm-border);
+  background: var(--chatllm-bg-soft);
+  min-height: 52px;
 }
-.pipeline-side h3 {
+.pipeline-title {
+  font-weight: 600;
+  font-size: 0.95em;
+}
+.pipeline-subtitle {
+  color: var(--chatllm-muted);
+  font-size: 0.78em;
+  margin-top: 2px;
+}
+
+.pipeline-stack {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 10px 14px;
+}
+
+.pipeline-section {
+  border-bottom: 1px solid color-mix(in srgb, var(--chatllm-border) 70%, transparent);
+  padding: 0 0 12px;
+  margin: 0 0 12px;
+}
+.pipeline-section:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+}
+.pipeline-section h3 {
   margin: 6px 4px;
   font-size: 0.85em;
   letter-spacing: 0.05em;
   text-transform: uppercase;
   color: var(--chatllm-muted);
 }
-.pipeline-side-header {
+.pipeline-section .meta {
+  font-size: 0.8em;
+  color: var(--chatllm-muted);
+}
+.pipeline-section-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
 }
-.pipeline-side-header h3 { margin: 6px 4px; }
+.pipeline-section-header h3 { margin: 6px 4px; }
 .scaffold-row {
   display: flex;
   gap: 6px;
@@ -1198,41 +1234,54 @@ section.chatllm-tab.active { display: flex; flex-direction: column; }
 }
 .feature-row.active .meta { color: inherit; opacity: 0.8; }
 
-.pipeline-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 10px;
-  border-bottom: 1px solid var(--chatllm-border);
-  align-items: center;
-}
-.pipeline-actions .pipeline-spacer { flex: 1; }
-.pipeline-actions button {
+.pipeline-section button.primary {
   font: inherit;
   border-radius: var(--chatllm-radius);
-  border: 1px solid var(--chatllm-border);
-  background: var(--vscode-button-secondaryBackground, transparent);
-  color: var(--vscode-foreground);
-  padding: 4px 12px;
-  cursor: pointer;
-}
-.pipeline-actions button.primary {
+  padding: 4px 10px;
   background: var(--chatllm-accent);
   color: var(--chatllm-accent-fg);
   border: none;
+  cursor: pointer;
 }
 
-.pipeline-main {
+.task-row {
   display: flex;
-  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  margin: 4px 0;
+}
+.task-main {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid transparent;
+  border-radius: var(--chatllm-radius);
+  background: transparent;
+  color: var(--vscode-foreground);
+  cursor: pointer;
+  padding: 7px 8px;
+  text-align: left;
+}
+.task-main:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+.task-title {
+  display: block;
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-dispatch {
+  margin-top: 2px;
+  flex: 0 0 26px;
 }
 
 .graph-area {
-  flex: 1;
-  min-height: 240px;
+  height: min(45vh, 360px);
+  min-height: 220px;
   background: var(--vscode-editor-background);
-  border-bottom: 1px solid var(--chatllm-border);
+  border: 1px solid var(--chatllm-border);
+  border-radius: var(--chatllm-radius);
+  overflow: hidden;
 }
 
 .graph-empty {
@@ -1247,9 +1296,7 @@ section.chatllm-tab.active { display: flex; flex-direction: column; }
 }
 
 .runs-list {
-  max-height: 220px;
-  overflow-y: auto;
-  padding: 10px 12px;
+  padding: 0 4px;
 }
 .run-item {
   border: 1px solid var(--chatllm-border);
@@ -1286,3 +1333,7 @@ section.chatllm-tab.active { display: flex; flex-direction: column; }
 .node-chip[data-status="failed"]    { background: rgba(255, 80, 80, 0.18); }
 .node-chip[data-status="blocked"]   { background: rgba(200, 160, 0, 0.18); }
 .node-chip[data-status="queued"]    { background: rgba(150, 150, 150, 0.18); }
+
+.empty-row {
+  padding: 8px;
+}

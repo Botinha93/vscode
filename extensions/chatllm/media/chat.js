@@ -1,5 +1,700 @@
 "use strict";
 (() => {
+  // src/webview/highlight.ts
+  var KEYWORDS_JS = /* @__PURE__ */ new Set([
+    "abstract",
+    "as",
+    "async",
+    "await",
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "continue",
+    "debugger",
+    "default",
+    "delete",
+    "do",
+    "else",
+    "enum",
+    "export",
+    "extends",
+    "false",
+    "finally",
+    "for",
+    "from",
+    "function",
+    "get",
+    "if",
+    "implements",
+    "import",
+    "in",
+    "instanceof",
+    "interface",
+    "is",
+    "let",
+    "new",
+    "null",
+    "of",
+    "package",
+    "private",
+    "protected",
+    "public",
+    "readonly",
+    "return",
+    "satisfies",
+    "set",
+    "static",
+    "super",
+    "switch",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "type",
+    "typeof",
+    "undefined",
+    "var",
+    "void",
+    "while",
+    "with",
+    "yield"
+  ]);
+  var KEYWORDS_PYTHON = /* @__PURE__ */ new Set([
+    "False",
+    "None",
+    "True",
+    "and",
+    "as",
+    "assert",
+    "async",
+    "await",
+    "break",
+    "class",
+    "continue",
+    "def",
+    "del",
+    "elif",
+    "else",
+    "except",
+    "finally",
+    "for",
+    "from",
+    "global",
+    "if",
+    "import",
+    "in",
+    "is",
+    "lambda",
+    "nonlocal",
+    "not",
+    "or",
+    "pass",
+    "raise",
+    "return",
+    "try",
+    "while",
+    "with",
+    "yield",
+    "self"
+  ]);
+  var KEYWORDS_RUST = /* @__PURE__ */ new Set([
+    "as",
+    "async",
+    "await",
+    "break",
+    "const",
+    "continue",
+    "crate",
+    "dyn",
+    "else",
+    "enum",
+    "extern",
+    "false",
+    "fn",
+    "for",
+    "if",
+    "impl",
+    "in",
+    "let",
+    "loop",
+    "match",
+    "mod",
+    "move",
+    "mut",
+    "pub",
+    "ref",
+    "return",
+    "Self",
+    "self",
+    "static",
+    "struct",
+    "super",
+    "trait",
+    "true",
+    "type",
+    "unsafe",
+    "use",
+    "where",
+    "while"
+  ]);
+  var KEYWORDS_GO = /* @__PURE__ */ new Set([
+    "break",
+    "case",
+    "chan",
+    "const",
+    "continue",
+    "default",
+    "defer",
+    "else",
+    "fallthrough",
+    "for",
+    "func",
+    "go",
+    "goto",
+    "if",
+    "import",
+    "interface",
+    "map",
+    "package",
+    "range",
+    "return",
+    "select",
+    "struct",
+    "switch",
+    "type",
+    "var"
+  ]);
+  var KEYWORDS_SHELL = /* @__PURE__ */ new Set([
+    "if",
+    "then",
+    "else",
+    "elif",
+    "fi",
+    "case",
+    "esac",
+    "for",
+    "while",
+    "until",
+    "do",
+    "done",
+    "function",
+    "return",
+    "in",
+    "select",
+    "true",
+    "false",
+    "local",
+    "export",
+    "readonly",
+    "set",
+    "unset",
+    "shift",
+    "exec"
+  ]);
+  var KEYWORDS_SQL = /* @__PURE__ */ new Set([
+    "SELECT",
+    "FROM",
+    "WHERE",
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "INTO",
+    "VALUES",
+    "SET",
+    "AS",
+    "ON",
+    "JOIN",
+    "LEFT",
+    "RIGHT",
+    "INNER",
+    "OUTER",
+    "FULL",
+    "GROUP",
+    "BY",
+    "ORDER",
+    "HAVING",
+    "LIMIT",
+    "OFFSET",
+    "CREATE",
+    "TABLE",
+    "INDEX",
+    "DROP",
+    "ALTER",
+    "ADD",
+    "PRIMARY",
+    "KEY",
+    "FOREIGN",
+    "REFERENCES",
+    "NOT",
+    "NULL",
+    "DEFAULT",
+    "UNIQUE",
+    "AND",
+    "OR",
+    "IN",
+    "LIKE",
+    "IS",
+    "BETWEEN",
+    "WITH",
+    "DISTINCT",
+    "UNION",
+    "ALL",
+    "CASE",
+    "WHEN",
+    "THEN",
+    "ELSE",
+    "END",
+    "RETURNING"
+  ]);
+  var PYTHON_BUILTIN_TYPES = /* @__PURE__ */ new Set([
+    "int",
+    "str",
+    "bool",
+    "float",
+    "list",
+    "dict",
+    "tuple",
+    "set",
+    "bytes",
+    "object",
+    "type"
+  ]);
+  var RUST_BUILTIN_TYPES = /* @__PURE__ */ new Set([
+    "bool",
+    "char",
+    "str",
+    "String",
+    "i8",
+    "i16",
+    "i32",
+    "i64",
+    "i128",
+    "isize",
+    "u8",
+    "u16",
+    "u32",
+    "u64",
+    "u128",
+    "usize",
+    "f32",
+    "f64",
+    "Vec",
+    "Option",
+    "Result",
+    "Box",
+    "Rc",
+    "Arc"
+  ]);
+  var GO_BUILTIN_TYPES = /* @__PURE__ */ new Set([
+    "bool",
+    "string",
+    "int",
+    "int8",
+    "int16",
+    "int32",
+    "int64",
+    "uint",
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint64",
+    "byte",
+    "rune",
+    "float32",
+    "float64",
+    "complex64",
+    "complex128",
+    "error",
+    "any"
+  ]);
+  function normaliseHighlightLanguage(language) {
+    if (!language) return "plain";
+    const lower = language.toLowerCase();
+    switch (lower) {
+      case "js":
+      case "javascript":
+      case "jsx":
+      case "mjs":
+      case "cjs":
+        return "js";
+      case "ts":
+      case "typescript":
+      case "tsx":
+        return "ts";
+      case "py":
+      case "python":
+        return "python";
+      case "rs":
+      case "rust":
+        return "rust";
+      case "go":
+      case "golang":
+        return "go";
+      case "sh":
+      case "bash":
+      case "zsh":
+      case "shell":
+      case "console":
+        return "shell";
+      case "sql":
+        return "sql";
+      case "json":
+      case "jsonc":
+        return "json";
+      case "css":
+      case "scss":
+      case "less":
+        return "css";
+      case "html":
+      case "htm":
+      case "vue":
+      case "svelte":
+        return "html";
+      case "xml":
+      case "svg":
+        return "xml";
+      case "yml":
+      case "yaml":
+        return "yaml";
+      case "md":
+      case "markdown":
+      case "mdx":
+        return "markdown";
+      case "diff":
+      case "patch":
+        return "diff";
+      default:
+        return "plain";
+    }
+  }
+  function highlightCode(code, language) {
+    const lang = normaliseHighlightLanguage(language);
+    if (lang === "plain") return escapeHtml(code);
+    if (lang === "diff") return highlightDiff(code);
+    const tokens = tokenize(code, lang);
+    return tokens.map(renderToken).join("");
+  }
+  function renderToken(token) {
+    const cls = `tok-${token.type}`;
+    return `<span class="${cls}">${escapeHtml(token.value)}</span>`;
+  }
+  function escapeHtml(text) {
+    return text.replace(/[&<>"']/g, (c) => {
+      switch (c) {
+        case "&":
+          return "&amp;";
+        case "<":
+          return "&lt;";
+        case ">":
+          return "&gt;";
+        case '"':
+          return "&quot;";
+        case "'":
+          return "&#39;";
+        default:
+          return c;
+      }
+    });
+  }
+  function highlightDiff(code) {
+    return code.split(/(\r?\n)/).map((line) => {
+      if (/^\r?\n$/.test(line)) return line;
+      if (line.startsWith("+") && !line.startsWith("+++")) {
+        return `<span class="tok-string">${escapeHtml(line)}</span>`;
+      }
+      if (line.startsWith("-") && !line.startsWith("---")) {
+        return `<span class="tok-error">${escapeHtml(line)}</span>`;
+      }
+      if (line.startsWith("@@")) {
+        return `<span class="tok-decorator">${escapeHtml(line)}</span>`;
+      }
+      if (line.startsWith("+++") || line.startsWith("---") || line.startsWith("diff ")) {
+        return `<span class="tok-comment">${escapeHtml(line)}</span>`;
+      }
+      return escapeHtml(line);
+    }).join("");
+  }
+  function tokenize(code, lang) {
+    switch (lang) {
+      case "js":
+      case "ts":
+        return tokenizeC(code, lang);
+      case "python":
+        return tokenizePython(code);
+      case "rust":
+        return tokenizeRust(code);
+      case "go":
+        return tokenizeGo(code);
+      case "shell":
+        return tokenizeShell(code);
+      case "sql":
+        return tokenizeSql(code);
+      case "json":
+        return tokenizeJson(code);
+      case "css":
+        return tokenizeCss(code);
+      case "html":
+      case "xml":
+        return tokenizeMarkup(code);
+      case "yaml":
+        return tokenizeYaml(code);
+      case "markdown":
+        return tokenizeMarkdown(code);
+      case "plain":
+      case "diff":
+      default:
+        return [{ type: "foreground", value: code }];
+    }
+  }
+  function scan(code, specs) {
+    const out = [];
+    let i = 0;
+    let pending = "";
+    const flushPending = () => {
+      if (pending) {
+        out.push({ type: "foreground", value: pending });
+        pending = "";
+      }
+    };
+    while (i < code.length) {
+      let matched = null;
+      for (const spec of specs) {
+        spec.re.lastIndex = i;
+        const m = spec.re.exec(code);
+        if (m && m.index === i) {
+          const t = typeof spec.type === "function" ? spec.type(m) : spec.type;
+          matched = { match: m, type: t };
+          break;
+        }
+      }
+      if (matched) {
+        flushPending();
+        out.push({ type: matched.type, value: matched.match[0] });
+        i += matched.match[0].length;
+      } else {
+        pending += code[i];
+        i += 1;
+      }
+    }
+    flushPending();
+    return out;
+  }
+  function tokenizeC(code, lang) {
+    const keywords = KEYWORDS_JS;
+    const specs = [
+      { re: /\/\/[^\n]*/y, type: "comment" },
+      { re: /\/\*[\s\S]*?\*\//y, type: "comment" },
+      { re: /`(?:\\[\s\S]|\$\{[^}]*\}|[^`\\])*`/y, type: "string" },
+      { re: /"(?:\\[\s\S]|[^"\\])*"/y, type: "string" },
+      { re: /'(?:\\[\s\S]|[^'\\])*'/y, type: "string" },
+      { re: /\/(?:\\[\s\S]|\[(?:\\[\s\S]|[^\]\\])*\]|[^/\\\n])+\/[gimsuy]*(?=\s|\.|\)|,|;|$)/y, type: "regexp" },
+      { re: /\b(?:0x[\da-fA-F]+|0b[01]+|0o[0-7]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b/y, type: "number" },
+      { re: /(?:@[A-Za-z_$][\w$]*)/y, type: "decorator" },
+      {
+        re: /\b[A-Za-z_$][\w$]*\b/y,
+        type: (m) => {
+          const word = m[0];
+          if (keywords.has(word)) return "keyword";
+          if (lang === "ts" && /^[A-Z]/.test(word)) return "type";
+          if (lang === "js" && /^[A-Z][A-Z0-9_]*$/.test(word)) return "constant";
+          const after = code.slice(m.index + word.length);
+          if (after.startsWith("(")) return "function";
+          return "variable";
+        }
+      },
+      { re: /[+\-*/%&|^!=<>?:]+/y, type: "operator" },
+      { re: /[{}()[\];,.]/y, type: "punctuation" }
+    ];
+    return scan(code, specs);
+  }
+  function tokenizePython(code) {
+    const specs = [
+      { re: /#[^\n]*/y, type: "comment" },
+      { re: /[rRbBuUfF]{0,2}"""[\s\S]*?"""/y, type: "string" },
+      { re: /[rRbBuUfF]{0,2}'''[\s\S]*?'''/y, type: "string" },
+      { re: /[rRbBuUfF]{0,2}"(?:\\[\s\S]|[^"\\])*"/y, type: "string" },
+      { re: /[rRbBuUfF]{0,2}'(?:\\[\s\S]|[^'\\])*'/y, type: "string" },
+      { re: /\b(?:0x[\da-fA-F]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?j?)\b/y, type: "number" },
+      { re: /@[A-Za-z_][\w]*/y, type: "decorator" },
+      {
+        re: /\b[A-Za-z_][\w]*\b/y,
+        type: (m) => {
+          const word = m[0];
+          if (KEYWORDS_PYTHON.has(word)) return "keyword";
+          if (PYTHON_BUILTIN_TYPES.has(word)) return "type";
+          const after = code.slice(m.index + word.length);
+          if (after.startsWith("(")) return "function";
+          return "variable";
+        }
+      },
+      { re: /[+\-*/%&|^!=<>]+/y, type: "operator" },
+      { re: /[{}()[\]:,.;]/y, type: "punctuation" }
+    ];
+    return scan(code, specs);
+  }
+  function tokenizeRust(code) {
+    const specs = [
+      { re: /\/\/[^\n]*/y, type: "comment" },
+      { re: /\/\*[\s\S]*?\*\//y, type: "comment" },
+      { re: /b?"(?:\\[\s\S]|[^"\\])*"/y, type: "string" },
+      { re: /b?'(?:\\[\s\S]|[^'\\])'/y, type: "string" },
+      { re: /\b(?:0x[\da-fA-F_]+|0b[01_]+|\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d+)?(?:[ui](?:8|16|32|64|128|size)|f(?:32|64))?)\b/y, type: "number" },
+      { re: /#!?\[[^\]]*\]/y, type: "decorator" },
+      { re: /'[A-Za-z_]\w*\b/y, type: "decorator" },
+      {
+        re: /\b[A-Za-z_][\w]*!?/y,
+        type: (m) => {
+          const word = m[0];
+          if (word.endsWith("!")) return "function";
+          if (KEYWORDS_RUST.has(word)) return "keyword";
+          if (RUST_BUILTIN_TYPES.has(word)) return "type";
+          if (/^[A-Z]/.test(word)) return "type";
+          const after = code.slice(m.index + word.length);
+          if (after.startsWith("(")) return "function";
+          return "variable";
+        }
+      },
+      { re: /->|=>|::|[+\-*/%&|^!=<>?]+/y, type: "operator" },
+      { re: /[{}()[\];,.]/y, type: "punctuation" }
+    ];
+    return scan(code, specs);
+  }
+  function tokenizeGo(code) {
+    const specs = [
+      { re: /\/\/[^\n]*/y, type: "comment" },
+      { re: /\/\*[\s\S]*?\*\//y, type: "comment" },
+      { re: /`[^`]*`/y, type: "string" },
+      { re: /"(?:\\[\s\S]|[^"\\])*"/y, type: "string" },
+      { re: /'(?:\\[\s\S]|[^'\\])'/y, type: "string" },
+      { re: /\b(?:0x[\da-fA-F]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?i?)\b/y, type: "number" },
+      {
+        re: /\b[A-Za-z_][\w]*\b/y,
+        type: (m) => {
+          const word = m[0];
+          if (KEYWORDS_GO.has(word)) return "keyword";
+          if (GO_BUILTIN_TYPES.has(word)) return "type";
+          const after = code.slice(m.index + word.length);
+          if (after.startsWith("(")) return "function";
+          if (/^[A-Z]/.test(word)) return "type";
+          return "variable";
+        }
+      },
+      { re: /:=|<-|[+\-*/%&|^!=<>]+/y, type: "operator" },
+      { re: /[{}()[\];,.]/y, type: "punctuation" }
+    ];
+    return scan(code, specs);
+  }
+  function tokenizeShell(code) {
+    const specs = [
+      { re: /#[^\n]*/y, type: "comment" },
+      { re: /"(?:\\[\s\S]|\$\{[^}]*\}|\$[A-Za-z_][\w]*|[^"\\$])*"/y, type: "string" },
+      { re: /'[^']*'/y, type: "string" },
+      { re: /\$\{[^}]+\}/y, type: "variable" },
+      { re: /\$[A-Za-z_][\w]*/y, type: "variable" },
+      { re: /\$\d+/y, type: "variable" },
+      { re: /\b\d+\b/y, type: "number" },
+      {
+        re: /\b[A-Za-z_][\w-]*/y,
+        type: (m) => KEYWORDS_SHELL.has(m[0]) ? "keyword" : "variable"
+      },
+      { re: /--?[A-Za-z][\w-]*/y, type: "decorator" },
+      { re: /\|\||&&|>>|<<|[|&;<>()]/y, type: "operator" }
+    ];
+    return scan(code, specs);
+  }
+  function tokenizeSql(code) {
+    const specs = [
+      { re: /--[^\n]*/y, type: "comment" },
+      { re: /\/\*[\s\S]*?\*\//y, type: "comment" },
+      { re: /'(?:''|[^'])*'/y, type: "string" },
+      { re: /"(?:""|[^"])*"/y, type: "string" },
+      { re: /\b\d+(?:\.\d+)?\b/y, type: "number" },
+      {
+        re: /\b[A-Za-z_][\w]*\b/y,
+        type: (m) => KEYWORDS_SQL.has(m[0].toUpperCase()) ? "keyword" : "variable"
+      },
+      { re: /[+\-*/%=<>!]+/y, type: "operator" },
+      { re: /[(),;.]/y, type: "punctuation" }
+    ];
+    return scan(code, specs);
+  }
+  function tokenizeJson(code) {
+    const specs = [
+      { re: /\/\/[^\n]*/y, type: "comment" },
+      // tolerate jsonc
+      { re: /\/\*[\s\S]*?\*\//y, type: "comment" },
+      {
+        re: /"(?:\\[\s\S]|[^"\\])*"(?=\s*:)/y,
+        type: "property"
+      },
+      { re: /"(?:\\[\s\S]|[^"\\])*"/y, type: "string" },
+      { re: /\b(?:true|false|null)\b/y, type: "constant" },
+      { re: /-?\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b/y, type: "number" },
+      { re: /[{}[\]:,]/y, type: "punctuation" }
+    ];
+    return scan(code, specs);
+  }
+  function tokenizeCss(code) {
+    const specs = [
+      { re: /\/\*[\s\S]*?\*\//y, type: "comment" },
+      { re: /"(?:\\[\s\S]|[^"\\])*"/y, type: "string" },
+      { re: /'(?:\\[\s\S]|[^'\\])*'/y, type: "string" },
+      { re: /@[A-Za-z-]+/y, type: "decorator" },
+      { re: /#[\da-fA-F]{3,8}\b/y, type: "constant" },
+      { re: /-?\d+(?:\.\d+)?(?:px|em|rem|%|vh|vw|deg|s|ms)?/y, type: "number" },
+      { re: /--[A-Za-z_-][\w-]*/y, type: "variable" },
+      { re: /[A-Za-z-]+(?=\s*:)/y, type: "property" },
+      { re: /[.#&][A-Za-z_][\w-]*/y, type: "attribute" },
+      { re: /[{}();,:]/y, type: "punctuation" }
+    ];
+    return scan(code, specs);
+  }
+  function tokenizeMarkup(code) {
+    const specs = [
+      { re: /<!--[\s\S]*?-->/y, type: "comment" },
+      { re: /<!\[CDATA\[[\s\S]*?\]\]>/y, type: "comment" },
+      { re: /<!DOCTYPE[^>]+>/y, type: "decorator" },
+      { re: /"(?:[^"\\]|\\[\s\S])*"/y, type: "string" },
+      { re: /'(?:[^'\\]|\\[\s\S])*'/y, type: "string" },
+      { re: /<\/?[A-Za-z][\w-]*/y, type: "tag" },
+      { re: /\/?>/y, type: "tag" },
+      { re: /[A-Za-z_:][\w-]*(?==)/y, type: "attribute" },
+      { re: /=/y, type: "operator" },
+      { re: /&[#\w]+;/y, type: "escape" }
+    ];
+    return scan(code, specs);
+  }
+  function tokenizeYaml(code) {
+    const specs = [
+      { re: /#[^\n]*/y, type: "comment" },
+      { re: /"(?:\\[\s\S]|[^"\\])*"/y, type: "string" },
+      { re: /'[^']*'/y, type: "string" },
+      { re: /^---$/my, type: "decorator" },
+      { re: /^[ \t]*-\s/my, type: "punctuation" },
+      { re: /^\s*[A-Za-z_][\w-]*(?=\s*:)/my, type: "property" },
+      { re: /\b(?:true|false|null|yes|no|on|off)\b/y, type: "constant" },
+      { re: /-?\b\d+(?:\.\d+)?\b/y, type: "number" },
+      { re: /[&*][A-Za-z_][\w-]*/y, type: "decorator" },
+      { re: /[{}[\],:]/y, type: "punctuation" }
+    ];
+    return scan(code, specs);
+  }
+  function tokenizeMarkdown(code) {
+    const specs = [
+      { re: /^#{1,6}\s.+/my, type: "keyword" },
+      { re: /^>\s.+/my, type: "comment" },
+      { re: /^[*+-]\s/my, type: "punctuation" },
+      { re: /`[^`]+`/y, type: "string" },
+      { re: /\*\*[^*]+\*\*/y, type: "keyword" },
+      { re: /_[^_]+_/y, type: "type" },
+      { re: /\[[^\]]+\]\([^)]+\)/y, type: "decorator" },
+      { re: /https?:\/\/\S+/y, type: "decorator" }
+    ];
+    return scan(code, specs);
+  }
+
   // src/webview/chat-main.ts
   var vscode = acquireVsCodeApi();
   var state = {
@@ -90,6 +785,7 @@
           <button class="icon-btn header-back" id="sidebar-toggle" title="Show chats" aria-label="Show chats">\u2190</button>
           <div class="chat-title" id="chat-title">New chat</div>
           <div class="header-actions">
+            <button class="icon-btn" id="header-pipeline" title="Open pipeline" aria-label="Open pipeline">\u25F0</button>
             <button class="icon-btn" id="header-history" title="Chat history" aria-label="History">\u29D6</button>
             <button class="icon-btn" id="header-settings" title="Settings" aria-label="Settings">\u2699</button>
             <button class="icon-btn" id="new-chat" title="New chat" aria-label="New chat">+</button>
@@ -136,6 +832,7 @@
     root.querySelector("#sidebar-new")?.addEventListener("click", () => send({ type: "newSession" }));
     root.querySelector("#sidebar-refresh")?.addEventListener("click", () => send({ type: "refreshSessions" }));
     root.querySelector("#new-chat")?.addEventListener("click", () => send({ type: "newSession" }));
+    root.querySelector("#header-pipeline")?.addEventListener("click", () => send({ type: "openPipeline" }));
     root.querySelector("#header-history")?.addEventListener("click", () => {
       state.sidebarOpen = true;
       applySidebar();
@@ -229,12 +926,12 @@
     }
     const icon = state.project.source === "git" ? "\u2387" : "\u25A2";
     const subtitle = state.project.source === "git" ? state.project.remoteUrl ?? state.project.id : state.project.rootPath ?? "";
-    const branch = state.project.branch ? ` <span class="project-branch">\u2387 ${escapeHtml(state.project.branch)}</span>` : "";
+    const branch = state.project.branch ? ` <span class="project-branch">\u2387 ${escapeHtml2(state.project.branch)}</span>` : "";
     bar.innerHTML = `
     <span class="project-icon">${icon}</span>
     <div class="project-text">
-      <div class="project-name">${escapeHtml(state.project.name)}${branch}</div>
-      <div class="project-subtitle" title="${escapeAttr(subtitle)}">${escapeHtml(subtitle)}</div>
+      <div class="project-name">${escapeHtml2(state.project.name)}${branch}</div>
+      <div class="project-subtitle" title="${escapeAttr(subtitle)}">${escapeHtml2(subtitle)}</div>
     </div>
   `;
   }
@@ -253,7 +950,7 @@
       const tag = s.remote ? "" : `<span class="session-tag">draft</span>`;
       row.innerHTML = `
       <div class="session-row-main">
-        <div class="session-row-title">${escapeHtml(s.title)} ${tag}</div>
+        <div class="session-row-title">${escapeHtml2(s.title)} ${tag}</div>
         <div class="session-row-meta">${s.messageCount} \xB7 ${time}</div>
       </div>
       <button class="icon-btn session-delete" title="Delete" aria-label="Delete">\u2715</button>
@@ -299,7 +996,7 @@
       banner.innerHTML = `VS Code is not signed in to Chatllm. Close this window and reopen the project from the Chatllm desktop app while you are logged in.`;
     } else {
       banner.className = "backend-banner unreachable";
-      banner.innerHTML = `Can't reach Chatllm at <code>${escapeHtml(state.apiOrigin)}</code>. <button id="retry-backend" class="link-btn">Retry</button>`;
+      banner.innerHTML = `Can't reach Chatllm at <code>${escapeHtml2(state.apiOrigin)}</code>. <button id="retry-backend" class="link-btn">Retry</button>`;
       banner.querySelector("#retry-backend")?.addEventListener("click", () => send({ type: "refreshCatalog" }));
     }
   }
@@ -320,7 +1017,7 @@
   function renderEmptyState() {
     const el = document.createElement("div");
     el.className = "empty-state";
-    const projectLine = state.project && state.project.source !== "none" ? `<div class="empty-project">Chats here live with <strong>${escapeHtml(state.project.name)}</strong>${state.project.source === "git" ? " (git project)" : ""}.</div>` : "";
+    const projectLine = state.project && state.project.source !== "none" ? `<div class="empty-project">Chats here live with <strong>${escapeHtml2(state.project.name)}</strong>${state.project.source === "git" ? " (git project)" : ""}.</div>` : "";
     el.innerHTML = `
     <h2>What can I build for you?</h2>
     ${projectLine}
@@ -366,7 +1063,7 @@
       ${showWorking ? `<div class="assistant-status"><span class="turn-indicator"></span><span>Working\u2026</span></div>` : ""}
     </div>
     <div class="turn-content"></div>
-    ${message.status === "error" && message.error ? `<div class="turn-error">${escapeHtml(message.error)}</div>` : ""}
+    ${message.status === "error" && message.error ? `<div class="turn-error">${escapeHtml2(message.error)}</div>` : ""}
     ${message.status === "complete" ? `<div class="assistant-actions">
       <button class="icon-btn small" title="Copy" aria-label="Copy" data-act="copy">\u2398</button>
       <button class="icon-btn small" title="Helpful" aria-label="Helpful" data-act="up">\u{1F44D}</button>
@@ -394,14 +1091,14 @@
     const chevron = expanded ? "\u25BE" : "\u25B8";
     const rows = tools.map((t) => {
       const icon = t.status === "running" ? `<span class="turn-indicator"></span>` : t.status === "error" ? "\u2717" : "\u2713";
-      const label = escapeHtml(t.summary ?? t.name);
+      const label = escapeHtml2(t.summary ?? t.name);
       return `<div class="timeline-row status-${t.status}"><span class="timeline-icon">${icon}</span><span>${label}</span></div>`;
     }).join("");
     const body = expanded && rows ? `<div class="timeline-body">${rows}</div>` : expanded && message.status === "streaming" ? `<div class="timeline-body timeline-empty">Waiting for tool activity\u2026</div>` : "";
     return `
     <button class="worked-toggle" data-message-id="${escapeAttr(message.id)}" type="button">
       <span class="worked-chevron">${chevron}</span>
-      <span class="worked-label">${escapeHtml(duration)}</span>
+      <span class="worked-label">${escapeHtml2(duration)}</span>
     </button>
     ${body}
   `;
@@ -418,7 +1115,7 @@
       return `
       <button class="edit-file-row" type="button" data-path="${escapeAttr(f.path)}" title="Open ${escapeAttr(f.path)}">
         <span class="edit-file-icon">\u2637</span>
-        <span class="edit-file-path">${escapeHtml(f.path)}</span>
+        <span class="edit-file-path">${escapeHtml2(f.path)}</span>
         <span class="edit-file-stats">${stats}</span>
       </button>
     `;
@@ -527,7 +1224,7 @@
     <button class="composer-icon-btn" id="attach-btn" title="Attach files (coming soon)" aria-label="Attach">+</button>
     <button class="chip chip-access" id="chip-mode" title="Toggle agent mode">
       <span class="chip-icon shield">\u2756</span>
-      <span>${escapeHtml(modeLabel)}</span>
+      <span>${escapeHtml2(modeLabel)}</span>
       <span class="chip-caret">\u25BE</span>
     </button>
     <button class="chip${eff.toolsEnabled ? " chip-on" : ""}" id="chip-tools" title="Toggle tools">
@@ -538,7 +1235,7 @@
     </button>
     <span class="composer-spacer"></span>
     <button class="chip chip-model" id="chip-model" title="Pick model for this chat" ${state.catalog.models.length === 0 ? "disabled" : ""}>
-      <span>${escapeHtml(modelLabel)}</span>
+      <span>${escapeHtml2(modelLabel)}</span>
       <span class="chip-caret">\u25BE</span>
     </button>
     <button class="send-btn" id="send-btn" title="Send" aria-label="Send"></button>
@@ -620,14 +1317,14 @@
       <div class="popover-body">
         ${grouped.map((g) => `
           <section class="popover-group">
-            <h4>${escapeHtml(g.label)}</h4>
+            <h4>${escapeHtml2(g.label)}</h4>
             <ul>
               ${g.models.map((m) => {
         const selected = m.provider === eff.provider && m.modelId === eff.model;
         const cap = (m.capabilities ?? []).slice(0, 3).join(", ");
         return `<li class="popover-row${selected ? " selected" : ""}" data-provider="${escapeAttr(m.provider)}" data-model="${escapeAttr(m.modelId)}">
-                  <div class="popover-row-title">${escapeHtml(m.displayName)}</div>
-                  <div class="popover-row-detail">${escapeHtml(cap || m.modelId)}</div>
+                  <div class="popover-row-title">${escapeHtml2(m.displayName)}</div>
+                  <div class="popover-row-detail">${escapeHtml2(cap || m.modelId)}</div>
                 </li>`;
       }).join("")}
             </ul>
@@ -674,8 +1371,8 @@
           ${state.catalog.agents.map((a) => {
         const selected = eff.agentIds.includes(a.id);
         return `<li class="popover-row${selected ? " selected" : ""}" data-id="${escapeAttr(a.id)}">
-              <div class="popover-row-title">${escapeHtml(a.name)}</div>
-              <div class="popover-row-detail">${escapeHtml(a.description || "")}</div>
+              <div class="popover-row-title">${escapeHtml2(a.name)}</div>
+              <div class="popover-row-detail">${escapeHtml2(a.description || "")}</div>
             </li>`;
       }).join("")}
         </ul>
@@ -700,13 +1397,13 @@
     const grid = root.querySelector("#settings-form");
     if (!grid || !state.settings) return;
     const s = state.settings;
-    const projectLine = state.project && state.project.source !== "none" ? `<div class="hint">Active project: <strong>${escapeHtml(state.project.name)}</strong> &mdash; ${escapeHtml(state.project.source === "git" ? state.project.remoteUrl ?? state.project.id : state.project.rootPath ?? "")}</div>` : "";
+    const projectLine = state.project && state.project.source !== "none" ? `<div class="hint">Active project: <strong>${escapeHtml2(state.project.name)}</strong> &mdash; ${escapeHtml2(state.project.source === "git" ? state.project.remoteUrl ?? state.project.id : state.project.rootPath ?? "")}</div>` : "";
     grid.innerHTML = `
     <h2>Connection</h2>
     <label>API origin</label>
-    <div class="value">${escapeHtml(state.apiOrigin || "(not configured)")}</div>
+    <div class="value">${escapeHtml2(state.apiOrigin || "(not configured)")}</div>
     <label>Status</label>
-    <div class="value status-${state.backendStatus}">${escapeHtml(state.backendStatus)}</div>
+    <div class="value status-${state.backendStatus}">${escapeHtml2(state.backendStatus)}</div>
     ${projectLine}
 
     <h2>Local defaults</h2>
@@ -725,7 +1422,7 @@
     <label for="set-tools">Tools by default</label>
     <div><input id="set-tools" data-key="toolsEnabled" type="checkbox" ${s.toolsEnabled ? "checked" : ""} /></div>
     <label for="set-system">Local system prompt</label>
-    <textarea id="set-system" data-key="systemPrompt" placeholder="(empty)">${escapeHtml(s.systemPrompt)}</textarea>
+    <textarea id="set-system" data-key="systemPrompt" placeholder="(empty)">${escapeHtml2(s.systemPrompt)}</textarea>
 
     <h2>Integrations</h2>
     <label for="set-copilot">GitHub Copilot</label>
@@ -777,12 +1474,12 @@
     const d = Math.floor(h / 24);
     return `${d}d`;
   }
-  function escapeHtml(value) {
+  function escapeHtml2(value) {
     if (value == null) return "";
     return String(value).replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] ?? ch);
   }
   function escapeAttr(value) {
-    return escapeHtml(value);
+    return escapeHtml2(value);
   }
   function renderMarkdownish(text) {
     if (!text) return `<span class="placeholder">\u2026</span>`;
@@ -908,15 +1605,15 @@
       return `<div class="md-mermaid" data-mermaid-block="${idx}" data-source="${escaped}">
       <div class="md-mermaid-head"><span>Mermaid</span><button class="md-mermaid-toggle" data-toggle="${idx}">Source</button></div>
       <div class="md-mermaid-canvas" data-canvas="${idx}"><span class="placeholder">Loading diagram\u2026</span></div>
-      <pre class="md-pre" data-source-block="${idx}" hidden><code class="language-mermaid">${escapeHtml(code)}</code></pre>
+      <pre class="md-pre" data-source-block="${idx}" hidden><code class="language-mermaid">${escapeHtml2(code)}</code></pre>
     </div>`;
     }
     const cls = lang ? ` language-${escapeAttr(lang)}` : "";
     const langLabel = lang || "text";
-    const escapedCode = escapeHtml(code);
+    const highlighted = highlightCode(code, lang);
     return `<div class="md-codeblock">
-    <div class="md-codeblock-head"><span class="md-codeblock-lang">${escapeHtml(langLabel)}</span><button class="md-codeblock-copy" data-copy>${"Copy"}</button></div>
-    <pre class="md-pre"><code class="${cls.trim()}">${escapedCode}</code></pre>
+    <div class="md-codeblock-head"><span class="md-codeblock-lang">${escapeHtml2(langLabel)}</span><button class="md-codeblock-copy" data-copy>${"Copy"}</button></div>
+    <pre class="md-pre"><code class="${cls.trim()}">${highlighted}</code></pre>
   </div>`;
   }
   function renderInline(text) {
@@ -926,7 +1623,7 @@
       if (text[i] === "`") {
         const end = text.indexOf("`", i + 1);
         if (end > i) {
-          out += `<code class="md-code">${escapeHtml(text.slice(i + 1, end))}</code>`;
+          out += `<code class="md-code">${escapeHtml2(text.slice(i + 1, end))}</code>`;
           i = end + 1;
           continue;
         }
@@ -993,7 +1690,7 @@
         const urlMatch = text.slice(i).match(/^https?:\/\/[^\s)\]>"']+/);
         if (urlMatch) {
           const url = urlMatch[0];
-          out += `<a class="md-link" href="${escapeAttr(url)}" target="_blank" rel="noopener">${escapeHtml(url)}</a>`;
+          out += `<a class="md-link" href="${escapeAttr(url)}" target="_blank" rel="noopener">${escapeHtml2(url)}</a>`;
           i += url.length;
           continue;
         }
@@ -1090,7 +1787,7 @@
           const svg = await lib.render(decoded);
           canvas.innerHTML = svg;
         } catch (err) {
-          canvas.innerHTML = `<div class="md-mermaid-error">Failed to render diagram: ${escapeHtml(err instanceof Error ? err.message : String(err))}</div>`;
+          canvas.innerHTML = `<div class="md-mermaid-error">Failed to render diagram: ${escapeHtml2(err instanceof Error ? err.message : String(err))}</div>`;
         }
       });
     }

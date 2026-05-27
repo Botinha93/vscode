@@ -160,6 +160,7 @@ function shellHtml(): string {
           <button class="icon-btn header-back" id="sidebar-toggle" title="Show chats" aria-label="Show chats">\u2190</button>
           <div class="chat-title" id="chat-title">New chat</div>
           <div class="header-actions">
+            <button class="icon-btn" id="header-pipeline" title="Open pipeline" aria-label="Open pipeline">\u25F0</button>
             <button class="icon-btn" id="header-history" title="Chat history" aria-label="History">\u29D6</button>
             <button class="icon-btn" id="header-settings" title="Settings" aria-label="Settings">\u2699</button>
             <button class="icon-btn" id="new-chat" title="New chat" aria-label="New chat">+</button>
@@ -207,6 +208,7 @@ function bindShell(): void {
   root.querySelector<HTMLButtonElement>("#sidebar-new")?.addEventListener("click", () => send({ type: "newSession" }));
   root.querySelector<HTMLButtonElement>("#sidebar-refresh")?.addEventListener("click", () => send({ type: "refreshSessions" }));
   root.querySelector<HTMLButtonElement>("#new-chat")?.addEventListener("click", () => send({ type: "newSession" }));
+  root.querySelector<HTMLButtonElement>("#header-pipeline")?.addEventListener("click", () => send({ type: "openPipeline" }));
   root.querySelector<HTMLButtonElement>("#header-history")?.addEventListener("click", () => {
     state.sidebarOpen = true;
     applySidebar();

@@ -38362,30 +38362,46 @@
       bindPipeline();
     }
     renderFeatures();
+    renderTasks();
     renderRuns();
   }
   function pipelineHtml() {
     return `
     <div class="pipeline-shell">
-      <aside class="pipeline-side">
-        <div class="pipeline-side-header">
+      <header class="pipeline-header">
+        <div>
+          <div class="pipeline-title">Pipeline</div>
+          <div class="pipeline-subtitle">Features, tasks, and live runs</div>
+        </div>
+        <button class="icon-btn" id="chat-open" title="Open Chatllm chat" aria-label="Open Chatllm chat">\u270E</button>
+      </header>
+      <div class="pipeline-stack">
+        <section class="pipeline-section">
           <h3>Features</h3>
-          <button class="icon-btn" id="chat-open" title="Open Chatllm chat" aria-label="Open Chatllm chat">\u270E</button>
-        </div>
-        <div id="feature-list"></div>
-        <h3>Create</h3>
-        <div class="scaffold-row">
-          <input id="scaffold-name" type="text" placeholder="new-feature" />
-          <button id="scaffold-btn">+</button>
-        </div>
-      </aside>
-      <div class="pipeline-main">
-        <div class="pipeline-actions">
-          <span class="pipeline-spacer"></span>
-          <button class="primary" id="dispatch-btn">Dispatch tasks</button>
-        </div>
-        <div class="graph-area" id="graph-area"><div class="graph-empty">Generate task contracts via the Chatllm chat (use <strong>/tasks</strong>), then dispatch to see the live execution graph.</div></div>
-        <div class="runs-list" id="runs-list"></div>
+          <div id="feature-list"></div>
+        </section>
+        <section class="pipeline-section">
+          <h3>Create</h3>
+          <div class="scaffold-row">
+            <input id="scaffold-name" type="text" placeholder="new-feature" />
+            <button id="scaffold-btn" title="Scaffold feature" aria-label="Scaffold feature">+</button>
+          </div>
+        </section>
+        <section class="pipeline-section">
+          <div class="pipeline-section-header">
+            <h3>Tasks</h3>
+            <button class="primary" id="dispatch-btn">Dispatch</button>
+          </div>
+          <div id="task-list"></div>
+        </section>
+        <section class="pipeline-section pipeline-graph-section">
+          <h3>Graph</h3>
+          <div class="graph-area" id="graph-area"><div class="graph-empty">Generate task contracts via the Chatllm chat (use <strong>/tasks</strong>), then dispatch to see the live execution graph.</div></div>
+        </section>
+        <section class="pipeline-section">
+          <h3>Runs</h3>
+          <div class="runs-list" id="runs-list"></div>
+        </section>
       </div>
     </div>
   `;
@@ -38413,7 +38429,7 @@
     if (!list) return;
     list.innerHTML = "";
     if (state.features.length === 0) {
-      list.innerHTML = `<div class="meta" style="padding:8px;">No features yet. Scaffold one below.</div>`;
+      list.innerHTML = `<div class="meta empty-row">No features yet. Scaffold one below.</div>`;
       return;
     }
     for (const feature of state.features) {
@@ -38425,12 +38441,45 @@
       list.appendChild(row);
     }
   }
+  function renderTasks() {
+    const list = root.querySelector("#task-list");
+    if (!list) return;
+    list.innerHTML = "";
+    if (!state.activeFeatureId) {
+      list.innerHTML = `<div class="meta empty-row">Select a feature to see tasks.</div>`;
+      return;
+    }
+    if (state.activeTasks.length === 0) {
+      list.innerHTML = `<div class="meta empty-row">No tasks for the active feature.</div>`;
+      return;
+    }
+    for (const task of state.activeTasks) {
+      const row = document.createElement("div");
+      row.className = "task-row";
+      row.innerHTML = `
+      <button class="task-main" title="Open task contract">
+        <span class="task-title">${escapeHtml(task.id)} \xB7 ${escapeHtml(task.title)}</span>
+        <span class="meta">${escapeHtml(task.agent)} \xB7 ${escapeHtml(task.status)}</span>
+      </button>
+      <button class="icon-btn task-dispatch" title="Dispatch task" aria-label="Dispatch task">\u25B6</button>
+    `;
+      row.querySelector(".task-main")?.addEventListener("click", () => {
+        if (!state.activeFeatureId) return;
+        send({ type: "openTask", featureId: state.activeFeatureId, taskId: task.id });
+      });
+      row.querySelector(".task-dispatch")?.addEventListener("click", () => {
+        if (!state.activeFeatureId) return;
+        send({ type: "dispatchFeature", featureId: state.activeFeatureId, taskIds: [task.id] });
+      });
+      list.appendChild(row);
+    }
+  }
   function renderRuns() {
     const container2 = root.querySelector("#runs-list");
     if (!container2) return;
     container2.innerHTML = "";
     if (state.runs.size === 0) {
-      container2.innerHTML = `<div class="meta" style="padding:8px;">No runs yet.</div>`;
+      container2.innerHTML = `<div class="meta empty-row">No runs yet.</div>`;
       return;
     }
     for (const run of state.runs.values()) {
@@ -38537,6 +38586,7 @@
       case "init":
         state.settings = msg.settings;
         state.features = msg.features;
+        state.activeFeatureId = msg.features.find((feature) => feature.active)?.id ?? null;
         render();
         break;
       case "settings":
@@ -38547,6 +38597,7 @@
         state.activeFeatureId = msg.activeFeature?.id ?? null;
         state.activeTasks = msg.activeFeature?.tasks ?? [];
         renderFeatures();
+        renderTasks();
         break;
       case "graphStart": {
         const ev = msg.payload;

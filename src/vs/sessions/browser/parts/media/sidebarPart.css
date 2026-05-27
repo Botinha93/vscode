@@ -11,6 +11,14 @@
 /* Make the sidebar title area draggable to move the window */
 .agent-sessions-workbench .part.sidebar > .composite.title {
 	position: relative;
+	background-color: var(--vscode-agentsPanel-background);
+}
+
+.agent-sessions-workbench .part.sidebar > .content,
+.agent-sessions-workbench .part.sidebar > .content .pane-body,
+.agent-sessions-workbench .part.sidebar > .content .monaco-list-rows,
+.agent-sessions-workbench .part.sidebar > .sidebar-footer {
+	background-color: var(--vscode-agentsPanel-background);
 }
 
 .agent-sessions-workbench .part.sidebar > .composite.title > .titlebar-drag-region {

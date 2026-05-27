@@ -6,7 +6,7 @@
 /* ---- Sidebar & Auxiliary Bar Card Appearance ---- */
 
 .agent-sessions-workbench .part.sidebar {
-	background: var(--vscode-agents-background);
+	background: var(--vscode-agentsPanel-background);
 }
 
 .agent-sessions-workbench > .monaco-grid-view {
@@ -126,13 +126,9 @@
  */
 
 .agent-sessions-workbench.shell-gradient-background .part.titlebar,
-.agent-sessions-workbench.shell-gradient-background .part.sidebar,
 .agent-sessions-workbench.shell-gradient-background .part.titlebar > .content,
 .agent-sessions-workbench.shell-gradient-background .part.titlebar > .titlebar-container,
-.agent-sessions-workbench.shell-gradient-background .part.titlebar > .sessions-titlebar-container,
-.agent-sessions-workbench.shell-gradient-background .part.sidebar > .composite.title,
-.agent-sessions-workbench.shell-gradient-background .part.sidebar > .content,
-.agent-sessions-workbench.shell-gradient-background .part.sidebar > .sidebar-footer {
+.agent-sessions-workbench.shell-gradient-background .part.titlebar > .sessions-titlebar-container {
 	background: transparent !important;
 }
 
