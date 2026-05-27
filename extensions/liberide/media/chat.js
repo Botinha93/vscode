@@ -713,7 +713,8 @@
     draft: "",
     streaming: false,
     expandedTimelines: /* @__PURE__ */ new Set(),
-    expandedEditCards: /* @__PURE__ */ new Set()
+    expandedEditCards: /* @__PURE__ */ new Set(),
+    consumedPipelineCards: /* @__PURE__ */ new Set()
   };
   var PROVIDER_LABELS = {
     openai: "OpenAI",
@@ -736,9 +737,9 @@
     return {
       provider: o.provider ?? fallbackModel?.provider,
       model: o.model ?? fallbackModel?.modelId,
-      chatMode: o.chatMode ?? s?.chatMode ?? "normal",
+      chatMode: "agent",
       useRag: o.useRag ?? s?.useRag ?? false,
-      toolsEnabled: o.toolsEnabled ?? s?.toolsEnabled ?? true,
+      toolsEnabled: true,
       agentIds: o.agentIds ?? [],
       skillIds: o.skillIds ?? [],
       mcpServerIds: o.mcpServerIds ?? []
@@ -781,16 +782,6 @@
       </aside>
       <div class="chat-main">
         <div class="project-bar" id="project-bar"></div>
-        <header class="chat-header">
-          <button class="icon-btn header-back" id="sidebar-toggle" title="Show chats" aria-label="Show chats">\u2190</button>
-          <div class="chat-title" id="chat-title">New chat</div>
-          <div class="header-actions">
-            <button class="icon-btn" id="header-pipeline" title="Open pipeline" aria-label="Open pipeline">\u25F0</button>
-            <button class="icon-btn" id="header-history" title="Chat history" aria-label="History">\u29D6</button>
-            <button class="icon-btn" id="header-settings" title="Settings" aria-label="Settings">\u2699</button>
-            <button class="icon-btn" id="new-chat" title="New chat" aria-label="New chat">+</button>
-          </div>
-        </header>
         <div class="backend-banner" id="backend-banner" hidden></div>
         <section class="chat-transcript" id="transcript"></section>
         <footer class="chat-composer">
@@ -1106,7 +1097,8 @@
     content.innerHTML = renderMarkdownish(visibleContent);
     bindMarkdownExtras(content);
     if (hasOpenPipeline) mountOpenPipelineButtons(content);
-    if (readyFeatureName !== null && state.activeSession?.kind === "pipeline" && message.status !== "streaming") {
+    const cardConsumed = message.pipelineCardConsumed === true || state.consumedPipelineCards.has(message.id);
+    if (readyFeatureName !== null && state.activeSession?.kind === "pipeline" && message.status !== "streaming" && !cardConsumed) {
       mountPipelineReadyCard(turn, message, readyFeatureName);
     }
     bindAssistantMeta(turn, message);
@@ -1165,12 +1157,18 @@
         input.focus();
         return;
       }
+      state.consumedPipelineCards.add(message.id);
       generateBtn.disabled = true;
       keepBtn.disabled = true;
       input.disabled = true;
       send({ type: "generatePipeline", sessionId, featureName: name });
+      send({ type: "consumePipelineCard", sessionId, messageId: message.id });
     });
-    keepBtn.addEventListener("click", () => card.remove());
+    keepBtn.addEventListener("click", () => {
+      state.consumedPipelineCards.add(message.id);
+      card.remove();
+      send({ type: "consumePipelineCard", sessionId, messageId: message.id });
+    });
     const contentEl = turn.querySelector(".turn-content");
     if (contentEl?.nextSibling) {
       turn.insertBefore(card, contentEl.nextSibling);
@@ -1314,17 +1312,8 @@
     const eff = effective();
     const modelLabel = describeModel(eff.provider, eff.model);
     const agentCount = eff.agentIds.length;
-    const modeLabel = eff.chatMode === "agent" ? "Agent" : "Normal";
     toolbar.innerHTML = `
     <button class="composer-icon-btn" id="attach-btn" title="Attach files (coming soon)" aria-label="Attach">+</button>
-    <button class="chip chip-access" id="chip-mode" title="Toggle agent mode">
-      <span class="chip-icon shield">\u2756</span>
-      <span>${escapeHtml2(modeLabel)}</span>
-      <span class="chip-caret">\u25BE</span>
-    </button>
-    <button class="chip${eff.toolsEnabled ? " chip-on" : ""}" id="chip-tools" title="Toggle tools">
-      \u2692 Tools
-    </button>
     <button class="chip${agentCount > 0 ? " chip-on" : ""}" id="chip-agents" title="Attach agents from LiberIDE" ${state.catalog.agents.length === 0 ? "disabled" : ""}>
       \u269B Agents${agentCount ? ` (${agentCount})` : ""}
     </button>
@@ -1338,12 +1327,6 @@
     toolbar.querySelector("#chip-model")?.addEventListener("click", () => {
       state.modelPickerOpen = !state.modelPickerOpen;
       applyModelPicker();
-    });
-    toolbar.querySelector("#chip-mode")?.addEventListener("click", () => {
-      setOverrides({ chatMode: eff.chatMode === "agent" ? "normal" : "agent" });
-    });
-    toolbar.querySelector("#chip-tools")?.addEventListener("click", () => {
-      setOverrides({ toolsEnabled: !eff.toolsEnabled });
     });
     toolbar.querySelector("#chip-agents")?.addEventListener("click", () => {
       state.agentPickerOpen = !state.agentPickerOpen;
@@ -1507,15 +1490,8 @@
       <option value="manual" ${s.modelSelection === "manual" ? "selected" : ""}>manual</option>
       <option value="auto" ${s.modelSelection === "auto" ? "selected" : ""}>auto</option>
     </select>
-    <label for="set-chatmode">Default chat mode</label>
-    <select id="set-chatmode" data-key="chatMode">
-      <option value="normal" ${s.chatMode === "normal" ? "selected" : ""}>normal</option>
-      <option value="agent" ${s.chatMode === "agent" ? "selected" : ""}>agent</option>
-    </select>
     <label for="set-rag">RAG by default</label>
     <div><input id="set-rag" data-key="useRag" type="checkbox" ${s.useRag ? "checked" : ""} /></div>
-    <label for="set-tools">Tools by default</label>
-    <div><input id="set-tools" data-key="toolsEnabled" type="checkbox" ${s.toolsEnabled ? "checked" : ""} /></div>
     <label for="set-system">Local system prompt</label>
     <textarea id="set-system" data-key="systemPrompt" placeholder="(empty)">${escapeHtml2(s.systemPrompt)}</textarea>
 
@@ -1957,6 +1933,10 @@
         renderBackendBanner();
         if (state.modelPickerOpen) renderModelPicker();
         if (state.agentPickerOpen) renderAgentPicker();
+        break;
+      case "project":
+        state.project = msg.project;
+        renderHeader();
         break;
       case "openSettings":
         state.settingsOpen = true;

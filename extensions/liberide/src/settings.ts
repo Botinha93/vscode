@@ -16,9 +16,9 @@ export function readSettings(): LiberideSettings {
   const cfg = vscode.workspace.getConfiguration(SECTION);
   return {
     modelSelection: cfg.get<"auto" | "manual">("modelSelection") ?? "manual",
-    chatMode: cfg.get<"normal" | "agent">("chatMode") ?? "normal",
+    chatMode: "agent",
     useRag: cfg.get<boolean>("useRag") ?? false,
-    toolsEnabled: cfg.get<boolean>("toolsEnabled") ?? true,
+    toolsEnabled: true,
     systemPrompt: cfg.get<string>("systemPrompt") ?? "",
     copilotUiEnabled: cfg.get<boolean>("copilot.enabled") ?? false,
     copilotModelsEnabled: cfg.get<boolean>("copilot.modelsEnabled") ?? true,

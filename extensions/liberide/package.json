@@ -33,21 +33,10 @@
           "default": "manual",
           "description": "Local override for model selection mode. When 'auto', the backend may upgrade the model based on the request. Configure models in the VoxChat app."
         },
-        "liberide.chatMode": {
-          "type": "string",
-          "enum": ["normal", "agent"],
-          "default": "normal",
-          "description": "Local default chat mode for new chats. Can be overridden per chat."
-        },
         "liberide.useRag": {
           "type": "boolean",
           "default": false,
           "description": "Local default for RAG on new chats. Can be overridden per chat."
-        },
-        "liberide.toolsEnabled": {
-          "type": "boolean",
-          "default": true,
-          "description": "Local default for tool calling on new chats. Can be overridden per chat."
         },
         "liberide.systemPrompt": {
           "type": "string",

@@ -389,6 +389,12 @@ body {
 	background-color: var(--chatllm-panel-background) !important;
 }
 
+.monaco-workbench .part.sidebar > .title,
+.monaco-workbench .part.sidebar > .content,
+.monaco-workbench .part.sidebar > .sidebar-footer {
+	background-color: var(--chatllm-panel-background) !important;
+}
+
 .monaco-workbench .part.editor {
 	background-color: var(--chatllm-chat-background) !important;
 }

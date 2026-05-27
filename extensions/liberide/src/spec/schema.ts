@@ -46,10 +46,24 @@ function asStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
 }
 
+function unquoteScalar(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length >= 2) {
+    const first = trimmed[0];
+    const last = trimmed[trimmed.length - 1];
+    if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+      return trimmed.slice(1, -1);
+    }
+  }
+  return trimmed;
+}
+
 function parseInlineArray(value: string): string[] {
   const trimmed = value.trim();
   if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) return [];
-  return trimmed.slice(1, -1).split(",").map((v) => v.trim().replace(/^['"]|['"]$/g, "")).filter(Boolean);
+  const inner = trimmed.slice(1, -1).trim();
+  if (!inner) return [];
+  return inner.split(",").map((v) => unquoteScalar(v)).filter((v) => v.length > 0);
 }
 
 export function parseFrontmatter(raw: string): { data: Record<string, unknown>; body: string } {
@@ -59,8 +73,11 @@ export function parseFrontmatter(raw: string): { data: Record<string, unknown>; 
   const lines = match[1].split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+    if (!line.trim()) continue;
+    // Indented lines are continuations consumed by the previous key.
+    if (/^\s/.test(line)) continue;
     const colon = line.indexOf(":");
-    if (colon < 0 || line.startsWith(" ")) continue;
+    if (colon < 0) continue;
     const key = line.slice(0, colon).trim();
     const rawValue = line.slice(colon + 1).trim();
     if (rawValue === "|") {
@@ -69,8 +86,18 @@ export function parseFrontmatter(raw: string): { data: Record<string, unknown>; 
       data[key] = block.join("\n");
     } else if (rawValue.startsWith("[")) {
       data[key] = parseInlineArray(rawValue);
+    } else if (rawValue === "") {
+      const items: string[] = [];
+      while (i + 1 < lines.length) {
+        const next = lines[i + 1];
+        const dashMatch = next.match(/^\s+-\s+(.*)$/);
+        if (!dashMatch) break;
+        items.push(unquoteScalar(dashMatch[1]));
+        i += 1;
+      }
+      data[key] = items.length > 0 ? items : "";
     } else {
-      data[key] = rawValue;
+      data[key] = unquoteScalar(rawValue);
     }
   }
   return { data, body: match[2] };

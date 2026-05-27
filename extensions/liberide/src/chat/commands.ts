@@ -77,7 +77,7 @@ Rules:
 - Use EARS-style requirement statements ("When X, the system shall Y" / "While X, ..." / "Where X, ...").
 - Every \`## R-N\` and \`## D-N\` heading must use a unique id.
 - Emit one or more fenced \`\`\`task blocks. Each block must contain valid YAML frontmatter with: id, title, status, requirement_refs, design_refs, depends_on, expected_files, architecture_hints, acceptance, agent.
-- All list fields (\`requirement_refs\`, \`design_refs\`, \`depends_on\`, \`expected_files\`, \`acceptance\`) MUST use inline-array syntax: \`key: [item1, item2]\`. Use \`[]\` for empty lists.
+- For list fields (\`requirement_refs\`, \`design_refs\`, \`depends_on\`, \`expected_files\`, \`acceptance\`), use either inline \`[a, b]\` arrays or block-style YAML lists (\`key:\` then indented \`- item\` lines) for list fields. Prefer block-style when items contain commas or are long sentences. Use \`[]\` for empty lists.
 - \`architecture_hints\` MUST be a YAML block string introduced by \`|\` and its continuation lines indented by two spaces.
 - Tasks must form a valid DAG: every id in \`depends_on\` must reference an earlier task's \`id\`.
 - Use status \`ready\`.

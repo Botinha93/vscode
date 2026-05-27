@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import {
   addConversationToFolder,
+  apiFetch,
   createConversation,
   createFolder,
   deleteConversation,
@@ -14,7 +15,13 @@ import {
   probeBackend,
 } from "../api";
 import { onSettingsChange, readSettings, writeSetting, type LiberideSettings } from "../settings";
-import { detectProjectIdentity, projectFolderName, type ProjectIdentity } from "../project/identity";
+import {
+  conversationHasProjectTag,
+  detectProjectIdentity,
+  projectConversationTag,
+  projectFolderName,
+  type ProjectIdentity,
+} from "../project/identity";
 import {
   PIPELINE_GENERATE_SYSTEM_PROMPT,
   PIPELINE_INTERVIEW_SYSTEM_PROMPT,
@@ -84,6 +91,8 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
   private messagesCache = new Map<string, ConversationMessage[]>();
   private overrides: OverridesCache = {};
   private sessionKinds = new Map<string, ChatSession["kind"]>();
+  /** conversationId -> set of message ids whose pipeline-ready card has been consumed. */
+  private consumedPipelineCards = new Map<string, Set<string>>();
 
   /** Locally-staged session for "new chat" before the first message creates it on the backend. */
   private draftSession: ChatSession | null = null;
@@ -100,7 +109,17 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     for (const [id, kind] of Object.entries(storedKinds)) this.sessionKinds.set(id, kind);
     this.disposables.push(
       onSettingsChange((settings) => this.broadcast({ type: "settings", settings })),
+      vscode.workspace.onDidChangeWorkspaceFolders(() => {
+        void this.onWorkspaceFoldersChanged();
+      }),
     );
+  }
+
+  private async onWorkspaceFoldersChanged(): Promise<void> {
+    this.project = await detectProjectIdentity();
+    await this.ensureProjectFolder();
+    await this.refreshConversations();
+    this.broadcast({ type: "project", project: this.projectInfo() });
   }
 
   resolveWebviewView(view: vscode.WebviewView): void {
@@ -213,6 +232,9 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
         case "generatePipeline":
           await this.generatePipeline(message.sessionId, message.featureName);
           break;
+        case "consumePipelineCard":
+          this.markPipelineCardConsumed(message.sessionId, message.messageId);
+          break;
         case "refreshCatalog":
           await this.refreshCatalog();
           break;
@@ -308,6 +330,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
         // Ignore if VS Code LM API is unavailable or Copilot provider isn't active.
       }
       this.backendStatus = "ok";
+      await this.ensureProjectFolder();
     } catch (err) {
       this.output.appendLine(`[chat.catalog] ${err instanceof Error ? err.message : String(err)}`);
       this.catalog = emptyCatalog();
@@ -337,6 +360,41 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     }
   }
 
+  private conversationBelongsToProject(conv: Conversation): boolean {
+    if (this.project.source === "none") return true;
+    const folderName = projectFolderName(this.project);
+    if (conv.folder === folderName) return true;
+    if (this.projectFolderId && conv.folderIds?.includes(this.projectFolderId)) return true;
+    if (conversationHasProjectTag(this.project, conv.tags)) return true;
+    return false;
+  }
+
+  private conversationFullyAssignedToProject(conv: Conversation): boolean {
+    if (!this.projectFolderId) return false;
+    const folderName = projectFolderName(this.project);
+    return conv.folder === folderName && Boolean(conv.folderIds?.includes(this.projectFolderId));
+  }
+
+  private async syncProjectConversations(all: Conversation[]): Promise<void> {
+    if (this.project.source === "none" || this.backendStatus !== "ok") return;
+    await this.ensureProjectFolder();
+    if (!this.projectFolderId) return;
+
+    for (const conv of all) {
+      if (!this.conversationBelongsToProject(conv)) continue;
+      if (this.conversationFullyAssignedToProject(conv)) continue;
+      try {
+        const updated = await this.assignConversationToProject(conv);
+        if (updated) {
+          const index = all.findIndex((item) => item.id === conv.id);
+          if (index >= 0) all[index] = updated;
+        }
+      } catch (err) {
+        this.output.appendLine(`[chat.sync] ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  }
+
   private async refreshConversations(): Promise<void> {
     if (this.backendStatus !== "ok") {
       this.broadcastSessions();
@@ -344,14 +402,8 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     }
     try {
       const all = await listConversations();
-      const folderName = projectFolderName(this.project);
-      const folderId = this.projectFolderId;
-      const owned = all.filter((c) => {
-        if (this.project.source === "none") return true;
-        if (c.folder === folderName) return true;
-        if (folderId && c.folderIds?.includes(folderId)) return true;
-        return false;
-      });
+      await this.syncProjectConversations(all);
+      const owned = all.filter((c) => this.conversationBelongsToProject(c));
       this.conversations.clear();
       for (const c of owned) this.conversations.set(c.id, c);
       if (this.activeSessionId && this.activeSessionId.startsWith("draft:")) {
@@ -445,15 +497,20 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
 
   private sessionFromConversation(conv: Conversation): ChatSession {
     const cached = this.messagesCache.get(conv.id) ?? [];
+    const consumed = this.consumedPipelineCards.get(conv.id);
     const messages: ChatMessage[] = cached
       .filter((m) => m.role === "user" || m.role === "assistant")
-      .map((m) => ({
-        id: m.id,
-        role: m.role as "user" | "assistant",
-        content: m.content,
-        createdAt: new Date(m.createdAt).getTime() || Date.now(),
-        status: "complete",
-      }));
+      .map((m) => {
+        const base: ChatMessage = {
+          id: m.id,
+          role: m.role as "user" | "assistant",
+          content: m.content,
+          createdAt: new Date(m.createdAt).getTime() || Date.now(),
+          status: "complete",
+        };
+        if (consumed?.has(m.id)) base.pipelineCardConsumed = true;
+        return base;
+      });
     const kind = this.sessionKinds.get(conv.id) ?? "vibe";
     return {
       id: conv.id,
@@ -468,14 +525,26 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     };
   }
 
+  private markPipelineCardConsumed(conversationId: string, messageId: string): void {
+    let set = this.consumedPipelineCards.get(conversationId);
+    if (!set) {
+      set = new Set<string>();
+      this.consumedPipelineCards.set(conversationId, set);
+    }
+    if (set.has(messageId)) return;
+    set.add(messageId);
+    this.broadcastSessions();
+    if (this.activeSessionId === conversationId) this.broadcastActiveSession();
+  }
+
   private conversationOverrides(conv: Conversation): ChatOverrides {
     const stored = this.overrides[conv.id] ?? {};
     return {
       provider: (conv.provider as ConfiguredProvider) ?? stored.provider,
       model: conv.model ?? stored.model,
-      chatMode: conv.chatMode ?? stored.chatMode,
+      chatMode: "agent",
       useRag: stored.useRag,
-      toolsEnabled: stored.toolsEnabled,
+      toolsEnabled: true,
       agentIds: conv.agentIds ?? stored.agentIds,
       skillIds: stored.skillIds,
       mcpServerIds: stored.mcpServerIds,
@@ -548,6 +617,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       this.messagesCache.delete(id);
       delete this.overrides[id];
       this.sessionKinds.delete(id);
+      this.consumedPipelineCards.delete(id);
       await this.persistOverrides();
       await this.persistSessionKinds();
       if (this.activeSessionId === id) this.activeSessionId = null;
@@ -596,23 +666,27 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
   }
 
   private async updateOverrides(id: string, overrides: ChatOverrides): Promise<void> {
+    const normalizedOverrides: ChatOverrides = { ...overrides };
+    delete normalizedOverrides.chatMode;
+    delete normalizedOverrides.toolsEnabled;
     if (id.startsWith("draft:") && this.draftSession?.id === id) {
-      this.draftSession.overrides = { ...this.draftSession.overrides, ...overrides };
+      this.draftSession.overrides = { ...this.draftSession.overrides, ...normalizedOverrides };
       this.draftSession.updatedAt = Date.now();
       this.broadcastSessions();
       this.broadcastActiveSession();
       return;
     }
     if (!this.conversations.has(id)) return;
-    const merged = { ...(this.overrides[id] ?? {}), ...overrides };
+    const merged = { ...(this.overrides[id] ?? {}), ...normalizedOverrides };
+    delete merged.chatMode;
+    delete merged.toolsEnabled;
     this.overrides[id] = merged;
     await this.persistOverrides();
 
     const patch: Record<string, unknown> = {};
-    if (overrides.provider) patch.provider = toWireProvider(overrides.provider);
-    if (overrides.model) patch.model = overrides.model;
-    if (overrides.chatMode) patch.chatMode = overrides.chatMode;
-    if (overrides.agentIds) patch.agentIds = overrides.agentIds;
+    if (normalizedOverrides.provider) patch.provider = toWireProvider(normalizedOverrides.provider);
+    if (normalizedOverrides.model) patch.model = normalizedOverrides.model;
+    if (normalizedOverrides.agentIds) patch.agentIds = normalizedOverrides.agentIds;
     if (Object.keys(patch).length > 0) {
       try {
         const updated = await patchConversation(id, patch);
@@ -716,17 +790,9 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
 
     const overrides = session.overrides;
     const pipelineMode = !command && session.kind === "pipeline";
-    const chatMode = command
-      ? (command === "spec" ? "normal" : "agent")
-      : pipelineMode
-        ? "normal"
-        : (overrides.chatMode ?? settings.chatMode);
+    const chatMode = "agent";
     const useRag = overrides.useRag ?? settings.useRag;
-    const toolsEnabled = command
-      ? (command === "spec" ? (overrides.toolsEnabled ?? settings.toolsEnabled) : true)
-      : pipelineMode
-        ? false
-        : (overrides.toolsEnabled ?? settings.toolsEnabled);
+    const toolsEnabled = true;
     const systemPrompt = command
       ? SPEC_SYSTEM_PROMPTS[command]
       : pipelineMode
@@ -805,7 +871,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
           }).then((r) => ({ assistantMessage: { id: assistantMessage.id, content: r.content } }))
         : await streamChat(body, handlers, abort.signal);
 
-      const finalConversation = response.conversation as Conversation | undefined;
+      const finalConversation = "conversation" in response ? response.conversation as Conversation | undefined : undefined;
       if (finalConversation) this.conversations.set(finalConversation.id, finalConversation);
       if (response.assistantMessage?.id) assistantMessage.id = response.assistantMessage.id;
       if (response.assistantMessage?.content) {
@@ -866,25 +932,40 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     return conv ? this.sessionFromConversation(conv) : null;
   }
 
+  private async assignConversationToProject(conv: Conversation | string): Promise<Conversation | null> {
+    const conversationId = typeof conv === "string" ? conv : conv.id;
+    const existing = typeof conv === "string" ? this.conversations.get(conv) : conv;
+    if (this.project.source === "none") return existing ?? null;
+
+    await this.ensureProjectFolder();
+    if (!this.projectFolderId) return existing ?? null;
+
+    const folderName = this.projectFolder?.name ?? projectFolderName(this.project);
+    const projectTag = projectConversationTag(this.project);
+    const tags = [...new Set([...(existing?.tags ?? []), projectTag])];
+
+    try {
+      if (this.projectFolderId) {
+        await addConversationToFolder(this.projectFolderId, conversationId);
+      }
+    } catch (err) {
+      this.output.appendLine(`[chat.attachFolder] ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    try {
+      return await patchConversation(conversationId, { folder: folderName, tags });
+    } catch (err) {
+      this.output.appendLine(`[chat.tagFolder] ${err instanceof Error ? err.message : String(err)}`);
+      return existing ?? null;
+    }
+  }
+
   private async createSessionConversation(firstMessage: string): Promise<Conversation | null> {
     try {
       const title = deriveTitle(firstMessage);
       const conv = await createConversation(title);
-      if (this.projectFolderId) {
-        try {
-          await addConversationToFolder(this.projectFolderId, conv.id);
-        } catch (err) {
-          this.output.appendLine(`[chat.attachFolder] ${err instanceof Error ? err.message : String(err)}`);
-        }
-        const folderName = this.projectFolder?.name ?? projectFolderName(this.project);
-        try {
-          const patched = await patchConversation(conv.id, { folder: folderName });
-          return patched;
-        } catch (err) {
-          this.output.appendLine(`[chat.tagFolder] ${err instanceof Error ? err.message : String(err)}`);
-        }
-      }
-      return conv;
+      const assigned = await this.assignConversationToProject(conv);
+      return assigned ?? conv;
     } catch (err) {
       this.output.appendLine(`[chat.createConversation] ${err instanceof Error ? err.message : String(err)}`);
       this.broadcast({ type: "log", message: `Failed to create conversation: ${err instanceof Error ? err.message : err}` });
@@ -1028,6 +1109,14 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     const messages = this.messagesCache.get(conversationId) ?? [];
     const userPrompt = `Generate the requirements, design, and task contracts for the feature "${featureName}". Emit the marker [[FEATURE_NAME: ${slug}]] on the first line.`;
 
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const candidate = messages[i];
+      if (candidate.role === "assistant" && candidate.content.includes("[[PIPELINE_READY:")) {
+        this.markPipelineCardConsumed(conversationId, candidate.id);
+        break;
+      }
+    }
+
     const userMessage: ConversationMessage = {
       id: `local:user:${randomId()}`,
       conversationId,
@@ -1053,13 +1142,13 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       provider: resolved.provider,
       model: resolved.model,
       modelSelection: readSettings().modelSelection,
-      chatMode: "normal",
+      chatMode: "agent",
       content: userPrompt,
       systemPrompt: PIPELINE_GENERATE_SYSTEM_PROMPT,
       skillIds: [],
       documentIds: [],
       useRag: false,
-      toolsEnabled: false,
+      toolsEnabled: true,
       mcpServerIds: [],
       agentIds: [],
       maxAgentSpawns: this.catalog.maxAgentSpawns,

@@ -80,7 +80,7 @@ function authHeaders(extra) {
   if (token) headers.Authorization = `Bearer ${token}`;
   return headers;
 }
-async function apiFetch2(path, init) {
+async function apiFetch(path, init) {
   const origin = getApiOrigin();
   if (!origin) throw new Error("LIBERIDE_API_ORIGIN is not set.");
   return fetch(path.startsWith("http") ? path : `${origin}${path}`, {
@@ -91,7 +91,7 @@ async function apiFetch2(path, init) {
 async function probeBackend() {
   if (!getApiOrigin()) return "unconfigured";
   try {
-    const res = await apiFetch2("/api/config");
+    const res = await apiFetch("/api/config");
     if (res.ok) return "ok";
     if (res.status === 401 || res.status === 403) return "unauthorized";
     return "unreachable";
@@ -113,19 +113,19 @@ async function readNothing(res) {
   }
 }
 async function fetchConfig() {
-  return readJson(await apiFetch2("/api/config"));
+  return readJson(await apiFetch("/api/config"));
 }
 async function listConversations() {
-  return readJson(await apiFetch2("/api/conversations"));
+  return readJson(await apiFetch("/api/conversations"));
 }
 async function createConversation(title) {
   return readJson(
-    await apiFetch2("/api/conversations", { method: "POST", body: JSON.stringify({ title }) })
+    await apiFetch("/api/conversations", { method: "POST", body: JSON.stringify({ title }) })
   );
 }
 async function patchConversation(id, partial) {
   return readJson(
-    await apiFetch2(`/api/conversations/${encodeURIComponent(id)}`, {
+    await apiFetch(`/api/conversations/${encodeURIComponent(id)}`, {
       method: "PATCH",
       body: JSON.stringify(partial)
     })
@@ -133,34 +133,34 @@ async function patchConversation(id, partial) {
 }
 async function deleteConversation(id) {
   await readNothing(
-    await apiFetch2(`/api/conversations/${encodeURIComponent(id)}`, { method: "DELETE" })
+    await apiFetch(`/api/conversations/${encodeURIComponent(id)}`, { method: "DELETE" })
   );
 }
 async function listConversationMessages(id) {
   return readJson(
-    await apiFetch2(`/api/conversations/${encodeURIComponent(id)}/messages`)
+    await apiFetch(`/api/conversations/${encodeURIComponent(id)}/messages`)
   );
 }
 async function listFolders(filter = "mine") {
   return readJson(
-    await apiFetch2(`/api/folders?filter=${encodeURIComponent(filter)}`)
+    await apiFetch(`/api/folders?filter=${encodeURIComponent(filter)}`)
   );
 }
 async function createFolder(input) {
   return readJson(
-    await apiFetch2("/api/folders", { method: "POST", body: JSON.stringify(input) })
+    await apiFetch("/api/folders", { method: "POST", body: JSON.stringify(input) })
   );
 }
 async function addConversationToFolder(folderId, conversationId) {
   await readNothing(
-    await apiFetch2(
+    await apiFetch(
       `/api/folders/${encodeURIComponent(folderId)}/conversations/${encodeURIComponent(conversationId)}`,
       { method: "POST" }
     )
   );
 }
 async function listDocuments() {
-  return readJson(await apiFetch2("/api/documents"));
+  return readJson(await apiFetch("/api/documents"));
 }
 
 // src/spec/dag.ts
@@ -228,7 +228,7 @@ async function dispatchFeature(feature, options = {}) {
   const tasks = options.taskIds?.length ? feature.tasks.filter((task) => options.taskIds.includes(task.id)) : feature.tasks;
   const validation = validateDag(tasks);
   if (!validation.ok) throw new Error(validation.error);
-  const response = await apiFetch2("/api/specs/dispatch", {
+  const response = await apiFetch("/api/specs/dispatch", {
     method: "POST",
     body: JSON.stringify({
       feature: feature.id,
@@ -288,7 +288,7 @@ function subscribeExecutionGraphEvents(graphId, onEvent) {
   return () => controller.abort();
 }
 async function cancelExecutionGraph(graphId) {
-  await apiFetch2(`/api/execution-graphs/${graphId}/cancel`, { method: "POST" });
+  await apiFetch(`/api/execution-graphs/${graphId}/cancel`, { method: "POST" });
 }
 
 // src/panel/panel.ts
@@ -301,9 +301,9 @@ function readSettings() {
   const cfg = vscode.workspace.getConfiguration(SECTION);
   return {
     modelSelection: cfg.get("modelSelection") ?? "manual",
-    chatMode: cfg.get("chatMode") ?? "normal",
+    chatMode: "agent",
     useRag: cfg.get("useRag") ?? false,
-    toolsEnabled: cfg.get("toolsEnabled") ?? true,
+    toolsEnabled: true,
     systemPrompt: cfg.get("systemPrompt") ?? "",
     copilotUiEnabled: cfg.get("copilot.enabled") ?? false,
     copilotModelsEnabled: cfg.get("copilot.modelsEnabled") ?? true
@@ -332,10 +332,23 @@ var FEATURE_STATUSES = /* @__PURE__ */ new Set(["draft", "design", "tasks", "dis
 function asStringArray(value) {
   return Array.isArray(value) ? value.filter((v) => typeof v === "string") : [];
 }
+function unquoteScalar(value) {
+  const trimmed = value.trim();
+  if (trimmed.length >= 2) {
+    const first = trimmed[0];
+    const last = trimmed[trimmed.length - 1];
+    if (first === '"' && last === '"' || first === "'" && last === "'") {
+      return trimmed.slice(1, -1);
+    }
+  }
+  return trimmed;
+}
 function parseInlineArray(value) {
   const trimmed = value.trim();
   if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) return [];
-  return trimmed.slice(1, -1).split(",").map((v) => v.trim().replace(/^['"]|['"]$/g, "")).filter(Boolean);
+  const inner = trimmed.slice(1, -1).trim();
+  if (!inner) return [];
+  return inner.split(",").map((v) => unquoteScalar(v)).filter((v) => v.length > 0);
 }
 function parseFrontmatter(raw) {
   const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
@@ -344,8 +357,10 @@ function parseFrontmatter(raw) {
   const lines = match[1].split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+    if (!line.trim()) continue;
+    if (/^\s/.test(line)) continue;
     const colon = line.indexOf(":");
-    if (colon < 0 || line.startsWith(" ")) continue;
+    if (colon < 0) continue;
     const key = line.slice(0, colon).trim();
     const rawValue = line.slice(colon + 1).trim();
     if (rawValue === "|") {
@@ -354,8 +369,18 @@ function parseFrontmatter(raw) {
       data[key] = block.join("\n");
     } else if (rawValue.startsWith("[")) {
       data[key] = parseInlineArray(rawValue);
+    } else if (rawValue === "") {
+      const items = [];
+      while (i + 1 < lines.length) {
+        const next = lines[i + 1];
+        const dashMatch = next.match(/^\s+-\s+(.*)$/);
+        if (!dashMatch) break;
+        items.push(unquoteScalar(dashMatch[1]));
+        i += 1;
+      }
+      data[key] = items.length > 0 ? items : "";
     } else {
-      data[key] = rawValue;
+      data[key] = unquoteScalar(rawValue);
     }
   }
   return { data, body: match[2] };
@@ -740,6 +765,13 @@ function projectFolderName(identity) {
   }
   return "workspace";
 }
+function projectConversationTag(identity) {
+  return `ide-project:${identity.id}`;
+}
+function conversationHasProjectTag(identity, tags) {
+  if (!tags?.length || identity.source === "none") return false;
+  return tags.includes(projectConversationTag(identity));
+}
 
 // src/chat/commands.ts
 var SPEC_SYSTEM_PROMPTS = {
@@ -819,7 +851,7 @@ Rules:
 - Use EARS-style requirement statements ("When X, the system shall Y" / "While X, ..." / "Where X, ...").
 - Every \`## R-N\` and \`## D-N\` heading must use a unique id.
 - Emit one or more fenced \`\`\`task blocks. Each block must contain valid YAML frontmatter with: id, title, status, requirement_refs, design_refs, depends_on, expected_files, architecture_hints, acceptance, agent.
-- All list fields (\`requirement_refs\`, \`design_refs\`, \`depends_on\`, \`expected_files\`, \`acceptance\`) MUST use inline-array syntax: \`key: [item1, item2]\`. Use \`[]\` for empty lists.
+- For list fields (\`requirement_refs\`, \`design_refs\`, \`depends_on\`, \`expected_files\`, \`acceptance\`), use either inline \`[a, b]\` arrays or block-style YAML lists (\`key:\` then indented \`- item\` lines) for list fields. Prefer block-style when items contain commas or are long sentences. Use \`[]\` for empty lists.
 - \`architecture_hints\` MUST be a YAML block string introduced by \`|\` and its continuation lines indented by two spaces.
 - Tasks must form a valid DAG: every id in \`depends_on\` must reference an earlier task's \`id\`.
 - Use status \`ready\`.
@@ -932,7 +964,7 @@ async function streamCopilotChat(input) {
       toolEvents.push(done);
       input.onToolEvent(done);
       messages.push(vscode5.LanguageModelChatMessage.Assistant([call]));
-      messages.push(vscode5.LanguageModelChatMessage.User([new vscode5.LanguageModelToolResultPart(call.callId, result.result ?? "")]));
+      messages.push(vscode5.LanguageModelChatMessage.User([new vscode5.LanguageModelToolResultPart(call.callId, [result.result ?? ""])]));
       response = await runOnce();
     }
   }
@@ -960,7 +992,7 @@ async function buildToolStubs() {
   }));
 }
 async function invokeBackendTool(body) {
-  const response = await apiFetch2("/api/tools/invoke", {
+  const response = await apiFetch("/api/tools/invoke", {
     method: "POST",
     body: JSON.stringify(body)
   });
@@ -974,7 +1006,7 @@ async function invokeBackendTool(body) {
 
 // src/chat/stream-client.ts
 async function streamChat(body, handlers, signal) {
-  const response = await apiFetch2("/api/chat/stream", {
+  const response = await apiFetch("/api/chat/stream", {
     method: "POST",
     body: JSON.stringify(body),
     signal
@@ -1024,7 +1056,10 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     const storedKinds = this.context.workspaceState.get("liberide.chat.sessionKinds", {});
     for (const [id, kind] of Object.entries(storedKinds)) this.sessionKinds.set(id, kind);
     this.disposables.push(
-      onSettingsChange((settings) => this.broadcast({ type: "settings", settings }))
+      onSettingsChange((settings) => this.broadcast({ type: "settings", settings })),
+      vscode6.workspace.onDidChangeWorkspaceFolders(() => {
+        void this.onWorkspaceFoldersChanged();
+      })
     );
   }
   static viewType = "liberide.chat";
@@ -1040,9 +1075,17 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
   messagesCache = /* @__PURE__ */ new Map();
   overrides = {};
   sessionKinds = /* @__PURE__ */ new Map();
+  /** conversationId -> set of message ids whose pipeline-ready card has been consumed. */
+  consumedPipelineCards = /* @__PURE__ */ new Map();
   /** Locally-staged session for "new chat" before the first message creates it on the backend. */
   draftSession = null;
   activeSessionId = null;
+  async onWorkspaceFoldersChanged() {
+    this.project = await detectProjectIdentity();
+    await this.ensureProjectFolder();
+    await this.refreshConversations();
+    this.broadcast({ type: "project", project: this.projectInfo() });
+  }
   resolveWebviewView(view) {
     this.view = view;
     this.bindWebview(view.webview);
@@ -1142,6 +1185,9 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
         case "generatePipeline":
           await this.generatePipeline(message.sessionId, message.featureName);
           break;
+        case "consumePipelineCard":
+          this.markPipelineCardConsumed(message.sessionId, message.messageId);
+          break;
         case "refreshCatalog":
           await this.refreshCatalog();
           break;
@@ -1231,6 +1277,7 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
       } catch {
       }
       this.backendStatus = "ok";
+      await this.ensureProjectFolder();
     } catch (err) {
       this.output.appendLine(`[chat.catalog] ${err instanceof Error ? err.message : String(err)}`);
       this.catalog = emptyCatalog();
@@ -1258,6 +1305,37 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
       this.output.appendLine(`[chat.folder] ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+  conversationBelongsToProject(conv) {
+    if (this.project.source === "none") return true;
+    const folderName = projectFolderName(this.project);
+    if (conv.folder === folderName) return true;
+    if (this.projectFolderId && conv.folderIds?.includes(this.projectFolderId)) return true;
+    if (conversationHasProjectTag(this.project, conv.tags)) return true;
+    return false;
+  }
+  conversationFullyAssignedToProject(conv) {
+    if (!this.projectFolderId) return false;
+    const folderName = projectFolderName(this.project);
+    return conv.folder === folderName && Boolean(conv.folderIds?.includes(this.projectFolderId));
+  }
+  async syncProjectConversations(all) {
+    if (this.project.source === "none" || this.backendStatus !== "ok") return;
+    await this.ensureProjectFolder();
+    if (!this.projectFolderId) return;
+    for (const conv of all) {
+      if (!this.conversationBelongsToProject(conv)) continue;
+      if (this.conversationFullyAssignedToProject(conv)) continue;
+      try {
+        const updated = await this.assignConversationToProject(conv);
+        if (updated) {
+          const index = all.findIndex((item) => item.id === conv.id);
+          if (index >= 0) all[index] = updated;
+        }
+      } catch (err) {
+        this.output.appendLine(`[chat.sync] ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  }
   async refreshConversations() {
     if (this.backendStatus !== "ok") {
       this.broadcastSessions();
@@ -1265,14 +1343,8 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     }
     try {
       const all = await listConversations();
-      const folderName = projectFolderName(this.project);
-      const folderId = this.projectFolderId;
-      const owned = all.filter((c) => {
-        if (this.project.source === "none") return true;
-        if (c.folder === folderName) return true;
-        if (folderId && c.folderIds?.includes(folderId)) return true;
-        return false;
-      });
+      await this.syncProjectConversations(all);
+      const owned = all.filter((c) => this.conversationBelongsToProject(c));
       this.conversations.clear();
       for (const c of owned) this.conversations.set(c.id, c);
       if (this.activeSessionId && this.activeSessionId.startsWith("draft:")) {
@@ -1359,13 +1431,18 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
   }
   sessionFromConversation(conv) {
     const cached = this.messagesCache.get(conv.id) ?? [];
-    const messages = cached.filter((m) => m.role === "user" || m.role === "assistant").map((m) => ({
-      id: m.id,
-      role: m.role,
-      content: m.content,
-      createdAt: new Date(m.createdAt).getTime() || Date.now(),
-      status: "complete"
-    }));
+    const consumed = this.consumedPipelineCards.get(conv.id);
+    const messages = cached.filter((m) => m.role === "user" || m.role === "assistant").map((m) => {
+      const base = {
+        id: m.id,
+        role: m.role,
+        content: m.content,
+        createdAt: new Date(m.createdAt).getTime() || Date.now(),
+        status: "complete"
+      };
+      if (consumed?.has(m.id)) base.pipelineCardConsumed = true;
+      return base;
+    });
     const kind = this.sessionKinds.get(conv.id) ?? "vibe";
     return {
       id: conv.id,
@@ -1379,14 +1456,25 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
       kind
     };
   }
+  markPipelineCardConsumed(conversationId, messageId) {
+    let set = this.consumedPipelineCards.get(conversationId);
+    if (!set) {
+      set = /* @__PURE__ */ new Set();
+      this.consumedPipelineCards.set(conversationId, set);
+    }
+    if (set.has(messageId)) return;
+    set.add(messageId);
+    this.broadcastSessions();
+    if (this.activeSessionId === conversationId) this.broadcastActiveSession();
+  }
   conversationOverrides(conv) {
     const stored = this.overrides[conv.id] ?? {};
     return {
       provider: conv.provider ?? stored.provider,
       model: conv.model ?? stored.model,
-      chatMode: conv.chatMode ?? stored.chatMode,
+      chatMode: "agent",
       useRag: stored.useRag,
-      toolsEnabled: stored.toolsEnabled,
+      toolsEnabled: true,
       agentIds: conv.agentIds ?? stored.agentIds,
       skillIds: stored.skillIds,
       mcpServerIds: stored.mcpServerIds
@@ -1452,6 +1540,7 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
       this.messagesCache.delete(id);
       delete this.overrides[id];
       this.sessionKinds.delete(id);
+      this.consumedPipelineCards.delete(id);
       await this.persistOverrides();
       await this.persistSessionKinds();
       if (this.activeSessionId === id) this.activeSessionId = null;
@@ -1497,22 +1586,26 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     this.broadcastActiveSession();
   }
   async updateOverrides(id, overrides) {
+    const normalizedOverrides = { ...overrides };
+    delete normalizedOverrides.chatMode;
+    delete normalizedOverrides.toolsEnabled;
     if (id.startsWith("draft:") && this.draftSession?.id === id) {
-      this.draftSession.overrides = { ...this.draftSession.overrides, ...overrides };
+      this.draftSession.overrides = { ...this.draftSession.overrides, ...normalizedOverrides };
       this.draftSession.updatedAt = Date.now();
       this.broadcastSessions();
       this.broadcastActiveSession();
       return;
     }
     if (!this.conversations.has(id)) return;
-    const merged = { ...this.overrides[id] ?? {}, ...overrides };
+    const merged = { ...this.overrides[id] ?? {}, ...normalizedOverrides };
+    delete merged.chatMode;
+    delete merged.toolsEnabled;
     this.overrides[id] = merged;
     await this.persistOverrides();
     const patch = {};
-    if (overrides.provider) patch.provider = toWireProvider(overrides.provider);
-    if (overrides.model) patch.model = overrides.model;
-    if (overrides.chatMode) patch.chatMode = overrides.chatMode;
-    if (overrides.agentIds) patch.agentIds = overrides.agentIds;
+    if (normalizedOverrides.provider) patch.provider = toWireProvider(normalizedOverrides.provider);
+    if (normalizedOverrides.model) patch.model = normalizedOverrides.model;
+    if (normalizedOverrides.agentIds) patch.agentIds = normalizedOverrides.agentIds;
     if (Object.keys(patch).length > 0) {
       try {
         const updated = await patchConversation(id, patch);
@@ -1600,9 +1693,9 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     this.broadcastSessions();
     const overrides = session.overrides;
     const pipelineMode = !command && session.kind === "pipeline";
-    const chatMode = command ? command === "spec" ? "normal" : "agent" : pipelineMode ? "normal" : overrides.chatMode ?? settings.chatMode;
+    const chatMode = "agent";
     const useRag = overrides.useRag ?? settings.useRag;
-    const toolsEnabled = command ? command === "spec" ? overrides.toolsEnabled ?? settings.toolsEnabled : true : pipelineMode ? false : overrides.toolsEnabled ?? settings.toolsEnabled;
+    const toolsEnabled = true;
     const systemPrompt = command ? SPEC_SYSTEM_PROMPTS[command] : pipelineMode ? PIPELINE_INTERVIEW_SYSTEM_PROMPT : settings.systemPrompt || void 0;
     const body = {
       conversationId,
@@ -1666,7 +1759,7 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
         onToolEvent: handlers.onToolEvent,
         signal: abort.signal
       }).then((r) => ({ assistantMessage: { id: assistantMessage.id, content: r.content } })) : await streamChat(body, handlers, abort.signal);
-      const finalConversation = response.conversation;
+      const finalConversation = "conversation" in response ? response.conversation : void 0;
       if (finalConversation) this.conversations.set(finalConversation.id, finalConversation);
       if (response.assistantMessage?.id) assistantMessage.id = response.assistantMessage.id;
       if (response.assistantMessage?.content) {
@@ -1727,25 +1820,35 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
     const conv = this.conversations.get(id);
     return conv ? this.sessionFromConversation(conv) : null;
   }
+  async assignConversationToProject(conv) {
+    const conversationId = typeof conv === "string" ? conv : conv.id;
+    const existing = typeof conv === "string" ? this.conversations.get(conv) : conv;
+    if (this.project.source === "none") return existing ?? null;
+    await this.ensureProjectFolder();
+    if (!this.projectFolderId) return existing ?? null;
+    const folderName = this.projectFolder?.name ?? projectFolderName(this.project);
+    const projectTag = projectConversationTag(this.project);
+    const tags = [.../* @__PURE__ */ new Set([...existing?.tags ?? [], projectTag])];
+    try {
+      if (this.projectFolderId) {
+        await addConversationToFolder(this.projectFolderId, conversationId);
+      }
+    } catch (err) {
+      this.output.appendLine(`[chat.attachFolder] ${err instanceof Error ? err.message : String(err)}`);
+    }
+    try {
+      return await patchConversation(conversationId, { folder: folderName, tags });
+    } catch (err) {
+      this.output.appendLine(`[chat.tagFolder] ${err instanceof Error ? err.message : String(err)}`);
+      return existing ?? null;
+    }
+  }
   async createSessionConversation(firstMessage) {
     try {
       const title = deriveTitle(firstMessage);
       const conv = await createConversation(title);
-      if (this.projectFolderId) {
-        try {
-          await addConversationToFolder(this.projectFolderId, conv.id);
-        } catch (err) {
-          this.output.appendLine(`[chat.attachFolder] ${err instanceof Error ? err.message : String(err)}`);
-        }
-        const folderName = this.projectFolder?.name ?? projectFolderName(this.project);
-        try {
-          const patched = await patchConversation(conv.id, { folder: folderName });
-          return patched;
-        } catch (err) {
-          this.output.appendLine(`[chat.tagFolder] ${err instanceof Error ? err.message : String(err)}`);
-        }
-      }
-      return conv;
+      const assigned = await this.assignConversationToProject(conv);
+      return assigned ?? conv;
     } catch (err) {
       this.output.appendLine(`[chat.createConversation] ${err instanceof Error ? err.message : String(err)}`);
       this.broadcast({ type: "log", message: `Failed to create conversation: ${err instanceof Error ? err.message : err}` });
@@ -1879,6 +1982,13 @@ ${block}
     const conversationId = session.conversationId;
     const messages = this.messagesCache.get(conversationId) ?? [];
     const userPrompt = `Generate the requirements, design, and task contracts for the feature "${featureName}". Emit the marker [[FEATURE_NAME: ${slug}]] on the first line.`;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const candidate = messages[i];
+      if (candidate.role === "assistant" && candidate.content.includes("[[PIPELINE_READY:")) {
+        this.markPipelineCardConsumed(conversationId, candidate.id);
+        break;
+      }
+    }
     const userMessage = {
       id: `local:user:${randomId()}`,
       conversationId,
@@ -1903,13 +2013,13 @@ ${block}
       provider: resolved.provider,
       model: resolved.model,
       modelSelection: readSettings().modelSelection,
-      chatMode: "normal",
+      chatMode: "agent",
       content: userPrompt,
       systemPrompt: PIPELINE_GENERATE_SYSTEM_PROMPT,
       skillIds: [],
       documentIds: [],
       useRag: false,
-      toolsEnabled: false,
+      toolsEnabled: true,
       mcpServerIds: [],
       agentIds: [],
       maxAgentSpawns: this.catalog.maxAgentSpawns
@@ -2438,7 +2548,7 @@ function createThemeBridge(output) {
     }
     const mapped = VSCODE_TO_NEXUS[themeId];
     if (!mapped) return;
-    await apiFetch2("/api/theme", {
+    await apiFetch("/api/theme", {
       method: "PUT",
       body: JSON.stringify({ kind: "name", family: mapped.family, mode: mapped.mode, vsCodeThemeId: themeId, source: "vscode" })
     }).catch((error) => output.appendLine(`Theme publish error: ${error instanceof Error ? error.message : String(error)}`));

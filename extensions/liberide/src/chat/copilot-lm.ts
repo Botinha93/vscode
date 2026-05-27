@@ -99,7 +99,7 @@ export async function streamCopilotChat(input: {
       input.onToolEvent(done);
 
       messages.push(vscode.LanguageModelChatMessage.Assistant([call]));
-      messages.push(vscode.LanguageModelChatMessage.User([new vscode.LanguageModelToolResultPart(call.callId, result.result ?? "")]));
+      messages.push(vscode.LanguageModelChatMessage.User([new vscode.LanguageModelToolResultPart(call.callId, [result.result ?? ""])]));
       response = await runOnce();
     }
   }

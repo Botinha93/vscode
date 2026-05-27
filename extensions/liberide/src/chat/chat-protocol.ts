@@ -45,6 +45,8 @@ export interface ChatMessage {
   completedAt?: number;
   tools?: ToolTimelineEntry[];
   editedFiles?: EditedFileSummary[];
+  /** True when the inline pipeline-ready card on this message has already been acted on. */
+  pipelineCardConsumed?: boolean;
 }
 
 export interface ChatOverrides {
@@ -126,6 +128,7 @@ export type ChatHostToWebview =
   | { type: "messageComplete"; sessionId: string; messageId: string; conversationId?: string; completedAt: number }
   | { type: "messageError"; sessionId: string; messageId: string; error: string; completedAt: number }
   | { type: "toolUpdate"; sessionId: string; messageId: string; entry: ToolTimelineEntry; editedFiles: EditedFileSummary[] }
+  | { type: "project"; project: ProjectInfo }
   | { type: "log"; message: string };
 
 export type ChatWebviewToHost =
@@ -139,6 +142,7 @@ export type ChatWebviewToHost =
   | { type: "setOverrides"; sessionId: string; overrides: ChatOverrides }
   | { type: "setSessionKind"; sessionId: string; kind: ChatSessionKind }
   | { type: "generatePipeline"; sessionId: string; featureName: string }
+  | { type: "consumePipelineCard"; sessionId: string; messageId: string }
   | { type: "refreshCatalog" }
   | { type: "refreshSessions" }
   | { type: "updateSetting"; key: string; value: unknown }

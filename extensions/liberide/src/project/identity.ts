@@ -94,6 +94,16 @@ export function projectFolderName(identity: ProjectIdentity): string {
   return "workspace";
 }
 
+/** Tag stamped on conversations created from a LiberIDE workspace for reliable re-sync. */
+export function projectConversationTag(identity: ProjectIdentity): string {
+  return `ide-project:${identity.id}`;
+}
+
+export function conversationHasProjectTag(identity: ProjectIdentity, tags?: string[]): boolean {
+  if (!tags?.length || identity.source === "none") return false;
+  return tags.includes(projectConversationTag(identity));
+}
+
 /**
  * Display-friendly secondary label like "github.com/owner/repo" or "~/path".
  */
