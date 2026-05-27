@@ -35,9 +35,13 @@ import type {
   ChatOverrides,
   ChatSession,
   ChatWebviewToHost,
+  EditedFileSummary,
   ProjectInfo,
   SessionSummary,
+  ToolTimelineEntry,
 } from "./chat-protocol";
+import type { ToolCallEvent } from "./types";
+import { execFile } from "node:child_process";
 import { parseTaskContract } from "../spec/schema";
 import type { SpecStore } from "../spec/store";
 import { regenerateTasksIndex, writeTaskContract, writeTextFile } from "../spec/writer";
@@ -52,6 +56,9 @@ interface OverridesCache {
 interface ActiveStream {
   abort: AbortController;
   messageId: string;
+  startedAt: number;
+  tools: Map<string, ToolTimelineEntry>;
+  edits: Map<string, EditedFileSummary>;
 }
 
 export class ChatllmChatPanelController implements vscode.WebviewViewProvider, vscode.Disposable {
@@ -205,6 +212,12 @@ export class ChatllmChatPanelController implements vscode.WebviewViewProvider, v
           break;
         case "openPipeline":
           await vscode.commands.executeCommand("chatllm.openPipeline");
+          break;
+        case "revealFile":
+          await this.revealFile(message.path);
+          break;
+        case "undoEdit":
+          await this.undoEdit(message.path);
           break;
       }
     } catch (err) {
@@ -665,7 +678,21 @@ export class ChatllmChatPanelController implements vscode.WebviewViewProvider, v
     };
 
     const abort = new AbortController();
-    this.streams.set(conversationId, { abort, messageId: assistantMessage.id });
+    const streamStartedAt = Date.now();
+    const streamState: ActiveStream = {
+      abort,
+      messageId: assistantMessage.id,
+      startedAt: streamStartedAt,
+      tools: new Map(),
+      edits: new Map(),
+    };
+    this.streams.set(conversationId, streamState);
+    this.broadcast({
+      type: "messageStart",
+      sessionId: conversationId,
+      messageId: assistantMessage.id,
+      startedAt: streamStartedAt,
+    });
     let buffer = "";
     try {
       const response = await streamChat(
@@ -677,11 +704,14 @@ export class ChatllmChatPanelController implements vscode.WebviewViewProvider, v
             this.broadcast({ type: "messageAppend", sessionId: conversationId, messageId: assistantMessage.id, chunk: text });
           },
           onToolEvent: (event) => {
+            const update = applyToolEvent(streamState, event);
+            if (!update) return;
             this.broadcast({
-              type: "toolEvent",
+              type: "toolUpdate",
               sessionId: conversationId,
-              name: event.name,
-              arguments: event.arguments ?? {},
+              messageId: assistantMessage.id,
+              entry: update.entry,
+              editedFiles: update.editedFiles,
             });
           },
         },
@@ -711,6 +741,7 @@ export class ChatllmChatPanelController implements vscode.WebviewViewProvider, v
         sessionId: conversationId,
         messageId: assistantMessage.id,
         conversationId,
+        completedAt: Date.now(),
       });
       void this.refreshSingleConversation(conversationId);
     } catch (err) {
@@ -720,9 +751,21 @@ export class ChatllmChatPanelController implements vscode.WebviewViewProvider, v
         const note = `${buffer ? "\n\n" : ""}_Cancelled._`;
         assistantMessage.content = `${buffer}${note}`;
         this.broadcast({ type: "messageAppend", sessionId: conversationId, messageId: assistantMessage.id, chunk: note });
-        this.broadcast({ type: "messageComplete", sessionId: conversationId, messageId: assistantMessage.id, conversationId });
+        this.broadcast({
+          type: "messageComplete",
+          sessionId: conversationId,
+          messageId: assistantMessage.id,
+          conversationId,
+          completedAt: Date.now(),
+        });
       } else {
-        this.broadcast({ type: "messageError", sessionId: conversationId, messageId: assistantMessage.id, error: msg });
+        this.broadcast({
+          type: "messageError",
+          sessionId: conversationId,
+          messageId: assistantMessage.id,
+          error: msg,
+          completedAt: Date.now(),
+        });
       }
     } finally {
       this.streams.delete(conversationId);
@@ -775,6 +818,41 @@ export class ChatllmChatPanelController implements vscode.WebviewViewProvider, v
     }
   }
 
+  private async revealFile(relativePath: string): Promise<void> {
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+    if (!root) {
+      this.broadcast({ type: "log", message: "No workspace folder open." });
+      return;
+    }
+    const target = vscode.Uri.joinPath(root, relativePath.replace(/^\/+/, ""));
+    try {
+      const doc = await vscode.workspace.openTextDocument(target);
+      await vscode.window.showTextDocument(doc, { preview: false });
+    } catch (err) {
+      this.broadcast({ type: "log", message: `Could not open ${relativePath}: ${err instanceof Error ? err.message : err}` });
+    }
+  }
+
+  private async undoEdit(relativePath: string): Promise<void> {
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!root) {
+      this.broadcast({ type: "log", message: "No workspace folder open." });
+      return;
+    }
+    const clean = relativePath.replace(/^\/+/, "");
+    await new Promise<void>((resolve, reject) => {
+      execFile("git", ["checkout", "--", clean], { cwd: root, timeout: 15_000, windowsHide: true }, (err, _stdout, stderr) => {
+        if (err) reject(new Error(stderr || err.message));
+        else resolve();
+      });
+    }).then(async () => {
+      await this.revealFile(clean);
+      this.broadcast({ type: "log", message: `Reverted ${clean} to last git state.` });
+    }).catch((err) => {
+      this.broadcast({ type: "log", message: `Undo failed for ${clean}: ${err instanceof Error ? err.message : err}` });
+    });
+  }
+
   private async writeGeneratedTasks(text: string): Promise<number> {
     const feature = this.store.getActiveFeature();
     if (!feature?.tasksDirUri) return 0;
@@ -810,13 +888,14 @@ export class ChatllmChatPanelController implements vscode.WebviewViewProvider, v
   private renderHtml(webview: vscode.Webview): string {
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "chat.js"));
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "webview.css"));
+    const mermaidUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "mermaid.js"));
     const nonce = randomNonce();
     const csp = [
       `default-src 'none'`,
       `img-src ${webview.cspSource} https: data:`,
       `style-src ${webview.cspSource} 'unsafe-inline'`,
       `font-src ${webview.cspSource}`,
-      `script-src 'nonce-${nonce}'`,
+      `script-src 'nonce-${nonce}' ${webview.cspSource}`,
       `connect-src ${webview.cspSource}`,
     ].join("; ");
     return `<!DOCTYPE html>
@@ -829,7 +908,7 @@ export class ChatllmChatPanelController implements vscode.WebviewViewProvider, v
   <link rel="stylesheet" href="${styleUri}" />
 </head>
 <body class="chatllm-chat-body">
-  <div id="root"></div>
+  <div id="root" data-mermaid-src="${mermaidUri}"></div>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;
@@ -855,6 +934,123 @@ function deriveTitle(text: string): string {
   const firstLine = text.replace(/\s+/g, " ").trim();
   if (!firstLine) return "New chat";
   return firstLine.length > 60 ? `${firstLine.slice(0, 57)}\u2026` : firstLine;
+}
+
+function applyToolEvent(
+  stream: ActiveStream,
+  event: ToolCallEvent,
+): { entry: ToolTimelineEntry; editedFiles: EditedFileSummary[] } | null {
+  const now = Date.now();
+  const existing = stream.tools.get(event.id);
+  if (!existing) {
+    const entry: ToolTimelineEntry = {
+      id: event.id,
+      name: event.name,
+      arguments: event.arguments ?? {},
+      summary: summarizeTool(event.name, event.arguments ?? {}),
+      startedAt: event.createdAt ? Date.parse(event.createdAt) || now : now,
+      status: "running",
+    };
+    stream.tools.set(event.id, entry);
+    recordFileEdit(stream.edits, event.name, event.arguments ?? {}, event.result);
+    return { entry, editedFiles: [...stream.edits.values()] };
+  }
+
+  existing.completedAt = now;
+  if (event.result !== undefined) {
+    existing.result = event.result;
+    existing.status = looksLikeToolError(event.result) ? "error" : "complete";
+    if (existing.status === "error") existing.error = event.result.slice(0, 300);
+    recordFileEdit(stream.edits, event.name, event.arguments ?? {}, event.result);
+  }
+  return { entry: existing, editedFiles: [...stream.edits.values()] };
+}
+
+function summarizeTool(name: string, args: Record<string, unknown>): string {
+  const path = typeof args.path === "string" ? args.path : undefined;
+  switch (name) {
+    case "ide_write_file":
+      return path ? `Wrote \`${path}\`` : "Wrote file";
+    case "ide_edit_file":
+      return path ? `Edited \`${path}\`` : "Edited file";
+    case "ide_read_file":
+      return path ? `Read \`${path}\`` : "Read file";
+    case "ide_list_directory":
+      return path ? `Listed \`${path}\`` : "Listed directory";
+    case "ide_search_code":
+      return typeof args.query === "string" ? `Searched for "${truncate(args.query, 40)}"` : "Searched code";
+    case "ide_run_command":
+      return typeof args.command === "string" ? `Ran \`${truncate(args.command, 48)}\`` : "Ran command";
+    default:
+      return humanizeToolName(name);
+  }
+}
+
+function humanizeToolName(name: string): string {
+  return name.replace(/^ide_/, "").replace(/_/g, " ");
+}
+
+function truncate(value: string, max: number): string {
+  return value.length > max ? `${value.slice(0, max - 1)}\u2026` : value;
+}
+
+function looksLikeToolError(result: string): boolean {
+  const trimmed = result.trim();
+  if (!trimmed) return false;
+  if (trimmed.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(trimmed) as { error?: unknown; success?: boolean };
+      if (parsed.error === true || parsed.success === false) return true;
+    } catch {
+      // not json
+    }
+  }
+  return /^(error|failed|denied)/i.test(trimmed);
+}
+
+function recordFileEdit(
+  edits: Map<string, EditedFileSummary>,
+  name: string,
+  args: Record<string, unknown>,
+  result?: string,
+): void {
+  if (name !== "ide_write_file" && name !== "ide_edit_file") return;
+  const path = typeof args.path === "string" ? args.path : undefined;
+  if (!path) return;
+
+  const current = edits.get(path) ?? { path, writes: 0, edits: 0, additions: 0, deletions: 0 };
+  if (name === "ide_write_file") {
+    current.writes += 1;
+    const content = typeof args.content === "string" ? args.content : "";
+    const lines = content ? content.split("\n").length : 0;
+    current.additions += lines;
+  } else {
+    const editList = Array.isArray(args.edits) ? args.edits : [];
+    current.edits += editList.length;
+    for (const edit of editList) {
+      if (!edit || typeof edit !== "object") continue;
+      const oldText = typeof (edit as { oldText?: unknown }).oldText === "string" ? (edit as { oldText: string }).oldText : "";
+      const newText = typeof (edit as { newText?: unknown }).newText === "string" ? (edit as { newText: string }).newText : "";
+      current.additions += newText ? newText.split("\n").length : 0;
+      current.deletions += oldText ? oldText.split("\n").length : 0;
+    }
+  }
+
+  if (result && !looksLikeToolError(result)) {
+    const parsedStats = parseEditStatsFromResult(result);
+    if (parsedStats) {
+      current.additions = Math.max(current.additions, parsedStats.additions);
+      current.deletions = Math.max(current.deletions, parsedStats.deletions);
+    }
+  }
+
+  edits.set(path, current);
+}
+
+function parseEditStatsFromResult(result: string): { additions: number; deletions: number } | null {
+  const match = result.match(/(\+|\u002B)(\d+).*?(-|\u2212)(\d+)/);
+  if (!match) return null;
+  return { additions: Number(match[2]) || 0, deletions: Number(match[4]) || 0 };
 }
 
 function randomId(): string {

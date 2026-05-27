@@ -803,6 +803,7 @@ async function streamChat(body, handlers, signal) {
 }
 
 // src/chat/chat-panel.ts
+var import_node_child_process2 = require("node:child_process");
 var OVERRIDES_STORAGE_KEY = "chatllm.chat.overrides";
 var ACTIVE_SESSION_STORAGE_KEY = "chatllm.chat.activeSession";
 var ChatllmChatPanelController = class _ChatllmChatPanelController {
@@ -938,6 +939,12 @@ var ChatllmChatPanelController = class _ChatllmChatPanelController {
           break;
         case "openPipeline":
           await vscode5.commands.executeCommand("chatllm.openPipeline");
+          break;
+        case "revealFile":
+          await this.revealFile(message.path);
+          break;
+        case "undoEdit":
+          await this.undoEdit(message.path);
           break;
       }
     } catch (err) {
@@ -1352,7 +1359,21 @@ var ChatllmChatPanelController = class _ChatllmChatPanelController {
       maxAgentSpawns: this.catalog.maxAgentSpawns
     };
     const abort = new AbortController();
-    this.streams.set(conversationId, { abort, messageId: assistantMessage.id });
+    const streamStartedAt = Date.now();
+    const streamState = {
+      abort,
+      messageId: assistantMessage.id,
+      startedAt: streamStartedAt,
+      tools: /* @__PURE__ */ new Map(),
+      edits: /* @__PURE__ */ new Map()
+    };
+    this.streams.set(conversationId, streamState);
+    this.broadcast({
+      type: "messageStart",
+      sessionId: conversationId,
+      messageId: assistantMessage.id,
+      startedAt: streamStartedAt
+    });
     let buffer = "";
     try {
       const response = await streamChat(
@@ -1364,11 +1385,14 @@ var ChatllmChatPanelController = class _ChatllmChatPanelController {
             this.broadcast({ type: "messageAppend", sessionId: conversationId, messageId: assistantMessage.id, chunk: text });
           },
           onToolEvent: (event) => {
+            const update = applyToolEvent(streamState, event);
+            if (!update) return;
             this.broadcast({
-              type: "toolEvent",
+              type: "toolUpdate",
               sessionId: conversationId,
-              name: event.name,
-              arguments: event.arguments ?? {}
+              messageId: assistantMessage.id,
+              entry: update.entry,
+              editedFiles: update.editedFiles
             });
           }
         },
@@ -1399,7 +1423,8 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
         type: "messageComplete",
         sessionId: conversationId,
         messageId: assistantMessage.id,
-        conversationId
+        conversationId,
+        completedAt: Date.now()
       });
       void this.refreshSingleConversation(conversationId);
     } catch (err) {
@@ -1409,9 +1434,21 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
         const note = `${buffer ? "\n\n" : ""}_Cancelled._`;
         assistantMessage.content = `${buffer}${note}`;
         this.broadcast({ type: "messageAppend", sessionId: conversationId, messageId: assistantMessage.id, chunk: note });
-        this.broadcast({ type: "messageComplete", sessionId: conversationId, messageId: assistantMessage.id, conversationId });
+        this.broadcast({
+          type: "messageComplete",
+          sessionId: conversationId,
+          messageId: assistantMessage.id,
+          conversationId,
+          completedAt: Date.now()
+        });
       } else {
-        this.broadcast({ type: "messageError", sessionId: conversationId, messageId: assistantMessage.id, error: msg });
+        this.broadcast({
+          type: "messageError",
+          sessionId: conversationId,
+          messageId: assistantMessage.id,
+          error: msg,
+          completedAt: Date.now()
+        });
       }
     } finally {
       this.streams.delete(conversationId);
@@ -1460,6 +1497,39 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
       this.output.appendLine(`[chat.refresh] ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+  async revealFile(relativePath) {
+    const root = vscode5.workspace.workspaceFolders?.[0]?.uri;
+    if (!root) {
+      this.broadcast({ type: "log", message: "No workspace folder open." });
+      return;
+    }
+    const target = vscode5.Uri.joinPath(root, relativePath.replace(/^\/+/, ""));
+    try {
+      const doc = await vscode5.workspace.openTextDocument(target);
+      await vscode5.window.showTextDocument(doc, { preview: false });
+    } catch (err) {
+      this.broadcast({ type: "log", message: `Could not open ${relativePath}: ${err instanceof Error ? err.message : err}` });
+    }
+  }
+  async undoEdit(relativePath) {
+    const root = vscode5.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!root) {
+      this.broadcast({ type: "log", message: "No workspace folder open." });
+      return;
+    }
+    const clean = relativePath.replace(/^\/+/, "");
+    await new Promise((resolve, reject) => {
+      (0, import_node_child_process2.execFile)("git", ["checkout", "--", clean], { cwd: root, timeout: 15e3, windowsHide: true }, (err, _stdout, stderr) => {
+        if (err) reject(new Error(stderr || err.message));
+        else resolve();
+      });
+    }).then(async () => {
+      await this.revealFile(clean);
+      this.broadcast({ type: "log", message: `Reverted ${clean} to last git state.` });
+    }).catch((err) => {
+      this.broadcast({ type: "log", message: `Undo failed for ${clean}: ${err instanceof Error ? err.message : err}` });
+    });
+  }
   async writeGeneratedTasks(text) {
     const feature = this.store.getActiveFeature();
     if (!feature?.tasksDirUri) return 0;
@@ -1496,13 +1566,14 @@ ${block}
   renderHtml(webview) {
     const scriptUri = webview.asWebviewUri(vscode5.Uri.joinPath(this.context.extensionUri, "media", "chat.js"));
     const styleUri = webview.asWebviewUri(vscode5.Uri.joinPath(this.context.extensionUri, "media", "webview.css"));
+    const mermaidUri = webview.asWebviewUri(vscode5.Uri.joinPath(this.context.extensionUri, "media", "mermaid.js"));
     const nonce = randomNonce2();
     const csp = [
       `default-src 'none'`,
       `img-src ${webview.cspSource} https: data:`,
       `style-src ${webview.cspSource} 'unsafe-inline'`,
       `font-src ${webview.cspSource}`,
-      `script-src 'nonce-${nonce}'`,
+      `script-src 'nonce-${nonce}' ${webview.cspSource}`,
       `connect-src ${webview.cspSource}`
     ].join("; ");
     return `<!DOCTYPE html>
@@ -1515,7 +1586,7 @@ ${block}
   <link rel="stylesheet" href="${styleUri}" />
 </head>
 <body class="chatllm-chat-body">
-  <div id="root"></div>
+  <div id="root" data-mermaid-src="${mermaidUri}"></div>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;
@@ -1538,6 +1609,103 @@ function deriveTitle(text) {
   const firstLine = text.replace(/\s+/g, " ").trim();
   if (!firstLine) return "New chat";
   return firstLine.length > 60 ? `${firstLine.slice(0, 57)}\u2026` : firstLine;
+}
+function applyToolEvent(stream, event) {
+  const now = Date.now();
+  const existing = stream.tools.get(event.id);
+  if (!existing) {
+    const entry = {
+      id: event.id,
+      name: event.name,
+      arguments: event.arguments ?? {},
+      summary: summarizeTool(event.name, event.arguments ?? {}),
+      startedAt: event.createdAt ? Date.parse(event.createdAt) || now : now,
+      status: "running"
+    };
+    stream.tools.set(event.id, entry);
+    recordFileEdit(stream.edits, event.name, event.arguments ?? {}, event.result);
+    return { entry, editedFiles: [...stream.edits.values()] };
+  }
+  existing.completedAt = now;
+  if (event.result !== void 0) {
+    existing.result = event.result;
+    existing.status = looksLikeToolError(event.result) ? "error" : "complete";
+    if (existing.status === "error") existing.error = event.result.slice(0, 300);
+    recordFileEdit(stream.edits, event.name, event.arguments ?? {}, event.result);
+  }
+  return { entry: existing, editedFiles: [...stream.edits.values()] };
+}
+function summarizeTool(name, args) {
+  const path = typeof args.path === "string" ? args.path : void 0;
+  switch (name) {
+    case "ide_write_file":
+      return path ? `Wrote \`${path}\`` : "Wrote file";
+    case "ide_edit_file":
+      return path ? `Edited \`${path}\`` : "Edited file";
+    case "ide_read_file":
+      return path ? `Read \`${path}\`` : "Read file";
+    case "ide_list_directory":
+      return path ? `Listed \`${path}\`` : "Listed directory";
+    case "ide_search_code":
+      return typeof args.query === "string" ? `Searched for "${truncate(args.query, 40)}"` : "Searched code";
+    case "ide_run_command":
+      return typeof args.command === "string" ? `Ran \`${truncate(args.command, 48)}\`` : "Ran command";
+    default:
+      return humanizeToolName(name);
+  }
+}
+function humanizeToolName(name) {
+  return name.replace(/^ide_/, "").replace(/_/g, " ");
+}
+function truncate(value, max) {
+  return value.length > max ? `${value.slice(0, max - 1)}\u2026` : value;
+}
+function looksLikeToolError(result) {
+  const trimmed = result.trim();
+  if (!trimmed) return false;
+  if (trimmed.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed.error === true || parsed.success === false) return true;
+    } catch {
+    }
+  }
+  return /^(error|failed|denied)/i.test(trimmed);
+}
+function recordFileEdit(edits, name, args, result) {
+  if (name !== "ide_write_file" && name !== "ide_edit_file") return;
+  const path = typeof args.path === "string" ? args.path : void 0;
+  if (!path) return;
+  const current = edits.get(path) ?? { path, writes: 0, edits: 0, additions: 0, deletions: 0 };
+  if (name === "ide_write_file") {
+    current.writes += 1;
+    const content = typeof args.content === "string" ? args.content : "";
+    const lines = content ? content.split("\n").length : 0;
+    current.additions += lines;
+  } else {
+    const editList = Array.isArray(args.edits) ? args.edits : [];
+    current.edits += editList.length;
+    for (const edit of editList) {
+      if (!edit || typeof edit !== "object") continue;
+      const oldText = typeof edit.oldText === "string" ? edit.oldText : "";
+      const newText = typeof edit.newText === "string" ? edit.newText : "";
+      current.additions += newText ? newText.split("\n").length : 0;
+      current.deletions += oldText ? oldText.split("\n").length : 0;
+    }
+  }
+  if (result && !looksLikeToolError(result)) {
+    const parsedStats = parseEditStatsFromResult(result);
+    if (parsedStats) {
+      current.additions = Math.max(current.additions, parsedStats.additions);
+      current.deletions = Math.max(current.deletions, parsedStats.deletions);
+    }
+  }
+  edits.set(path, current);
+}
+function parseEditStatsFromResult(result) {
+  const match = result.match(/(\+|\u002B)(\d+).*?(-|\u2212)(\d+)/);
+  if (!match) return null;
+  return { additions: Number(match[2]) || 0, deletions: Number(match[4]) || 0 };
 }
 function randomId() {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);

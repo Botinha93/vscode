@@ -8,6 +8,10 @@ const CHATLLM_TO_VSCODE: Record<string, string> = {
   "cursor:dark": "Dark 2026",
   "github:light": "Light+",
   "github:dark": "Dark+",
+  // Nord doesn't ship its own built-in theme; the published color +
+  // tokenColor overrides repaint the workbench and syntax to Nord.
+  "nord:light": "Light Modern",
+  "nord:dark": "Dark Modern",
 };
 
 const VSCODE_TO_CHATLLM: Record<string, { family: string; mode: string }> = {
@@ -19,12 +23,24 @@ const VSCODE_TO_CHATLLM: Record<string, { family: string; mode: string }> = {
   "Dark 2026": { family: "cursor", mode: "dark" },
 };
 
+interface TextMateRule {
+  scope: string | string[];
+  settings: { foreground?: string; background?: string; fontStyle?: string };
+}
+
+interface TokenColorOverrides {
+  textMateRules: TextMateRule[];
+  semanticHighlighting?: boolean;
+  semanticTokenColors?: Record<string, string | { foreground?: string; fontStyle?: string }>;
+}
+
 type ThemeSnapshotPayload = {
   source?: string;
   vsCodeThemeId?: string;
   family?: string;
   mode?: string;
   colorOverrides?: Record<string, string>;
+  tokenColorOverrides?: TokenColorOverrides;
 };
 
 export function createThemeBridge(output: vscode.OutputChannel): vscode.Disposable {
@@ -34,6 +50,7 @@ export function createThemeBridge(output: vscode.OutputChannel): vscode.Disposab
   let disposed = false;
   let lastApplied: string | undefined;
   let lastOverridesKey: string | undefined;
+  let lastTokenOverridesKey: string | undefined;
 
   async function applyTheme(themeId?: string): Promise<void> {
     if (!themeId) return;
@@ -63,6 +80,34 @@ export function createThemeBridge(output: vscode.OutputChannel): vscode.Disposab
     await config.update("colorCustomizations", next, vscode.ConfigurationTarget.Global);
   }
 
+  /**
+   * Apply the Nord-aligned syntax palette published by the web app via
+   * `editor.tokenColorCustomizations`. The Chatllm palette flows in as a
+   * resolved `{ textMateRules, semanticHighlighting, semanticTokenColors }`
+   * object so we can write it through without inspecting the base theme.
+   * As with `applyColorOverrides`, theme-scoped customizations the user
+   * maintains by hand (`"[Dark Modern]": { … }`) are preserved.
+   */
+  async function applyTokenColorOverrides(overrides: TokenColorOverrides | undefined): Promise<void> {
+    if (!overrides || !overrides.textMateRules || overrides.textMateRules.length === 0) return;
+    const fingerprint = JSON.stringify(overrides);
+    if (fingerprint === lastTokenOverridesKey) return;
+    lastTokenOverridesKey = fingerprint;
+    const config = vscode.workspace.getConfiguration("editor");
+    const existing = (config.get<Record<string, unknown>>("tokenColorCustomizations") ?? {}) as Record<string, unknown>;
+    const next: Record<string, unknown> = {
+      textMateRules: overrides.textMateRules,
+      semanticHighlighting: overrides.semanticHighlighting ?? true,
+    };
+    if (overrides.semanticTokenColors) {
+      next.semanticTokenColors = overrides.semanticTokenColors;
+    }
+    for (const [key, value] of Object.entries(existing)) {
+      if (key.startsWith("[") && key.endsWith("]")) next[key] = value;
+    }
+    await config.update("tokenColorCustomizations", next, vscode.ConfigurationTarget.Global);
+  }
+
   async function publishTheme() {
     const themeId = vscode.workspace.getConfiguration("workbench").get<string>("colorTheme");
     if (!themeId || themeId === lastApplied) {
@@ -85,7 +130,9 @@ export function createThemeBridge(output: vscode.OutputChannel): vscode.Disposab
       if (payload.type !== "theme" || payload.snapshot?.source === "vscode") return;
       const snapshot = payload.snapshot;
       const themeId = snapshot?.vsCodeThemeId ?? CHATLLM_TO_VSCODE[`${snapshot?.family}:${snapshot?.mode}`];
-      void applyTheme(themeId).then(() => applyColorOverrides(snapshot?.colorOverrides));
+      void applyTheme(themeId)
+        .then(() => applyColorOverrides(snapshot?.colorOverrides))
+        .then(() => applyTokenColorOverrides(snapshot?.tokenColorOverrides));
     });
     ws.addEventListener("close", () => setTimeout(connect, 1000));
   }

@@ -11,6 +11,29 @@ import type {
 
 export type Role = "user" | "assistant";
 
+export interface ToolTimelineEntry {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+  /** Short, human-friendly summary line, e.g. "Edited `src/foo.ts`". */
+  summary?: string;
+  startedAt: number;
+  completedAt?: number;
+  status: "running" | "complete" | "error";
+  result?: string;
+  error?: string;
+}
+
+export interface EditedFileSummary {
+  path: string;
+  /** Number of full overwrites via ide_write_file. */
+  writes: number;
+  /** Number of search-and-replace edits via ide_edit_file. */
+  edits: number;
+  additions: number;
+  deletions: number;
+}
+
 export interface ChatMessage {
   id: string;
   role: Role;
@@ -18,6 +41,10 @@ export interface ChatMessage {
   createdAt: number;
   status?: "pending" | "streaming" | "complete" | "error";
   error?: string;
+  startedAt?: number;
+  completedAt?: number;
+  tools?: ToolTimelineEntry[];
+  editedFiles?: EditedFileSummary[];
 }
 
 export interface ChatOverrides {
@@ -90,10 +117,11 @@ export type ChatHostToWebview =
   | { type: "openSettings" }
   | { type: "sessions"; sessions: SessionSummary[]; activeSessionId: string | null }
   | { type: "session"; session: ChatSession }
+  | { type: "messageStart"; sessionId: string; messageId: string; startedAt: number }
   | { type: "messageAppend"; sessionId: string; messageId: string; chunk: string }
-  | { type: "messageComplete"; sessionId: string; messageId: string; conversationId?: string }
-  | { type: "messageError"; sessionId: string; messageId: string; error: string }
-  | { type: "toolEvent"; sessionId: string; name: string; arguments: Record<string, unknown> }
+  | { type: "messageComplete"; sessionId: string; messageId: string; conversationId?: string; completedAt: number }
+  | { type: "messageError"; sessionId: string; messageId: string; error: string; completedAt: number }
+  | { type: "toolUpdate"; sessionId: string; messageId: string; entry: ToolTimelineEntry; editedFiles: EditedFileSummary[] }
   | { type: "log"; message: string };
 
 export type ChatWebviewToHost =
@@ -109,4 +137,6 @@ export type ChatWebviewToHost =
   | { type: "refreshSessions" }
   | { type: "updateSetting"; key: string; value: unknown }
   | { type: "openSettings" }
-  | { type: "openPipeline" };
+  | { type: "openPipeline" }
+  | { type: "revealFile"; path: string }
+  | { type: "undoEdit"; path: string };

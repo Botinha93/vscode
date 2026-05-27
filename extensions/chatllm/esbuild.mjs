@@ -30,6 +30,15 @@ await Promise.all([
   }),
   esbuild.build({
     ...common,
+    entryPoints: [join(__dirname, "src/webview/mermaid-entry.ts")],
+    platform: "browser",
+    format: "iife",
+    globalName: "ChatllmMermaid",
+    outfile: join(__dirname, "media/mermaid.js"),
+    target: "es2022",
+  }),
+  esbuild.build({
+    ...common,
     entryPoints: [join(__dirname, "src/webview/pipeline-main.ts")],
     platform: "browser",
     format: "iife",

@@ -67,8 +67,19 @@ body {
 	--vscode-shadow-depth-y: 0 5px 10px -4px rgba(0, 0, 0, 0.04);
 
 	/* Chatllm chrome layout (mirrors web app shell) */
+	--chatllm-app-background: var(--vscode-titleBar-activeBackground, var(--vscode-statusBar-background, var(--vscode-editor-background)));
+	--chatllm-panel-background: var(--vscode-sideBar-background, var(--vscode-panel-background, var(--vscode-editor-background)));
+	--chatllm-chat-background: var(--vscode-editor-background, var(--vscode-editorPane-background));
 	--chatllm-chrome-gap: 6px;
 	--chatllm-chrome-radius: 10px;
+}
+
+.monaco-workbench,
+.monaco-workbench .monaco-grid-view,
+.monaco-workbench .monaco-grid-branch-node,
+.monaco-workbench .monaco-split-view2,
+.monaco-workbench .split-view-container {
+	background-color: var(--chatllm-app-background);
 }
 
 /* Disable panel/part shadows when the setting is off (preserves floating modals, notifications, etc.) */
@@ -363,11 +374,23 @@ body {
 
 .monaco-workbench .part.activitybar,
 .monaco-workbench .part.sidebar,
+.monaco-workbench .part.editor,
 .monaco-workbench .part.auxiliarybar,
 .monaco-workbench .part.panel {
 	box-sizing: border-box;
 	border-radius: var(--chatllm-chrome-radius);
 	border: none !important;
+}
+
+.monaco-workbench .part.activitybar,
+.monaco-workbench .part.sidebar,
+.monaco-workbench .part.auxiliarybar,
+.monaco-workbench .part.panel {
+	background-color: var(--chatllm-panel-background) !important;
+}
+
+.monaco-workbench .part.editor {
+	background-color: var(--chatllm-chat-background) !important;
 }
 
 .monaco-workbench .part.activitybar {
@@ -435,6 +458,16 @@ body {
 
 .monaco-workbench .part.titlebar,
 .monaco-workbench .part.titlebar.inactive {
+	background-color: var(--chatllm-app-background) !important;
 	height: 36px;
 	border: none;
+	box-shadow: none;
+}
+
+.monaco-workbench .part.statusbar {
+	background-color: var(--chatllm-app-background) !important;
+}
+
+.monaco-workbench .part.statusbar:not(:focus).status-border-top::after {
+	display: none;
 }
