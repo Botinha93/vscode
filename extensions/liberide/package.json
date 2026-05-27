@@ -153,6 +153,11 @@
           "id": "liberide",
           "title": "LiberIDE",
           "icon": "resources/liberide.svg"
+        },
+        {
+          "id": "liberide-pipeline",
+          "title": "LiberIDE Pipeline",
+          "icon": "resources/liberide-pipeline.svg"
         }
       ],
       "secondarySidebar": [
@@ -173,14 +178,16 @@
           "contextualTitle": "LiberIDE"
         }
       ],
-      "liberide": [
+      "liberide-pipeline": [
         {
           "type": "webview",
           "id": "liberide.pipeline",
           "name": "Pipeline",
-          "icon": "resources/liberide.svg",
-          "contextualTitle": "LiberIDE"
-        },
+          "icon": "resources/liberide-pipeline.svg",
+          "contextualTitle": "LiberIDE Pipeline"
+        }
+      ],
+      "liberide": [
         {
           "id": "liberide.specs",
           "name": "Specs"
