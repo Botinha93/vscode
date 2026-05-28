@@ -52,10 +52,10 @@ function loadIntegrationFile() {
     process.env.CHATLLM_INTEGRATION_FILE,
     integrationPath
   ].filter((p) => Boolean(p));
-  for (const path of candidates) {
+  for (const path2 of candidates) {
     try {
-      if ((0, import_node_fs.existsSync)(path)) {
-        cachedIntegration = JSON.parse((0, import_node_fs.readFileSync)(path, "utf8"));
+      if ((0, import_node_fs.existsSync)(path2)) {
+        cachedIntegration = JSON.parse((0, import_node_fs.readFileSync)(path2, "utf8"));
         return cachedIntegration;
       }
     } catch {
@@ -80,10 +80,10 @@ function authHeaders(extra) {
   if (token) headers.Authorization = `Bearer ${token}`;
   return headers;
 }
-async function apiFetch(path, init) {
+async function apiFetch(path2, init) {
   const origin = getApiOrigin();
   if (!origin) throw new Error("LIBERIDE_API_ORIGIN is not set.");
-  return fetch(path.startsWith("http") ? path : `${origin}${path}`, {
+  return fetch(path2.startsWith("http") ? path2 : `${origin}${path2}`, {
     ...init,
     headers: { ...authHeaders(), ...init?.headers }
   });
@@ -716,10 +716,10 @@ var vscode4 = __toESM(require("vscode"));
 var import_node_child_process = require("node:child_process");
 var import_node_crypto = require("node:crypto");
 function gitExec(args, cwd) {
-  return new Promise((resolve) => {
+  return new Promise((resolve2) => {
     (0, import_node_child_process.execFile)("git", args, { cwd, timeout: 5e3, windowsHide: true }, (err, stdout) => {
-      if (err) return resolve(null);
-      resolve(stdout.toString().trim());
+      if (err) return resolve2(null);
+      resolve2(stdout.toString().trim());
     });
   });
 }
@@ -1032,6 +1032,7 @@ async function buildToolStubs() {
     "ide_write_file",
     "ide_list_directory",
     "ide_search_code",
+    "terminal_run",
     "ide_run_command"
   ];
   return names.map((name) => ({
@@ -1040,10 +1041,23 @@ async function buildToolStubs() {
     inputSchema: { type: "object" }
   }));
 }
+function buildIdeContextForInvoke() {
+  const folder = vscode5.workspace.workspaceFolders?.[0];
+  if (!folder) return void 0;
+  return {
+    sessionId: `vscode-${folder.name}`,
+    userId: "default",
+    projectPath: folder.uri.fsPath,
+    mode: "desktop",
+    terminalExecutor: "client"
+  };
+}
 async function invokeBackendTool(body) {
+  const ideContext = buildIdeContextForInvoke();
   const response = await apiFetch("/api/tools/invoke", {
     method: "POST",
-    body: JSON.stringify(body)
+    headers: ideContext ? { "X-Terminal-Executor": "client" } : void 0,
+    body: JSON.stringify({ ...body, ideContext })
   });
   if (!response.ok) {
     const err = await response.text().catch(() => response.statusText);
@@ -1057,6 +1071,9 @@ async function invokeBackendTool(body) {
 async function streamChat(body, handlers, signal) {
   const response = await apiFetch("/api/chat/stream", {
     method: "POST",
+    headers: {
+      "X-Terminal-Executor": body.ideContext?.terminalExecutor === "client" ? "client" : "server"
+    },
     body: JSON.stringify(body),
     signal
   });
@@ -1075,6 +1092,9 @@ async function streamChat(body, handlers, signal) {
     const data = JSON.parse(dataLine);
     if (event === "token") handlers.onToken?.(data.token);
     if (event === "tool") handlers.onToolEvent?.(data);
+    if (event === "terminal_delegate") {
+      void handlers.onTerminalDelegate?.(data);
+    }
     if (event === "markdown") handlers.onMarkdown?.(data.content);
     if (event === "diff") handlers.onDiff?.(data);
     if (event === "plan") handlers.onPlan?.(data);
@@ -1096,11 +1116,87 @@ async function streamChat(body, handlers, signal) {
   return finalResponse;
 }
 
+// src/terminal/local-runner.ts
+var import_child_process = require("child_process");
+var path = __toESM(require("path"));
+var MAX_OUTPUT = 1e5;
+function truncate(text) {
+  if (text.length <= MAX_OUTPUT) return text;
+  return `${text.slice(0, MAX_OUTPUT)}
+... [output truncated]`;
+}
+function shellArgv(command) {
+  if (process.platform === "win32") {
+    const comspec = process.env.ComSpec ?? "cmd.exe";
+    return { argv: [comspec, "/d", "/s", "/c", command], cwd: "" };
+  }
+  const shell = process.env.SHELL ?? "/bin/sh";
+  return { argv: [shell, "-c", command], cwd: "" };
+}
+function runLocalTerminal(delegate) {
+  const cwd = path.resolve(delegate.cwd || delegate.projectPath);
+  const { argv } = shellArgv(delegate.command);
+  const timeoutMs = delegate.timeoutMs > 0 ? delegate.timeoutMs : 12e4;
+  return new Promise((resolve2) => {
+    const proc = (0, import_child_process.spawn)(argv[0], argv.slice(1), {
+      cwd,
+      env: {
+        ...process.env,
+        HOME: delegate.projectPath
+      },
+      windowsHide: true
+    });
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    proc.stdout?.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    proc.stderr?.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      proc.kill();
+    }, timeoutMs);
+    proc.on("close", (code) => {
+      clearTimeout(timer);
+      resolve2({
+        exitCode: code,
+        stdout: truncate(stdout),
+        stderr: truncate(stderr),
+        timedOut
+      });
+    });
+    proc.on("error", (err) => {
+      clearTimeout(timer);
+      resolve2({
+        exitCode: 1,
+        stdout: "",
+        stderr: err.message,
+        timedOut: false
+      });
+    });
+  });
+}
+
 // src/chat/chat-panel.ts
 var import_node_child_process2 = require("node:child_process");
 var import_node_path2 = require("node:path");
 var OVERRIDES_STORAGE_KEY = "liberide.chat.overrides";
 var ACTIVE_SESSION_STORAGE_KEY = "liberide.chat.activeSession";
+function toolActivityKind(name) {
+  if (name === "request_approval") return "approval";
+  if (name === "agent" || name === "agent_group" || name === "agent_result") return "agent";
+  if (name === "web") return "web";
+  if (name === "mcp" || name.startsWith("mcp_")) return "mcp";
+  if (name === "ide_read_file" || name === "ide_list_directory" || name === "read" || name === "find_symbol" || name === "find_references" || name === "find_implementations" || name === "find_callers" || name === "find_dependencies" || name === "find_test_for_file" || name === "find_related_code") {
+    return "reading";
+  }
+  if (name === "ide_search_code" || name === "search" || name === "recall") return "searching";
+  if (name === "ide_write_file" || name === "ide_edit_file" || name === "userspace" || name === "artifact") return "writing";
+  return "executing";
+}
 var LiberideChatPanelController = class _LiberideChatPanelController {
   constructor(context, store2, output) {
     this.context = context;
@@ -1726,6 +1822,18 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     if (!chosen) return null;
     return { provider: toWireProvider(chosen.provider), model: chosen.modelId };
   }
+  buildIdeContext(conversationId) {
+    const folder = vscode6.workspace.workspaceFolders?.[0];
+    if (!folder) return void 0;
+    return {
+      sessionId: `vscode-${folder.name}`,
+      userId: "default",
+      projectPath: folder.uri.fsPath,
+      mode: "desktop",
+      terminalExecutor: "client",
+      conversationId
+    };
+  }
   async sendChat(sessionId, content) {
     let session = this.findSession(sessionId);
     if (!session) return;
@@ -1802,7 +1910,8 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
       toolsEnabled,
       mcpServerIds: pipelineMode ? [] : overrides.mcpServerIds ?? [],
       agentIds: pipelineMode ? [] : overrides.agentIds ?? [],
-      maxAgentSpawns: this.catalog.maxAgentSpawns
+      maxAgentSpawns: this.catalog.maxAgentSpawns,
+      ideContext: this.buildIdeContext(conversationId)
     };
     const abort = new AbortController();
     const streamStartedAt = Date.now();
@@ -1838,6 +1947,21 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
             entry: update.entry,
             editedFiles: update.editedFiles
           });
+        },
+        onTerminalDelegate: async (delegate) => {
+          this.broadcast({
+            type: "log",
+            message: `Running command locally: ${delegate.command.slice(0, 72)}${delegate.command.length > 72 ? "\u2026" : ""}`
+          });
+          const result = await runLocalTerminal(delegate);
+          const complete = await apiFetch(`/api/ide/terminal/${encodeURIComponent(delegate.delegateId)}/complete`, {
+            method: "POST",
+            body: JSON.stringify(result)
+          });
+          if (!complete.ok) {
+            const errText = await complete.text().catch(() => complete.statusText);
+            throw new Error(errText || "Failed to report terminal output to API");
+          }
         }
       };
       const useLocalCopilot = body.provider === "copilot" && readSettings().copilotModelsEnabled && await listCopilotLmModels().then((m) => m.some((x) => x.modelId === body.model)).catch(() => false);
@@ -1988,10 +2112,10 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
       return;
     }
     const clean = relativePath.replace(/^\/+/, "");
-    await new Promise((resolve, reject) => {
+    await new Promise((resolve2, reject) => {
       (0, import_node_child_process2.execFile)("git", ["checkout", "--", clean], { cwd: root, timeout: 15e3, windowsHide: true }, (err, _stdout, stderr) => {
         if (err) reject(new Error(stderr || err.message));
-        else resolve();
+        else resolve2();
       });
     }).then(async () => {
       await this.revealFile(clean);
@@ -2380,6 +2504,7 @@ function applyToolEvent(stream, event) {
       id: event.id,
       name: event.name,
       arguments: event.arguments ?? {},
+      activityKind: toolActivityKind(event.name),
       summary: summarizeTool(event.name, event.arguments ?? {}),
       startedAt: event.createdAt ? Date.parse(event.createdAt) || now : now,
       status: "running"
@@ -2389,6 +2514,7 @@ function applyToolEvent(stream, event) {
     return { entry, editedFiles: [...stream.edits.values()] };
   }
   existing.completedAt = now;
+  existing.activityKind = existing.activityKind ?? toolActivityKind(existing.name);
   if (event.result !== void 0) {
     existing.result = event.result;
     existing.status = looksLikeToolError(event.result) ? "error" : "complete";
@@ -2398,20 +2524,21 @@ function applyToolEvent(stream, event) {
   return { entry: existing, editedFiles: [...stream.edits.values()] };
 }
 function summarizeTool(name, args) {
-  const path = typeof args.path === "string" ? args.path : void 0;
+  const path2 = typeof args.path === "string" ? args.path : void 0;
   switch (name) {
     case "ide_write_file":
-      return path ? `Wrote \`${path}\`` : "Wrote file";
+      return path2 ? `Wrote \`${path2}\`` : "Wrote file";
     case "ide_edit_file":
-      return path ? `Edited \`${path}\`` : "Edited file";
+      return path2 ? `Edited \`${path2}\`` : "Edited file";
     case "ide_read_file":
-      return path ? `Read \`${path}\`` : "Read file";
+      return path2 ? `Read \`${path2}\`` : "Read file";
     case "ide_list_directory":
-      return path ? `Listed \`${path}\`` : "Listed directory";
+      return path2 ? `Listed \`${path2}\`` : "Listed directory";
     case "ide_search_code":
-      return typeof args.query === "string" ? `Searched for "${truncate(args.query, 40)}"` : "Searched code";
+      return typeof args.query === "string" ? `Searched for "${truncate2(args.query, 40)}"` : "Searched code";
     case "ide_run_command":
-      return typeof args.command === "string" ? `Ran \`${truncate(args.command, 48)}\`` : "Ran command";
+    case "terminal_run":
+      return typeof args.command === "string" ? `Ran \`${truncate2(args.command, 48)}\`` : "Ran command";
     default:
       return humanizeToolName(name);
   }
@@ -2419,7 +2546,7 @@ function summarizeTool(name, args) {
 function humanizeToolName(name) {
   return name.replace(/^ide_/, "").replace(/_/g, " ");
 }
-function truncate(value, max) {
+function truncate2(value, max) {
   return value.length > max ? `${value.slice(0, max - 1)}\u2026` : value;
 }
 function looksLikeToolError(result) {
@@ -2436,9 +2563,9 @@ function looksLikeToolError(result) {
 }
 function recordFileEdit(edits, name, args, result) {
   if (name !== "ide_write_file" && name !== "ide_edit_file") return;
-  const path = typeof args.path === "string" ? args.path : void 0;
-  if (!path) return;
-  const current = edits.get(path) ?? { path, writes: 0, edits: 0, additions: 0, deletions: 0 };
+  const path2 = typeof args.path === "string" ? args.path : void 0;
+  if (!path2) return;
+  const current = edits.get(path2) ?? { path: path2, writes: 0, edits: 0, additions: 0, deletions: 0 };
   if (name === "ide_write_file") {
     current.writes += 1;
     const content = typeof args.content === "string" ? args.content : "";
@@ -2462,7 +2589,7 @@ function recordFileEdit(edits, name, args, result) {
       current.deletions = Math.max(current.deletions, parsedStats.deletions);
     }
   }
-  edits.set(path, current);
+  edits.set(path2, current);
 }
 function parseEditStatsFromResult(result) {
   const match = result.match(/(\+|\u002B)(\d+).*?(-|\u2212)(\d+)/);

@@ -15,6 +15,8 @@ export interface ToolTimelineEntry {
   id: string;
   name: string;
   arguments: Record<string, unknown>;
+  /** Category used for UI activity indicators. */
+  activityKind?: "reading" | "searching" | "writing" | "executing" | "agent" | "web" | "mcp" | "approval";
   /** Short, human-friendly summary line, e.g. "Edited `src/foo.ts`". */
   summary?: string;
   startedAt: number;

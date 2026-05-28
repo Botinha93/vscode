@@ -80,6 +80,34 @@ interface ActiveStream {
   edits: Map<string, EditedFileSummary>;
 }
 
+function toolActivityKind(name: string): ToolTimelineEntry["activityKind"] {
+  if (name === "request_approval") return "approval";
+  if (name === "agent" || name === "agent_group" || name === "agent_result") return "agent";
+  if (name === "web") return "web";
+  if (name === "mcp" || name.startsWith("mcp_")) return "mcp";
+
+  if (
+    name === "ide_read_file" ||
+    name === "ide_list_directory" ||
+    name === "read" ||
+    name === "find_symbol" ||
+    name === "find_references" ||
+    name === "find_implementations" ||
+    name === "find_callers" ||
+    name === "find_dependencies" ||
+    name === "find_test_for_file" ||
+    name === "find_related_code"
+  ) {
+    return "reading";
+  }
+
+  if (name === "ide_search_code" || name === "search" || name === "recall") return "searching";
+
+  if (name === "ide_write_file" || name === "ide_edit_file" || name === "userspace" || name === "artifact") return "writing";
+
+  return "executing";
+}
+
 export class LiberideChatPanelController implements vscode.WebviewViewProvider, vscode.Disposable {
   static readonly viewType = "liberide.chat";
 
@@ -1518,6 +1546,7 @@ function applyToolEvent(
       id: event.id,
       name: event.name,
       arguments: event.arguments ?? {},
+      activityKind: toolActivityKind(event.name),
       summary: summarizeTool(event.name, event.arguments ?? {}),
       startedAt: event.createdAt ? Date.parse(event.createdAt) || now : now,
       status: "running",
@@ -1528,6 +1557,7 @@ function applyToolEvent(
   }
 
   existing.completedAt = now;
+  existing.activityKind = existing.activityKind ?? toolActivityKind(existing.name);
   if (event.result !== undefined) {
     existing.result = event.result;
     existing.status = looksLikeToolError(event.result) ? "error" : "complete";

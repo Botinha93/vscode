@@ -874,6 +874,7 @@
         </header>
         <div class="chat-sidebar-actions">
           <button class="ghost-btn" id="sidebar-new">+  New chat</button>
+          <button class="ghost-btn" id="sidebar-history" title="Open chat history" aria-label="Open chat history">\u{1F4DC}  History</button>
         </div>
         <div class="chat-sidebar-list" id="session-list"></div>
         <footer class="chat-sidebar-footer">
@@ -881,6 +882,7 @@
         </footer>
       </aside>
       <div class="chat-main">
+        <div class="activity-topbar" id="activity-topbar" data-active="false"></div>
         <div class="project-bar" id="project-bar"></div>
         <div class="backend-banner" id="backend-banner" hidden></div>
         <section class="chat-transcript" id="transcript"></section>
@@ -891,6 +893,7 @@
             <div class="composer-toolbar" id="chip-row"></div>
           </div>
           <div class="composer-foot">
+            <div class="activity-composer-line" id="activity-composer-line" hidden></div>
             <button class="chip chip-foot" id="chip-rag" title="Use indexed documents (RAG)">
               <span class="chip-dot"></span>
               <span id="chip-rag-label">Work locally</span>
@@ -922,6 +925,10 @@
       applySidebar();
     });
     root.querySelector("#sidebar-new")?.addEventListener("click", () => send({ type: "newSession" }));
+    root.querySelector("#sidebar-history")?.addEventListener("click", () => {
+      state.sidebarOpen = true;
+      applySidebar();
+    });
     root.querySelector("#sidebar-refresh")?.addEventListener("click", () => send({ type: "refreshSessions" }));
     root.querySelector("#new-chat")?.addEventListener("click", () => send({ type: "newSession" }));
     root.querySelector("#header-pipeline")?.addEventListener("click", () => send({ type: "openPipeline" }));
@@ -1102,12 +1109,14 @@
     const messages = state.activeSession?.messages ?? [];
     if (messages.length === 0) {
       transcript.appendChild(renderEmptyState());
+      renderActivity();
       return;
     }
     for (const m of messages) {
       transcript.appendChild(renderMessage(m));
     }
     transcript.scrollTop = transcript.scrollHeight;
+    renderActivity();
   }
   function renderEmptyState() {
     const el = document.createElement("div");
@@ -1277,12 +1286,120 @@
       turn.appendChild(card);
     }
   }
+  function activityVerb(kind) {
+    switch (kind) {
+      case "thinking":
+        return "Thinking";
+      case "reading":
+        return "Reading";
+      case "searching":
+        return "Searching";
+      case "writing":
+        return "Editing";
+      case "executing":
+        return "Running";
+      case "agent":
+        return "Delegating";
+      case "web":
+        return "Fetching the web";
+      case "mcp":
+        return "Calling tool";
+      case "approval":
+        return "Awaiting approval";
+    }
+  }
+  function activityIcon(kind) {
+    switch (kind) {
+      case "thinking":
+        return `<span class="turn-indicator"></span>`;
+      case "reading":
+        return "\u{1F4C4}";
+      case "searching":
+        return "\u{1F50E}";
+      case "writing":
+        return "\u270E";
+      case "executing":
+        return "\u25B6";
+      case "agent":
+        return "\u2699";
+      case "web":
+        return "\u{1F310}";
+      case "mcp":
+        return "\u{1F50C}";
+      case "approval":
+        return "\u{1F6E1}";
+    }
+  }
+  function pickActivityDetail(name, args) {
+    const path = typeof args.path === "string" ? args.path : void 0;
+    if (path) return path;
+    if (name === "ide_search_code" && typeof args.query === "string") return truncateText(args.query, 80);
+    if (typeof args.url === "string") return args.url;
+    if (typeof args.command === "string") return truncateText(args.command, 80);
+    return void 0;
+  }
+  function truncateText(value, max) {
+    return value.length > max ? `${value.slice(0, max - 1)}\u2026` : value;
+  }
+  function activityFromTool(tool) {
+    const kind = tool.activityKind ?? "executing";
+    const verb = activityVerb(kind);
+    const detail = pickActivityDetail(tool.name, tool.arguments ?? {});
+    return { kind, verb, detail };
+  }
+  function activityFromMessage(message) {
+    if (message.role !== "assistant" || message.status !== "streaming") return null;
+    const running = (message.tools ?? []).find((t) => t.status === "running");
+    if (running) return activityFromTool(running);
+    return { kind: "thinking", verb: activityVerb("thinking") };
+  }
+  function currentActivity() {
+    if (!state.streaming) return null;
+    const session = state.activeSession;
+    if (!session) return null;
+    const streamingMessage = [...session.messages].reverse().find((m) => m.role === "assistant" && m.status === "streaming");
+    if (!streamingMessage) return null;
+    return activityFromMessage(streamingMessage);
+  }
+  function renderActivityPill(activity) {
+    const detail = activity.detail ? `<code class="activity-detail">${escapeHtml2(activity.detail)}</code>` : "";
+    return `
+    <div class="activity-pill" role="status" aria-live="polite">
+      <span class="activity-icon">${activityIcon(activity.kind)}</span>
+      <span class="activity-verb">${escapeHtml2(activity.verb)}</span>
+      ${detail}
+      <span class="activity-progress" aria-hidden="true"></span>
+    </div>
+  `;
+  }
+  function renderActivity() {
+    const activity = currentActivity();
+    const topbar = root.querySelector("#activity-topbar");
+    if (topbar) topbar.dataset.active = activity ? "true" : "false";
+    const line = root.querySelector("#activity-composer-line");
+    if (!line) return;
+    if (!activity) {
+      line.hidden = true;
+      line.innerHTML = "";
+      return;
+    }
+    line.hidden = false;
+    const detail = activity.detail ? `<code class="activity-detail">${escapeHtml2(activity.detail)}</code>` : "";
+    line.innerHTML = `
+    <span class="activity-icon">${activityIcon(activity.kind)}</span>
+    <span class="activity-verb">${escapeHtml2(activity.verb)}</span>
+    ${detail}
+    <span class="activity-progress" aria-hidden="true"></span>
+  `;
+  }
   function renderTimelineBlock(message) {
     const tools = message.tools ?? [];
     if (tools.length === 0 && message.status !== "streaming") return "";
     const duration = formatWorkDuration(message);
     const expanded = state.expandedTimelines.has(message.id) || message.status === "streaming";
     const chevron = expanded ? "\u25BE" : "\u25B8";
+    const activity = message.status === "streaming" ? activityFromMessage(message) : null;
+    const pill = activity ? renderActivityPill(activity) : "";
     const rows = tools.map((t) => {
       const icon = t.status === "running" ? `<span class="turn-indicator"></span>` : t.status === "error" ? "\u2717" : "\u2713";
       const label = escapeHtml2(t.summary ?? t.name);
@@ -1294,6 +1411,7 @@
       <span class="worked-chevron">${chevron}</span>
       <span class="worked-label">${escapeHtml2(duration)}</span>
     </button>
+    ${pill}
     ${body}
   `;
   }
@@ -2103,6 +2221,7 @@
             appendChunkInDom(msg.messageId, msg.chunk);
             updateAssistantMetaInDom(msg.messageId);
             renderComposer();
+            renderActivity();
           }
         }
         break;
@@ -2117,6 +2236,7 @@
             state.expandedTimelines.add(msg.messageId);
             if (msg.editedFiles.length > 0) state.expandedEditCards.add(msg.messageId);
             updateAssistantMetaInDom(msg.messageId);
+            renderActivity();
           }
         }
         break;
@@ -2131,6 +2251,7 @@
           if (m) rerenderMessageInDom(msg.messageId);
           state.streaming = false;
           renderComposer();
+          renderActivity();
         }
         break;
       case "messageError":
@@ -2145,6 +2266,7 @@
           if (m) rerenderMessageInDom(msg.messageId);
           state.streaming = false;
           renderComposer();
+          renderActivity();
         }
         break;
       case "log":

@@ -175,6 +175,7 @@ function shellHtml(): string {
         </footer>
       </aside>
       <div class="chat-main">
+        <div class="activity-topbar" id="activity-topbar" data-active="false"></div>
         <div class="project-bar" id="project-bar"></div>
         <div class="backend-banner" id="backend-banner" hidden></div>
         <section class="chat-transcript" id="transcript"></section>
@@ -185,6 +186,7 @@ function shellHtml(): string {
             <div class="composer-toolbar" id="chip-row"></div>
           </div>
           <div class="composer-foot">
+            <div class="activity-composer-line" id="activity-composer-line" hidden></div>
             <button class="chip chip-foot" id="chip-rag" title="Use indexed documents (RAG)">
               <span class="chip-dot"></span>
               <span id="chip-rag-label">Work locally</span>
@@ -426,12 +428,14 @@ function renderTranscript(): void {
   const messages = state.activeSession?.messages ?? [];
   if (messages.length === 0) {
     transcript.appendChild(renderEmptyState());
+    renderActivity();
     return;
   }
   for (const m of messages) {
     transcript.appendChild(renderMessage(m));
   }
   transcript.scrollTop = transcript.scrollHeight;
+  renderActivity();
 }
 
 function renderEmptyState(): HTMLElement {
@@ -623,12 +627,134 @@ function mountPipelineReadyCard(turn: HTMLElement, message: ChatMessage, feature
   }
 }
 
+type LiveActivityKind = NonNullable<ToolTimelineEntry["activityKind"]> | "thinking";
+type LiveActivity = { kind: LiveActivityKind; verb: string; detail?: string };
+
+function activityVerb(kind: LiveActivityKind): string {
+  switch (kind) {
+    case "thinking":
+      return "Thinking";
+    case "reading":
+      return "Reading";
+    case "searching":
+      return "Searching";
+    case "writing":
+      return "Editing";
+    case "executing":
+      return "Running";
+    case "agent":
+      return "Delegating";
+    case "web":
+      return "Fetching the web";
+    case "mcp":
+      return "Calling tool";
+    case "approval":
+      return "Awaiting approval";
+  }
+}
+
+function activityIcon(kind: LiveActivityKind): string {
+  switch (kind) {
+    case "thinking":
+      return `<span class="turn-indicator"></span>`;
+    case "reading":
+      return "📄";
+    case "searching":
+      return "🔎";
+    case "writing":
+      return "✎";
+    case "executing":
+      return "▶";
+    case "agent":
+      return "⚙";
+    case "web":
+      return "🌐";
+    case "mcp":
+      return "🔌";
+    case "approval":
+      return "🛡";
+  }
+}
+
+function pickActivityDetail(name: string, args: Record<string, unknown>): string | undefined {
+  const path = typeof args.path === "string" ? args.path : undefined;
+  if (path) return path;
+  if (name === "ide_search_code" && typeof args.query === "string") return truncateText(args.query, 80);
+  if (typeof args.url === "string") return args.url;
+  if (typeof args.command === "string") return truncateText(args.command, 80);
+  return undefined;
+}
+
+function truncateText(value: string, max: number): string {
+  return value.length > max ? `${value.slice(0, max - 1)}…` : value;
+}
+
+function activityFromTool(tool: ToolTimelineEntry): LiveActivity {
+  const kind: LiveActivityKind = tool.activityKind ?? "executing";
+  const verb = activityVerb(kind);
+  const detail = pickActivityDetail(tool.name, tool.arguments ?? {});
+  return { kind, verb, detail };
+}
+
+function activityFromMessage(message: ChatMessage): LiveActivity | null {
+  if (message.role !== "assistant" || message.status !== "streaming") return null;
+  const running = (message.tools ?? []).find((t) => t.status === "running");
+  if (running) return activityFromTool(running);
+  return { kind: "thinking", verb: activityVerb("thinking") };
+}
+
+function currentActivity(): LiveActivity | null {
+  if (!state.streaming) return null;
+  const session = state.activeSession;
+  if (!session) return null;
+  const streamingMessage = [...session.messages].reverse().find((m) => m.role === "assistant" && m.status === "streaming");
+  if (!streamingMessage) return null;
+  return activityFromMessage(streamingMessage);
+}
+
+function renderActivityPill(activity: LiveActivity): string {
+  const detail = activity.detail ? `<code class="activity-detail">${escapeHtml(activity.detail)}</code>` : "";
+  return `
+    <div class="activity-pill" role="status" aria-live="polite">
+      <span class="activity-icon">${activityIcon(activity.kind)}</span>
+      <span class="activity-verb">${escapeHtml(activity.verb)}</span>
+      ${detail}
+      <span class="activity-progress" aria-hidden="true"></span>
+    </div>
+  `;
+}
+
+function renderActivity(): void {
+  const activity = currentActivity();
+
+  const topbar = root.querySelector<HTMLDivElement>("#activity-topbar");
+  if (topbar) topbar.dataset.active = activity ? "true" : "false";
+
+  const line = root.querySelector<HTMLDivElement>("#activity-composer-line");
+  if (!line) return;
+  if (!activity) {
+    line.hidden = true;
+    line.innerHTML = "";
+    return;
+  }
+  line.hidden = false;
+  const detail = activity.detail ? `<code class="activity-detail">${escapeHtml(activity.detail)}</code>` : "";
+  line.innerHTML = `
+    <span class="activity-icon">${activityIcon(activity.kind)}</span>
+    <span class="activity-verb">${escapeHtml(activity.verb)}</span>
+    ${detail}
+    <span class="activity-progress" aria-hidden="true"></span>
+  `;
+}
+
 function renderTimelineBlock(message: ChatMessage): string {
   const tools = message.tools ?? [];
   if (tools.length === 0 && message.status !== "streaming") return "";
   const duration = formatWorkDuration(message);
   const expanded = state.expandedTimelines.has(message.id) || message.status === "streaming";
   const chevron = expanded ? "\u25BE" : "\u25B8";
+  const activity = message.status === "streaming" ? activityFromMessage(message) : null;
+  const pill = activity ? renderActivityPill(activity) : "";
   const rows = tools.map((t) => {
     const icon = t.status === "running" ? `<span class="turn-indicator"></span>` : t.status === "error" ? "\u2717" : "\u2713";
     const label = escapeHtml(t.summary ?? t.name);
@@ -644,6 +770,7 @@ function renderTimelineBlock(message: ChatMessage): string {
       <span class="worked-chevron">${chevron}</span>
       <span class="worked-label">${escapeHtml(duration)}</span>
     </button>
+    ${pill}
     ${body}
   `;
 }
@@ -1549,6 +1676,7 @@ function handleMessage(msg: ChatHostToWebview): void {
           appendChunkInDom(msg.messageId, msg.chunk);
           updateAssistantMetaInDom(msg.messageId);
           renderComposer();
+          renderActivity();
         }
       }
       break;
@@ -1563,6 +1691,7 @@ function handleMessage(msg: ChatHostToWebview): void {
           state.expandedTimelines.add(msg.messageId);
           if (msg.editedFiles.length > 0) state.expandedEditCards.add(msg.messageId);
           updateAssistantMetaInDom(msg.messageId);
+          renderActivity();
         }
       }
       break;
@@ -1577,6 +1706,7 @@ function handleMessage(msg: ChatHostToWebview): void {
         if (m) rerenderMessageInDom(msg.messageId);
         state.streaming = false;
         renderComposer();
+        renderActivity();
       }
       break;
     case "messageError":
@@ -1591,6 +1721,7 @@ function handleMessage(msg: ChatHostToWebview): void {
         if (m) rerenderMessageInDom(msg.messageId);
         state.streaming = false;
         renderComposer();
+        renderActivity();
       }
       break;
     case "log":
