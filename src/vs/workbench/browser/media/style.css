@@ -478,5 +478,5 @@ body {
 	display: none;
 }
 .monaco-pane-view .pane > .pane-body {
-	background-color: var(--chatllm-panel-background) !important;
+	background-color: var(--chatllm-chat-background) !important;
 }

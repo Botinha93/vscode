@@ -1,5 +1,5 @@
 import { apiFetch } from "../api";
-import type { ChatRequest, ChatResponse, ToolCallEvent } from "./types";
+import type { ChatRequest, ChatResponse, TerminalDelegateEvent, ToolCallEvent } from "./types";
 
 export async function streamChat(
   body: ChatRequest,
@@ -11,11 +11,15 @@ export async function streamChat(
     onPlan?: (payload: Record<string, unknown>) => void;
     onTodo?: (payload: Record<string, unknown>) => void;
     onFollowUp?: (payload: Record<string, unknown>) => void;
+    onTerminalDelegate?: (payload: TerminalDelegateEvent) => void | Promise<void>;
   },
   signal?: AbortSignal,
 ): Promise<ChatResponse> {
   const response = await apiFetch("/api/chat/stream", {
     method: "POST",
+    headers: {
+      "X-Terminal-Executor": body.ideContext?.terminalExecutor === "client" ? "client" : "server",
+    },
     body: JSON.stringify(body),
     signal,
   });
@@ -36,6 +40,9 @@ export async function streamChat(
     const data = JSON.parse(dataLine) as unknown;
     if (event === "token") handlers.onToken?.((data as { token: string }).token);
     if (event === "tool") handlers.onToolEvent?.(data as ToolCallEvent);
+    if (event === "terminal_delegate") {
+      void handlers.onTerminalDelegate?.(data as TerminalDelegateEvent);
+    }
     if (event === "markdown") handlers.onMarkdown?.((data as { content: string }).content);
     if (event === "diff") handlers.onDiff?.(data as Record<string, unknown>);
     if (event === "plan") handlers.onPlan?.(data as Record<string, unknown>);

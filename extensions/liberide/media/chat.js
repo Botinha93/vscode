@@ -1,5 +1,93 @@
 "use strict";
 (() => {
+  // ../../../packages/shared/src/chat-commands.ts
+  var CHAT_SLASH_COMMAND_DEFINITIONS = [
+    {
+      id: "image",
+      label: "/image",
+      description: "Generate an image from a prompt",
+      descriptionI18nKey: "slash.image",
+      insert: "/image ",
+      surfaces: ["web", "ide"]
+    },
+    {
+      id: "skill",
+      label: "/skill",
+      description: "Create a reusable skill from a prompt",
+      descriptionI18nKey: "slash.skill",
+      insert: "/skill Create a reusable skill that ",
+      surfaces: ["web", "ide"]
+    },
+    {
+      id: "agent-create",
+      label: "/agent create",
+      description: "Create a reusable specialist agent",
+      descriptionI18nKey: "slash.agentCreate",
+      insert: "/agent create an agent that ",
+      surfaces: ["web", "ide"]
+    },
+    {
+      id: "agent-spawn",
+      label: "/agent spawn",
+      description: "Run a configured agent with a prompt",
+      descriptionI18nKey: "slash.agentSpawn",
+      insert: "/agent spawn ",
+      surfaces: ["web", "ide"]
+    },
+    {
+      id: "spec",
+      label: "/spec",
+      description: "Draft EARS-style feature requirements",
+      insert: "/spec ",
+      surfaces: ["ide"]
+    },
+    {
+      id: "design",
+      label: "/design",
+      description: "Draft design notes from requirements",
+      insert: "/design ",
+      surfaces: ["ide"]
+    },
+    {
+      id: "tasks",
+      label: "/tasks",
+      description: "Generate task contracts from design",
+      insert: "/tasks ",
+      surfaces: ["ide"]
+    }
+  ];
+  function parseSlashQuery(content) {
+    const trimmed = content.trimStart();
+    if (!trimmed.startsWith("/") || trimmed.includes("\n")) return "";
+    return trimmed.slice(1).toLowerCase();
+  }
+  function matchesSlashQuery(label, slashQuery) {
+    if (!slashQuery) return true;
+    return label.slice(1).toLowerCase().startsWith(slashQuery);
+  }
+  function buildChatSlashCommands(options) {
+    const { surface, agents = [], slashQuery = "", translate } = options;
+    const resolveDescription = (definition) => {
+      if (translate && definition.descriptionI18nKey) {
+        return translate(definition.descriptionI18nKey);
+      }
+      return definition.description;
+    };
+    const staticCommands = CHAT_SLASH_COMMAND_DEFINITIONS.filter((definition) => definition.surfaces.includes(surface)).map(
+      (definition) => ({
+        label: definition.label,
+        description: resolveDescription(definition),
+        insert: definition.insert
+      })
+    );
+    const agentCommands = surface === "web" || surface === "ide" ? agents.map((agent) => ({
+      label: `/agent spawn ${agent.id}`,
+      description: agent.description,
+      insert: `/agent spawn ${agent.id} `
+    })) : [];
+    return [...staticCommands, ...agentCommands].filter((command) => matchesSlashQuery(command.label, slashQuery));
+  }
+
   // src/webview/highlight.ts
   var KEYWORDS_JS = /* @__PURE__ */ new Set([
     "abstract",
@@ -1393,24 +1481,37 @@
     const hints = root.querySelector("#composer-hints");
     if (!hints) return;
     const draft = state.draft.trimStart();
-    if (draft.startsWith("/")) {
-      const matches = ["/spec", "/design", "/tasks"].filter((c) => c.startsWith(draft.split(/\s/)[0]));
-      if (matches.length) {
-        hints.innerHTML = matches.map((c) => `<button class="hint" data-cmd="${c}">${c}</button>`).join("");
-        for (const b of hints.querySelectorAll(".hint")) {
-          b.addEventListener("click", () => {
-            const composer = root.querySelector("#composer");
-            composer.value = (b.dataset.cmd ?? "") + " ";
-            composer.focus();
-            state.draft = composer.value;
-            autosize(composer);
-            renderComposerHints();
-          });
-        }
-        return;
-      }
+    if (!draft.startsWith("/")) {
+      hints.innerHTML = "";
+      return;
     }
-    hints.innerHTML = "";
+    const commands = buildChatSlashCommands({
+      surface: "ide",
+      agents: state.catalog.agents,
+      slashQuery: parseSlashQuery(state.draft)
+    });
+    if (!commands.length) {
+      hints.innerHTML = "";
+      return;
+    }
+    hints.innerHTML = commands.slice(0, 8).map(
+      (command) => `
+        <button class="hint" data-insert="${escapeAttr(command.insert)}" title="${escapeAttr(command.description)}">
+          <span class="hint-label">${escapeHtml2(command.label)}</span>
+          <span class="hint-description">${escapeHtml2(command.description)}</span>
+        </button>
+      `
+    ).join("");
+    for (const button of hints.querySelectorAll(".hint")) {
+      button.addEventListener("click", () => {
+        const composer = root.querySelector("#composer");
+        composer.value = button.dataset.insert ?? "";
+        composer.focus();
+        state.draft = composer.value;
+        autosize(composer);
+        renderComposerHints();
+      });
+    }
   }
   function renderModelPicker() {
     const el = root.querySelector("#model-picker");
@@ -1536,30 +1637,11 @@
     <label for="set-system">Local system prompt</label>
     <textarea id="set-system" data-key="systemPrompt" placeholder="(empty)">${escapeHtml2(s.systemPrompt)}</textarea>
 
-    <h2>Integrations</h2>
-    <label for="set-copilot">GitHub Copilot</label>
-    <div>
-      <div>
-        <input id="set-copilot-models" data-key="copilot.modelsEnabled" type="checkbox" ${s.copilotModelsEnabled ? "checked" : ""} />
-        <span class="hint inline">Enable Copilot model access (vscode.lm). Native Copilot UI stays hidden.</span>
-      </div>
-      <div>
-        <input id="set-copilot-ui" data-key="copilot.enabled" type="checkbox" ${s.copilotUiEnabled ? "checked" : ""} />
-        <span class="hint inline">Re-enable native Copilot UI. Toggling prompts a window reload.</span>
-      </div>
-      <div style="margin-top: 8px">
-        <button class="btn" id="copilot-github-login" type="button">Sign in to GitHub for Copilot</button>
-        <span class="hint inline">Uses VS Code GitHub auth, then links it to ChatLLM.</span>
-      </div>
-    </div>
-
-    <div class="hint">Models, agents, MCP servers, and skills are managed in the LiberIDE app. Per-chat picks are stored on the conversation.</div>
+    <div class="hint">Models, agents, MCP servers, and skills are managed in VoxChat settings. Per-chat picks are stored on the conversation.</div>
   `;
     for (const input of grid.querySelectorAll("[data-key]")) {
       input.addEventListener("change", () => emitSettingChange(input));
     }
-    const loginBtn = grid.querySelector("#copilot-github-login");
-    if (loginBtn) loginBtn.addEventListener("click", () => send({ type: "copilotGithubLogin" }));
   }
   function emitSettingChange(input) {
     const key = input.dataset.key;

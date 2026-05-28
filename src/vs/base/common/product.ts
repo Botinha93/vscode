@@ -115,6 +115,8 @@ export interface IProductConfiguration {
 		readonly extensionUrlTemplate: string;
 		readonly resourceUrlTemplate: string;
 		readonly nlsBaseUrl: string;
+		readonly itemUrl?: string;
+		readonly publisherUrl?: string;
 		readonly accessSKUs?: string[];
 	};
 

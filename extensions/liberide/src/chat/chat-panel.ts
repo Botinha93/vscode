@@ -23,6 +23,7 @@ import {
   projectFolderName,
   type ProjectIdentity,
 } from "../project/identity";
+import { detectIdeSpecSlashCommand } from "@nexus/shared";
 import {
   PIPELINE_GENERATE_SYSTEM_PROMPT,
   PIPELINE_INTERVIEW_SYSTEM_PROMPT,
@@ -32,9 +33,12 @@ import {
 import { defaultEnabledModel, findConfiguredModel, toWireProvider } from "./models";
 import { listCopilotLmModels, streamCopilotChat } from "./copilot-lm";
 import { streamChat } from "./stream-client";
+import { runLocalTerminal } from "../terminal/local-runner";
 import type {
   AppConfig,
   ChatRequest,
+  IdeToolContextPayload,
+  TerminalDelegateEvent,
   ConfiguredProvider,
   Conversation,
   ConversationMessage,
@@ -91,6 +95,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
 
   private conversations = new Map<string, Conversation>();
   private messagesCache = new Map<string, ConversationMessage[]>();
+  private attachmentBytes = new Map<string, { data: Uint8Array; mimeType: string; name: string }>();
   private overrides: OverridesCache = {};
   private sessionKinds = new Map<string, ChatSession["kind"]>();
   /** conversationId -> set of message ids whose pipeline-ready card has been consumed. */
@@ -689,6 +694,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
         const name = basename(uri.fsPath);
         const document = await uploadDocument({ name, bytes });
         uploadedIds.push(document.id);
+        this.attachmentBytes.set(document.id, { data: bytes, mimeType: document.mimeType, name: document.name });
         if (!this.catalog.documents.some((entry) => entry.id === document.id)) {
           this.catalog = { ...this.catalog, documents: [document, ...this.catalog.documents] };
         }
@@ -761,16 +767,6 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
   // Sending chat
   // ---------------------------------------------------------------------------
 
-  private detectCommand(content: string): { command?: "spec" | "design" | "tasks"; rest: string } {
-    const trimmed = content.trimStart();
-    const match = trimmed.match(/^\/(spec|design|tasks)(\s|$)/);
-    if (!match) return { rest: content };
-    return {
-      command: match[1] as "spec" | "design" | "tasks",
-      rest: trimmed.slice(match[0].length).trimStart(),
-    };
-  }
-
   private resolveProviderModel(overrides: ChatOverrides): { provider: Provider; model: string } | null {
     const fromOverride = overrides.provider && overrides.model
       ? findConfiguredModel(this.catalog.models, overrides.provider, overrides.model)
@@ -778,6 +774,19 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     const chosen = fromOverride ?? defaultEnabledModel(this.catalog.models);
     if (!chosen) return null;
     return { provider: toWireProvider(chosen.provider), model: chosen.modelId };
+  }
+
+  private buildIdeContext(conversationId: string): IdeToolContextPayload | undefined {
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    if (!folder) return undefined;
+    return {
+      sessionId: `vscode-${folder.name}`,
+      userId: "default",
+      projectPath: folder.uri.fsPath,
+      mode: "desktop",
+      terminalExecutor: "client",
+      conversationId,
+    };
   }
 
   private async sendChat(sessionId: string, content: string): Promise<void> {
@@ -822,7 +831,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
 
     const conversationId = conversation.id;
     const settings = readSettings();
-    const { command, rest } = this.detectCommand(content);
+    const { command, rest } = detectIdeSpecSlashCommand(content);
     const messages = this.messagesCache.get(conversationId) ?? [];
 
     const userMessage: ConversationMessage = {
@@ -872,6 +881,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       mcpServerIds: pipelineMode ? [] : (overrides.mcpServerIds ?? []),
       agentIds: pipelineMode ? [] : (overrides.agentIds ?? []),
       maxAgentSpawns: this.catalog.maxAgentSpawns,
+      ideContext: this.buildIdeContext(conversationId),
     };
 
     const abort = new AbortController();
@@ -909,12 +919,32 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
             editedFiles: update.editedFiles,
           });
         },
+        onTerminalDelegate: async (delegate: TerminalDelegateEvent) => {
+          this.broadcast({
+            type: "log",
+            message: `Running command locally: ${delegate.command.slice(0, 72)}${delegate.command.length > 72 ? "…" : ""}`,
+          });
+          const result = await runLocalTerminal(delegate);
+          const complete = await apiFetch(`/api/ide/terminal/${encodeURIComponent(delegate.delegateId)}/complete`, {
+            method: "POST",
+            body: JSON.stringify(result),
+          });
+          if (!complete.ok) {
+            const errText = await complete.text().catch(() => complete.statusText);
+            throw new Error(errText || "Failed to report terminal output to API");
+          }
+        },
       };
 
       const useLocalCopilot =
         body.provider === "copilot" &&
         readSettings().copilotModelsEnabled &&
         (await listCopilotLmModels().then((m) => m.some((x) => x.modelId === body.model)).catch(() => false));
+      const copilotAttachments = useLocalCopilot
+        ? body.documentIds
+            .map((id) => this.attachmentBytes.get(id))
+            .filter((entry): entry is { data: Uint8Array; mimeType: string; name: string } => !!entry)
+        : [];
       const response = useLocalCopilot
         ? await streamCopilotChat({
             modelId: body.model,
@@ -923,10 +953,17 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
               .map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
             prompt: body.content,
             toolsEnabled: body.toolsEnabled,
+            attachments: copilotAttachments,
             onToken: handlers.onToken,
             onToolEvent: handlers.onToolEvent,
             signal: abort.signal,
-          }).then((r) => ({ assistantMessage: { id: assistantMessage.id, content: r.content } }))
+          }).then((r) => {
+            if (r.skippedAttachments.length) {
+              const names = r.skippedAttachments.map((a) => a.name).join(", ");
+              this.broadcast({ type: "log", message: `Copilot model ignored unsupported attachments: ${names}.` });
+            }
+            return { assistantMessage: { id: assistantMessage.id, content: r.content } };
+          })
         : await streamChat(body, handlers, abort.signal);
 
       const finalConversation = "conversation" in response ? response.conversation as Conversation | undefined : undefined;
@@ -1514,6 +1551,7 @@ function summarizeTool(name: string, args: Record<string, unknown>): string {
     case "ide_search_code":
       return typeof args.query === "string" ? `Searched for "${truncate(args.query, 40)}"` : "Searched code";
     case "ide_run_command":
+    case "terminal_run":
       return typeof args.command === "string" ? `Ran \`${truncate(args.command, 48)}\`` : "Ran command";
     default:
       return humanizeToolName(name);

@@ -147,7 +147,12 @@ button { font: inherit; }
   letter-spacing: 0.02em;
   border-bottom: 1px solid var(--chatllm-border);
 }
-.chat-sidebar-actions { padding: 8px 8px 4px; }
+.chat-sidebar-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 8px 4px;
+}
 .chat-sidebar-list {
   flex: 1;
   overflow-y: auto;
@@ -1020,13 +1025,30 @@ button { font: inherit; }
   flex: 1;
 }
 .composer-hints .hint {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  max-width: 220px;
   background: var(--chatllm-bg-soft);
   border: 1px solid var(--chatllm-border);
   border-radius: 6px;
-  padding: 2px 8px;
+  padding: 4px 8px;
   font-size: 0.78em;
   cursor: pointer;
   color: var(--vscode-foreground);
+  text-align: left;
+}
+.composer-hints .hint-label {
+  font-weight: 600;
+}
+.composer-hints .hint-description {
+  font-size: 0.92em;
+  color: var(--chatllm-muted-fg, var(--vscode-descriptionForeground));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
 }
 .composer-hints .hint:hover { background: var(--chatllm-bg-soft-2); }
 

@@ -784,6 +784,17 @@ function conversationHasProjectTag(identity, tags) {
   return tags.includes(projectConversationTag(identity));
 }
 
+// ../../../packages/shared/src/chat-commands.ts
+function detectIdeSpecSlashCommand(content) {
+  const trimmed = content.trimStart();
+  const match = trimmed.match(/^\/(spec|design|tasks)(\s|$)/);
+  if (!match) return { rest: content };
+  return {
+    command: match[1],
+    rest: trimmed.slice(match[0].length).trimStart()
+  };
+}
+
 // src/chat/commands.ts
 var SPEC_SYSTEM_PROMPTS = {
   spec: "Draft EARS-style feature requirements in markdown using ## R-N section ids.",
@@ -925,10 +936,27 @@ function capabilitiesFromLm(model) {
   if (model.maxInputTokens && model.maxInputTokens >= 128e3) caps.add("long-context");
   return [...caps];
 }
+function isImage(mime) {
+  return mime.toLowerCase().startsWith("image/");
+}
 function toLmMessages(history) {
   return history.map(
     (m) => m.role === "user" ? vscode5.LanguageModelChatMessage.User(m.content) : vscode5.LanguageModelChatMessage.Assistant(m.content)
   );
+}
+function buildUserMessage(prompt, attachments) {
+  if (!attachments.length) return vscode5.LanguageModelChatMessage.User(prompt);
+  const parts = [
+    new vscode5.LanguageModelTextPart(prompt)
+  ];
+  for (const attachment of attachments) {
+    if (isImage(attachment.mimeType)) {
+      parts.push(vscode5.LanguageModelDataPart.image(attachment.data, attachment.mimeType));
+    } else {
+      parts.push(new vscode5.LanguageModelDataPart(attachment.data, attachment.mimeType));
+    }
+  }
+  return vscode5.LanguageModelChatMessage.User(parts);
 }
 async function streamCopilotChat(input) {
   const [model] = await vscode5.lm.selectChatModels({ vendor: "copilot", id: input.modelId });
@@ -940,10 +968,20 @@ async function streamCopilotChat(input) {
     if (input.signal.aborted) cancellation.cancel();
     else input.signal.addEventListener("abort", () => cancellation.cancel(), { once: true });
   }
+  const modelCaps = capabilitiesFromLm(model);
+  const usable = [];
+  const skippedAttachments = [];
+  for (const attachment of input.attachments ?? []) {
+    if (isImage(attachment.mimeType) && modelCaps.includes("vision")) {
+      usable.push(attachment);
+    } else {
+      skippedAttachments.push(attachment);
+    }
+  }
   const tools = input.toolsEnabled ? await buildToolStubs() : [];
   const messages = [
     ...toLmMessages(input.history),
-    vscode5.LanguageModelChatMessage.User(input.prompt)
+    buildUserMessage(input.prompt, usable)
   ];
   const runOnce = async () => {
     return model.sendRequest(messages, { tools, toolMode: vscode5.LanguageModelChatToolMode.Auto }, cancellation.token);
@@ -985,7 +1023,7 @@ async function streamCopilotChat(input) {
       input.onToken(token);
     }
   }
-  return { content, toolEvents };
+  return { content, toolEvents, skippedAttachments };
 }
 async function buildToolStubs() {
   const names = [
@@ -1090,6 +1128,7 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
   backendStatus = "unconfigured";
   conversations = /* @__PURE__ */ new Map();
   messagesCache = /* @__PURE__ */ new Map();
+  attachmentBytes = /* @__PURE__ */ new Map();
   overrides = {};
   sessionKinds = /* @__PURE__ */ new Map();
   /** conversationId -> set of message ids whose pipeline-ready card has been consumed. */
@@ -1623,6 +1662,7 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
         const name = (0, import_node_path2.basename)(uri.fsPath);
         const document = await uploadDocument({ name, bytes });
         uploadedIds.push(document.id);
+        this.attachmentBytes.set(document.id, { data: bytes, mimeType: document.mimeType, name: document.name });
         if (!this.catalog.documents.some((entry) => entry.id === document.id)) {
           this.catalog = { ...this.catalog, documents: [document, ...this.catalog.documents] };
         }
@@ -1680,15 +1720,6 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
   // ---------------------------------------------------------------------------
   // Sending chat
   // ---------------------------------------------------------------------------
-  detectCommand(content) {
-    const trimmed = content.trimStart();
-    const match = trimmed.match(/^\/(spec|design|tasks)(\s|$)/);
-    if (!match) return { rest: content };
-    return {
-      command: match[1],
-      rest: trimmed.slice(match[0].length).trimStart()
-    };
-  }
   resolveProviderModel(overrides) {
     const fromOverride = overrides.provider && overrides.model ? findConfiguredModel(this.catalog.models, overrides.provider, overrides.model) : void 0;
     const chosen = fromOverride ?? defaultEnabledModel(this.catalog.models);
@@ -1730,7 +1761,7 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     }
     const conversationId = conversation.id;
     const settings = readSettings();
-    const { command, rest } = this.detectCommand(content);
+    const { command, rest } = detectIdeSpecSlashCommand(content);
     const messages = this.messagesCache.get(conversationId) ?? [];
     const userMessage = {
       id: `local:user:${randomId()}`,
@@ -1810,15 +1841,23 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
         }
       };
       const useLocalCopilot = body.provider === "copilot" && readSettings().copilotModelsEnabled && await listCopilotLmModels().then((m) => m.some((x) => x.modelId === body.model)).catch(() => false);
+      const copilotAttachments = useLocalCopilot ? body.documentIds.map((id) => this.attachmentBytes.get(id)).filter((entry) => !!entry) : [];
       const response = useLocalCopilot ? await streamCopilotChat({
         modelId: body.model,
         history: (messages ?? []).filter((m) => m.role === "user" || m.role === "assistant").map((m) => ({ role: m.role, content: m.content })),
         prompt: body.content,
         toolsEnabled: body.toolsEnabled,
+        attachments: copilotAttachments,
         onToken: handlers.onToken,
         onToolEvent: handlers.onToolEvent,
         signal: abort.signal
-      }).then((r) => ({ assistantMessage: { id: assistantMessage.id, content: r.content } })) : await streamChat(body, handlers, abort.signal);
+      }).then((r) => {
+        if (r.skippedAttachments.length) {
+          const names = r.skippedAttachments.map((a) => a.name).join(", ");
+          this.broadcast({ type: "log", message: `Copilot model ignored unsupported attachments: ${names}.` });
+        }
+        return { assistantMessage: { id: assistantMessage.id, content: r.content } };
+      }) : await streamChat(body, handlers, abort.signal);
       const finalConversation = "conversation" in response ? response.conversation : void 0;
       if (finalConversation) this.conversations.set(finalConversation.id, finalConversation);
       if (response.assistantMessage?.id) assistantMessage.id = response.assistantMessage.id;
@@ -2550,7 +2589,7 @@ var SpecStore = class {
 
 // src/theme-bridge.ts
 var vscode8 = __toESM(require("vscode"));
-var NEXUS_TO_VSCODE = {
+var NEXUS_TO_VSCODE2 = {
   "default:light": "Light Modern",
   "default:dark": "Dark Modern",
   "cursor:light": "Light 2026",
@@ -2562,7 +2601,7 @@ var NEXUS_TO_VSCODE = {
   "nord:light": "Light Modern",
   "nord:dark": "Dark Modern"
 };
-var VSCODE_TO_NEXUS = {
+var VSCODE_TO_NEXUS2 = {
   "Light Modern": { family: "default", mode: "light" },
   "Dark Modern": { family: "default", mode: "dark" },
   "Light+": { family: "github", mode: "light" },
@@ -2622,7 +2661,7 @@ function createThemeBridge(output) {
       lastApplied = void 0;
       return;
     }
-    const mapped = VSCODE_TO_NEXUS[themeId];
+    const mapped = VSCODE_TO_NEXUS2[themeId];
     if (!mapped) return;
     await apiFetch("/api/theme", {
       method: "PUT",
@@ -2636,12 +2675,12 @@ function createThemeBridge(output) {
       const payload = JSON.parse(String(event.data));
       if (payload.type !== "theme" || payload.snapshot?.source === "vscode") return;
       const snapshot = payload.snapshot;
-      const themeId = snapshot?.vsCodeThemeId ?? NEXUS_TO_VSCODE[`${snapshot?.family}:${snapshot?.mode}`];
+      const themeId = snapshot?.vsCodeThemeId ?? NEXUS_TO_VSCODE2[`${snapshot?.family}:${snapshot?.mode}`];
       void applyTheme(themeId).then(() => applyColorOverrides(snapshot?.colorOverrides)).then(() => applyTokenColorOverrides(snapshot?.tokenColorOverrides));
     });
     ws.addEventListener("close", () => setTimeout(connect, 1e3));
   }
-  const envTheme = NEXUS_TO_VSCODE[`${process.env.LIBERVOX_THEME_FAMILY}:${process.env.LIBERVOX_THEME_MODE === "system" ? "dark" : process.env.LIBERVOX_THEME_MODE}`];
+  const envTheme = NEXUS_TO_VSCODE2[`${process.env.LIBERVOX_THEME_FAMILY}:${process.env.LIBERVOX_THEME_MODE === "system" ? "dark" : process.env.LIBERVOX_THEME_MODE}`];
   void applyTheme(envTheme);
   const listener = vscode8.workspace.onDidChangeConfiguration((event) => {
     if (event.affectsConfiguration("workbench.colorTheme")) void publishTheme();

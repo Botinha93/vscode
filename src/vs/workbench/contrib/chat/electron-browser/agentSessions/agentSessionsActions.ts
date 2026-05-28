@@ -19,7 +19,6 @@ import { IInstantiationService } from '../../../../../platform/instantiation/com
 import { KeyCode, KeyMod } from '../../../../../base/common/keyCodes.js';
 import { KeybindingWeight } from '../../../../../platform/keybinding/common/keybindingsRegistry.js';
 import { INativeHostService } from '../../../../../platform/native/common/native.js';
-import product from '../../../../../platform/product/common/product.js';
 import { Schemas } from '../../../../../base/common/network.js';
 import { IWorkspaceContextService } from '../../../../../platform/workspace/common/workspace.js';
 import { IsSessionsWindowContext } from '../../../../common/contextkeys.js';
@@ -28,7 +27,7 @@ import { IWorkbenchContribution } from '../../../../common/contributions.js';
 import { CHAT_CATEGORY } from '../../browser/actions/chatActions.js';
 import { OPEN_WORKSPACE_IN_AGENTS_WINDOW_COMMAND_ID, OPEN_AGENTS_WINDOW_PRECONDITION, OPEN_AGENTS_WINDOW_COMMAND_ID } from '../../common/constants.js';
 
-const showNativeOpenInAgentsButton = product.applicationName !== 'liberide';
+const openInAgentsMenuWhen = OPEN_AGENTS_WINDOW_PRECONDITION;
 
 export class OpenWorkspaceInAgentsWindowAction extends Action2 {
 	constructor() {
@@ -38,17 +37,17 @@ export class OpenWorkspaceInAgentsWindowAction extends Action2 {
 			category: CHAT_CATEGORY,
 			precondition: OPEN_AGENTS_WINDOW_PRECONDITION,
 			f1: true,
-			menu: showNativeOpenInAgentsButton ? [{
+			menu: [{
 				id: MenuId.ChatTitleBarMenu,
 				group: 'c_sessions',
 				order: 1,
-				when: OPEN_AGENTS_WINDOW_PRECONDITION,
+				when: openInAgentsMenuWhen,
 			}, {
 				id: MenuId.TitleBar,
 				group: TitleBarLeadingActionsGroup,
 				order: -1000,
-				when: OPEN_AGENTS_WINDOW_PRECONDITION,
-			}] : undefined
+				when: openInAgentsMenuWhen,
+			}]
 		});
 	}
 
@@ -130,9 +129,6 @@ export class OpenWorkspaceInAgentsContribution extends Disposable implements IWo
 		@IInstantiationService instantiationService: IInstantiationService,
 	) {
 		super();
-		if (!showNativeOpenInAgentsButton) {
-			return;
-		}
 		this._register(actionViewItemService.register(MenuId.TitleBar, OPEN_WORKSPACE_IN_AGENTS_WINDOW_COMMAND_ID, (action, options) => {
 			return instantiationService.createInstance(OpenWorkspaceInAgentsTitleBarWidget, action, options);
 		}, undefined));

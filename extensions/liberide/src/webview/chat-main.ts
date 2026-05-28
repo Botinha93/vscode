@@ -13,6 +13,7 @@ import type {
   ToolTimelineEntry,
 } from "../chat/chat-protocol";
 import type { ConfiguredProvider, DocumentRecord } from "../chat/types";
+import { buildChatSlashCommands, parseSlashQuery } from "@nexus/shared";
 import { highlightCode } from "./highlight";
 
 interface VsCodeApi {
@@ -166,6 +167,7 @@ function shellHtml(): string {
         </header>
         <div class="chat-sidebar-actions">
           <button class="ghost-btn" id="sidebar-new">\u002B  New chat</button>
+          <button class="ghost-btn" id="sidebar-history" title="Open chat history" aria-label="Open chat history">📜  History</button>
         </div>
         <div class="chat-sidebar-list" id="session-list"></div>
         <footer class="chat-sidebar-footer">
@@ -215,6 +217,10 @@ function bindShell(): void {
     applySidebar();
   });
   root.querySelector<HTMLButtonElement>("#sidebar-new")?.addEventListener("click", () => send({ type: "newSession" }));
+  root.querySelector<HTMLButtonElement>("#sidebar-history")?.addEventListener("click", () => {
+    state.sidebarOpen = true;
+    applySidebar();
+  });
   root.querySelector<HTMLButtonElement>("#sidebar-refresh")?.addEventListener("click", () => send({ type: "refreshSessions" }));
   root.querySelector<HTMLButtonElement>("#new-chat")?.addEventListener("click", () => send({ type: "newSession" }));
   root.querySelector<HTMLButtonElement>("#header-pipeline")?.addEventListener("click", () => send({ type: "openPipeline" }));
@@ -845,24 +851,43 @@ function renderComposerHints(): void {
   const hints = root.querySelector<HTMLDivElement>("#composer-hints");
   if (!hints) return;
   const draft = state.draft.trimStart();
-  if (draft.startsWith("/")) {
-    const matches = ["/spec", "/design", "/tasks"].filter((c) => c.startsWith(draft.split(/\s/)[0]));
-    if (matches.length) {
-      hints.innerHTML = matches.map((c) => `<button class="hint" data-cmd="${c}">${c}</button>`).join("");
-      for (const b of hints.querySelectorAll<HTMLButtonElement>(".hint")) {
-        b.addEventListener("click", () => {
-          const composer = root.querySelector<HTMLTextAreaElement>("#composer")!;
-          composer.value = (b.dataset.cmd ?? "") + " ";
-          composer.focus();
-          state.draft = composer.value;
-          autosize(composer);
-          renderComposerHints();
-        });
-      }
-      return;
-    }
+  if (!draft.startsWith("/")) {
+    hints.innerHTML = "";
+    return;
   }
-  hints.innerHTML = "";
+
+  const commands = buildChatSlashCommands({
+    surface: "ide",
+    agents: state.catalog.agents,
+    slashQuery: parseSlashQuery(state.draft),
+  });
+  if (!commands.length) {
+    hints.innerHTML = "";
+    return;
+  }
+
+  hints.innerHTML = commands
+    .slice(0, 8)
+    .map(
+      (command) => `
+        <button class="hint" data-insert="${escapeAttr(command.insert)}" title="${escapeAttr(command.description)}">
+          <span class="hint-label">${escapeHtml(command.label)}</span>
+          <span class="hint-description">${escapeHtml(command.description)}</span>
+        </button>
+      `,
+    )
+    .join("");
+
+  for (const button of hints.querySelectorAll<HTMLButtonElement>(".hint")) {
+    button.addEventListener("click", () => {
+      const composer = root.querySelector<HTMLTextAreaElement>("#composer")!;
+      composer.value = button.dataset.insert ?? "";
+      composer.focus();
+      state.draft = composer.value;
+      autosize(composer);
+      renderComposerHints();
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1000,30 +1025,11 @@ function renderSettings(): void {
     <label for="set-system">Local system prompt</label>
     <textarea id="set-system" data-key="systemPrompt" placeholder="(empty)">${escapeHtml(s.systemPrompt)}</textarea>
 
-    <h2>Integrations</h2>
-    <label for="set-copilot">GitHub Copilot</label>
-    <div>
-      <div>
-        <input id="set-copilot-models" data-key="copilot.modelsEnabled" type="checkbox" ${s.copilotModelsEnabled?"checked":""} />
-        <span class="hint inline">Enable Copilot model access (vscode.lm). Native Copilot UI stays hidden.</span>
-      </div>
-      <div>
-        <input id="set-copilot-ui" data-key="copilot.enabled" type="checkbox" ${s.copilotUiEnabled?"checked":""} />
-        <span class="hint inline">Re-enable native Copilot UI. Toggling prompts a window reload.</span>
-      </div>
-      <div style="margin-top: 8px">
-        <button class="btn" id="copilot-github-login" type="button">Sign in to GitHub for Copilot</button>
-        <span class="hint inline">Uses VS Code GitHub auth, then links it to ChatLLM.</span>
-      </div>
-    </div>
-
-    <div class="hint">Models, agents, MCP servers, and skills are managed in the LiberIDE app. Per-chat picks are stored on the conversation.</div>
+    <div class="hint">Models, agents, MCP servers, and skills are managed in VoxChat settings. Per-chat picks are stored on the conversation.</div>
   `;
   for (const input of grid.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>("[data-key]")) {
     input.addEventListener("change", () => emitSettingChange(input));
   }
-  const loginBtn = grid.querySelector<HTMLButtonElement>("#copilot-github-login");
-  if (loginBtn) loginBtn.addEventListener("click", () => send({ type: "copilotGithubLogin" } as any));
 }
 
 function emitSettingChange(input: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement): void {

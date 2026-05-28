@@ -3,11 +3,15 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const sharedRoot = join(__dirname, "../../../packages/shared/src");
 
 const common = {
   bundle: true,
   sourcemap: true,
   logLevel: "info",
+  alias: {
+    "@nexus/shared": join(sharedRoot, "index.ts"),
+  },
 };
 
 await Promise.all([

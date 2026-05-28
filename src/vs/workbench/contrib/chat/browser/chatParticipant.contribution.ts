@@ -15,8 +15,8 @@ import { localize, localize2 } from '../../../../nls.js';
 import { ContextKeyExpr, IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
 import { ExtensionIdentifier, IExtensionManifest } from '../../../../platform/extensions/common/extensions.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
-import product from '../../../../platform/product/common/product.js';
 import { IProductService } from '../../../../platform/product/common/productService.js';
+import { LiberideNativeCopilotUiEnabledExpr, isLiberideProductBuild } from '../../chatllm/browser/liberideCopilotUi.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
 import { registerIcon } from '../../../../platform/theme/common/iconRegistry.js';
 import { ViewPaneContainer } from '../../../browser/parts/views/viewPaneContainer.js';
@@ -38,7 +38,7 @@ import { ChatViewPane } from './widgetHosts/viewPane/chatViewPane.js';
 
 const chatViewIcon = registerIcon('chat-view-icon', Codicon.chatSparkle, localize('chatViewIcon', 'View icon of the chat view.'));
 const nativeChatViewWhen = ContextKeyExpr.and(
-	product.applicationName === 'liberide' ? ContextKeyExpr.equals('config.liberide.copilot.enabled', true) : ContextKeyExpr.true(),
+	LiberideNativeCopilotUiEnabledExpr,
 	ChatContextKeys.accountPolicyGateActive.negate(),
 	ContextKeyExpr.or(
 		ContextKeyExpr.and(
@@ -58,7 +58,7 @@ const chatViewContainer: ViewContainer = Registry.as<IViewContainersRegistry>(Vi
 	storageId: ChatViewContainerId,
 	hideIfEmpty: true,
 	order: 1,
-}, ViewContainerLocation.AuxiliaryBar, { isDefault: true, doNotRegisterOpenCommand: true });
+}, ViewContainerLocation.AuxiliaryBar, { isDefault: !isLiberideProductBuild, doNotRegisterOpenCommand: true });
 
 const chatViewDescriptor: IViewDescriptor = {
 	id: ChatViewId,

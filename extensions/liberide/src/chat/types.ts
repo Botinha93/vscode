@@ -116,6 +116,26 @@ export interface AppConfig {
   maxAgentSpawns: number;
 }
 
+export interface IdeToolContextPayload {
+  sessionId: string;
+  userId: string;
+  projectPath: string;
+  mode: "web" | "desktop";
+  terminalExecutor?: "server" | "client";
+  conversationId?: string;
+  agentRunId?: string;
+}
+
+export interface TerminalDelegateEvent {
+  delegateId: string;
+  command: string;
+  cwd: string;
+  timeoutMs: number;
+  projectPath: string;
+  sessionId?: string;
+  conversationId?: string;
+}
+
 export interface ChatRequest {
   conversationId?: string;
   provider: Provider;
@@ -131,6 +151,7 @@ export interface ChatRequest {
   mcpServerIds: string[];
   agentIds: string[];
   maxAgentSpawns: number;
+  ideContext?: IdeToolContextPayload;
 }
 
 export interface ToolCallEvent {

@@ -30,6 +30,16 @@ function capabilitiesFromLm(model: vscode.LanguageModelChat): ModelCapability[] 
   return [...caps];
 }
 
+export interface CopilotAttachment {
+  data: Uint8Array;
+  mimeType: string;
+  name: string;
+}
+
+function isImage(mime: string): boolean {
+  return mime.toLowerCase().startsWith("image/");
+}
+
 function toLmMessages(history: Array<{ role: "user" | "assistant"; content: string }>): vscode.LanguageModelChatMessage[] {
   return history.map((m) =>
     m.role === "user"
@@ -38,15 +48,31 @@ function toLmMessages(history: Array<{ role: "user" | "assistant"; content: stri
   );
 }
 
+function buildUserMessage(prompt: string, attachments: CopilotAttachment[]): vscode.LanguageModelChatMessage {
+  if (!attachments.length) return vscode.LanguageModelChatMessage.User(prompt);
+  const parts: Array<vscode.LanguageModelTextPart | vscode.LanguageModelDataPart> = [
+    new vscode.LanguageModelTextPart(prompt),
+  ];
+  for (const attachment of attachments) {
+    if (isImage(attachment.mimeType)) {
+      parts.push(vscode.LanguageModelDataPart.image(attachment.data, attachment.mimeType));
+    } else {
+      parts.push(new vscode.LanguageModelDataPart(attachment.data, attachment.mimeType));
+    }
+  }
+  return vscode.LanguageModelChatMessage.User(parts);
+}
+
 export async function streamCopilotChat(input: {
   modelId: string;
   history: Array<{ role: "user" | "assistant"; content: string }>;
   prompt: string;
   toolsEnabled: boolean;
+  attachments?: CopilotAttachment[];
   onToken: (token: string) => void;
   onToolEvent: (event: ToolCallEvent) => void;
   signal?: AbortSignal;
-}): Promise<{ content: string; toolEvents: ToolCallEvent[] }> {
+}): Promise<{ content: string; toolEvents: ToolCallEvent[]; skippedAttachments: CopilotAttachment[] }> {
   const [model] = await vscode.lm.selectChatModels({ vendor: "copilot", id: input.modelId });
   if (!model) throw new Error(`Copilot model not available: ${input.modelId}`);
 
@@ -59,10 +85,21 @@ export async function streamCopilotChat(input: {
     else input.signal.addEventListener("abort", () => cancellation.cancel(), { once: true });
   }
 
+  const modelCaps = capabilitiesFromLm(model);
+  const usable: CopilotAttachment[] = [];
+  const skippedAttachments: CopilotAttachment[] = [];
+  for (const attachment of input.attachments ?? []) {
+    if (isImage(attachment.mimeType) && modelCaps.includes("vision")) {
+      usable.push(attachment);
+    } else {
+      skippedAttachments.push(attachment);
+    }
+  }
+
   const tools = input.toolsEnabled ? await buildToolStubs() : [];
   const messages = [
     ...toLmMessages(input.history),
-    vscode.LanguageModelChatMessage.User(input.prompt),
+    buildUserMessage(input.prompt, usable),
   ];
 
   const runOnce = async (): Promise<vscode.LanguageModelChatResponse> => {
@@ -112,7 +149,7 @@ export async function streamCopilotChat(input: {
     }
   }
 
-  return { content, toolEvents };
+  return { content, toolEvents, skippedAttachments };
 }
 
 async function buildToolStubs(): Promise<vscode.LanguageModelChatTool[]> {
@@ -125,6 +162,7 @@ async function buildToolStubs(): Promise<vscode.LanguageModelChatTool[]> {
     "ide_write_file",
     "ide_list_directory",
     "ide_search_code",
+    "terminal_run",
     "ide_run_command",
   ];
   return names.map((name) => ({
@@ -134,10 +172,24 @@ async function buildToolStubs(): Promise<vscode.LanguageModelChatTool[]> {
   }));
 }
 
+function buildIdeContextForInvoke(): Record<string, unknown> | undefined {
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  if (!folder) return undefined;
+  return {
+    sessionId: `vscode-${folder.name}`,
+    userId: "default",
+    projectPath: folder.uri.fsPath,
+    mode: "desktop",
+    terminalExecutor: "client",
+  };
+}
+
 async function invokeBackendTool(body: { name: string; arguments: Record<string, unknown> }): Promise<{ result?: string }> {
+  const ideContext = buildIdeContextForInvoke();
   const response = await apiFetch("/api/tools/invoke", {
     method: "POST",
-    body: JSON.stringify(body),
+    headers: ideContext ? { "X-Terminal-Executor": "client" } : undefined,
+    body: JSON.stringify({ ...body, ideContext }),
   });
   if (!response.ok) {
     const err = await response.text().catch(() => response.statusText);

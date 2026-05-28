@@ -142,7 +142,15 @@ function patchGlobalFetch(params: ProxyAgentParams, configProvider: ExtHostConfi
 		const originalFetch = globalThis.fetch;
 		// eslint-disable-next-line local/code-no-any-casts
 		(globalThis as any).__vscodeOriginalFetch = originalFetch;
-		const createPatchedFetch = (options?: proxyAgent.CreateFetchPatchOptions) => proxyAgent.createFetchPatch(params, originalFetch, resolveProxyURL, options);
+		const createPatchedFetch = (options?: unknown) => {
+			const createFetchPatch = proxyAgent.createFetchPatch as (
+				params: ProxyAgentParams,
+				originalFetch: typeof globalThis.fetch,
+				resolveProxyURL: (url: string) => Promise<string | undefined>,
+				options?: unknown,
+			) => ReturnType<typeof proxyAgent.createFetchPatch>;
+			return createFetchPatch(params, originalFetch, resolveProxyURL, options);
+		};
 		const patchedFetch = createPatchedFetch();
 		// eslint-disable-next-line local/code-no-any-casts
 		(globalThis as any).__vscodePatchedFetch = patchedFetch;
