@@ -13,6 +13,7 @@ import {
   listFolders,
   patchConversation,
   probeBackend,
+  subscribeConversationListSync,
   uploadDocument,
 } from "../api";
 import { onSettingsChange, readSettings, writeSetting, type LiberideSettings } from "../settings";
@@ -56,6 +57,7 @@ import type {
   EditedFileSummary,
   ProjectInfo,
   SessionSummary,
+  ChatSessionKind,
   ToolTimelineEntry,
 } from "./chat-protocol";
 import type { ToolCallEvent } from "./types";
@@ -114,6 +116,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
   private view?: vscode.WebviewView;
   private readonly disposables: vscode.Disposable[] = [];
   private readonly streams = new Map<string, ActiveStream>();
+  private conversationSyncDispose?: () => void;
 
   private project: ProjectIdentity = { id: "none", source: "none", name: "" };
   private projectFolderId: string | null = null;
@@ -140,7 +143,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
   ) {
     this.overrides = this.context.workspaceState.get<OverridesCache>(OVERRIDES_STORAGE_KEY, {});
     this.activeSessionId = this.context.workspaceState.get<string | null>(ACTIVE_SESSION_STORAGE_KEY, null);
-    const storedKinds = this.context.workspaceState.get<Record<string, ChatSession["kind"]>>("liberide.chat.sessionKinds", {});
+    const storedKinds = this.context.workspaceState.get<Record<string, ChatSessionKind>>("liberide.chat.sessionKinds") ?? {};
     for (const [id, kind] of Object.entries(storedKinds)) this.sessionKinds.set(id, kind);
     this.disposables.push(
       onSettingsChange((settings) => this.broadcast({ type: "settings", settings })),
@@ -148,6 +151,9 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
         void this.onWorkspaceFoldersChanged();
       }),
     );
+    this.conversationSyncDispose = subscribeConversationListSync(() => {
+      void this.refreshConversations();
+    });
   }
 
   private async onWorkspaceFoldersChanged(): Promise<void> {
@@ -183,6 +189,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
   }
 
   dispose(): void {
+    this.conversationSyncDispose?.();
     for (const d of this.disposables) d.dispose();
     for (const s of this.streams.values()) s.abort.abort();
     this.streams.clear();

@@ -164,7 +164,8 @@ async function listDocuments() {
 }
 async function uploadDocument(file) {
   const form = new FormData();
-  const blob = new Blob([file.bytes], { type: file.mimeType ?? "application/octet-stream" });
+  const bytes = file.bytes.slice();
+  const blob = new Blob([bytes], { type: file.mimeType ?? "application/octet-stream" });
   form.append("file", blob, file.name);
   const token = getAuthToken();
   const headers = {};
@@ -172,6 +173,60 @@ async function uploadDocument(file) {
   const response = await apiFetch("/api/documents", { method: "POST", body: form, headers });
   const payload = await readJson(response);
   return payload.document;
+}
+function subscribeConversationListSync(onChange) {
+  const origin = getApiOrigin();
+  if (!origin) {
+    const poll = setInterval(onChange, 3e4);
+    return () => clearInterval(poll);
+  }
+  let closed = false;
+  let pollTimer = null;
+  const abort = new AbortController();
+  const startPoll = () => {
+    if (pollTimer || closed) return;
+    pollTimer = setInterval(onChange, 3e4);
+  };
+  void (async () => {
+    try {
+      const response = await fetch(`${origin}/api/conversations/stream`, {
+        headers: authHeaders({ Accept: "text/event-stream" }),
+        signal: abort.signal
+      });
+      if (!response.ok || !response.body) {
+        startPoll();
+        return;
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (!closed) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() ?? "";
+        for (const part of parts) {
+          const line = part.split("\n").find((l) => l.startsWith("data: "));
+          if (!line) continue;
+          try {
+            const data = JSON.parse(line.slice(6));
+            if (data.type === "conversations_changed" || data.type === "folders_changed") {
+              onChange();
+            }
+          } catch {
+          }
+        }
+      }
+    } catch {
+      if (!closed) startPoll();
+    }
+  })();
+  return () => {
+    closed = true;
+    abort.abort();
+    if (pollTimer) clearInterval(pollTimer);
+  };
 }
 
 // src/spec/dag.ts
@@ -1204,7 +1259,7 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     this.output = output;
     this.overrides = this.context.workspaceState.get(OVERRIDES_STORAGE_KEY, {});
     this.activeSessionId = this.context.workspaceState.get(ACTIVE_SESSION_STORAGE_KEY, null);
-    const storedKinds = this.context.workspaceState.get("liberide.chat.sessionKinds", {});
+    const storedKinds = this.context.workspaceState.get("liberide.chat.sessionKinds") ?? {};
     for (const [id, kind] of Object.entries(storedKinds)) this.sessionKinds.set(id, kind);
     this.disposables.push(
       onSettingsChange((settings) => this.broadcast({ type: "settings", settings })),
@@ -1212,11 +1267,15 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
         void this.onWorkspaceFoldersChanged();
       })
     );
+    this.conversationSyncDispose = subscribeConversationListSync(() => {
+      void this.refreshConversations();
+    });
   }
   static viewType = "liberide.chat";
   view;
   disposables = [];
   streams = /* @__PURE__ */ new Map();
+  conversationSyncDispose;
   project = { id: "none", source: "none", name: "" };
   projectFolderId = null;
   projectFolder;
@@ -1260,6 +1319,7 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     this.broadcast({ type: "openSettings" });
   }
   dispose() {
+    this.conversationSyncDispose?.();
     for (const d of this.disposables) d.dispose();
     for (const s of this.streams.values()) s.abort.abort();
     this.streams.clear();

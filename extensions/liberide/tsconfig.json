@@ -1,9 +1,14 @@
 {
   "extends": "../../../tsconfig.base.json",
   "compilerOptions": {
+    "baseUrl": ".",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "noEmit": true,
-    "rootDir": "src",
+    "paths": {
+      "@nexus/shared": ["../../../packages/shared/src/index.ts"],
+      "@nexus/shared/*": ["../../../packages/shared/src/*"],
+      "vscode": ["node_modules/@types/vscode/index.d.ts"]
+    },
     "types": ["node"]
   },
   "include": ["src/**/*.ts"]

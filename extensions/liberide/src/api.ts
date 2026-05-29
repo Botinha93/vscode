@@ -184,7 +184,8 @@ export async function listDocuments(): Promise<DocumentRecord[]> {
 
 export async function uploadDocument(file: { name: string; bytes: Uint8Array; mimeType?: string }): Promise<DocumentRecord> {
   const form = new FormData();
-  const blob = new Blob([file.bytes], { type: file.mimeType ?? "application/octet-stream" });
+  const bytes = file.bytes.slice();
+  const blob = new Blob([bytes], { type: file.mimeType ?? "application/octet-stream" });
   form.append("file", blob, file.name);
   const token = getAuthToken();
   const headers: Record<string, string> = {};
@@ -196,4 +197,68 @@ export async function uploadDocument(file: { name: string; bytes: Uint8Array; mi
 
 export async function pingBackend(): Promise<boolean> {
   return (await probeBackend()) === "ok";
+}
+
+/**
+ * Subscribe to conversation list changes (SSE with Bearer auth).
+ * Falls back to 30s polling when the stream fails.
+ */
+export function subscribeConversationListSync(onChange: () => void): () => void {
+  const origin = getApiOrigin();
+  if (!origin) {
+    const poll = setInterval(onChange, 30_000);
+    return () => clearInterval(poll);
+  }
+
+  let closed = false;
+  let pollTimer: ReturnType<typeof setInterval> | null = null;
+  const abort = new AbortController();
+
+  const startPoll = () => {
+    if (pollTimer || closed) return;
+    pollTimer = setInterval(onChange, 30_000);
+  };
+
+  void (async () => {
+    try {
+      const response = await fetch(`${origin}/api/conversations/stream`, {
+        headers: authHeaders({ Accept: "text/event-stream" }),
+        signal: abort.signal,
+      });
+      if (!response.ok || !response.body) {
+        startPoll();
+        return;
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (!closed) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() ?? "";
+        for (const part of parts) {
+          const line = part.split("\n").find((l) => l.startsWith("data: "));
+          if (!line) continue;
+          try {
+            const data = JSON.parse(line.slice(6)) as { type?: string };
+            if (data.type === "conversations_changed" || data.type === "folders_changed") {
+              onChange();
+            }
+          } catch {
+            // ignore malformed chunks
+          }
+        }
+      }
+    } catch {
+      if (!closed) startPoll();
+    }
+  })();
+
+  return () => {
+    closed = true;
+    abort.abort();
+    if (pollTimer) clearInterval(pollTimer);
+  };
 }
