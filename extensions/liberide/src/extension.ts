@@ -1,6 +1,5 @@
 import * as vscode from "vscode";
 import { initApiFromContext } from "./api";
-import { cancelExecutionGraph } from "./dispatch/client";
 import { LiberidePipelineController } from "./panel/panel";
 import { LiberideChatPanelController } from "./chat/chat-panel";
 import { scaffoldFeature, regenerateTasksIndex, updateTaskStatus, writeTextFile } from "./spec/writer";
@@ -30,7 +29,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
   });
 
-  pipeline = new LiberidePipelineController(context, store, output);
+  pipeline = new LiberidePipelineController(context, store, output, runsTree);
   chat = new LiberideChatPanelController(context, store, output);
 
   context.subscriptions.push(
@@ -109,9 +108,13 @@ function commands(
       const feature = store.getActiveFeature();
       if (feature?.tasksDirUri) await writeTextFile(vscode.Uri.joinPath(feature.tasksDirUri, "index.md"), regenerateTasksIndex(feature.tasks));
     }),
-    vscode.commands.registerCommand("liberide.cancelRun", async () => {
-      const graphId = await vscode.window.showInputBox({ prompt: "Graph id to cancel" });
-      if (graphId) await cancelExecutionGraph(graphId);
+    vscode.commands.registerCommand("liberide.cancelRun", async (arg?: { kind?: string; run?: { graphId?: string } } | string) => {
+      const graphId = typeof arg === "string" ? arg : arg?.run?.graphId;
+      if (!graphId) {
+        void vscode.window.showInformationMessage("Select an active run from the Agent Runs view to cancel it.");
+        return;
+      }
+      await pipeline.cancel(graphId);
     }),
   ];
 }

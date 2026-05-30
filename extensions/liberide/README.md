@@ -37,12 +37,12 @@ This extension is preinstalled in the bundled VS Code fork that ships with the L
 | Setting | Default | Description |
 |---|---|---|
 | `liberide.modelSelection` | `manual` | Local override for model selection mode. `auto` lets the backend upgrade models based on the request. |
-| `liberide.chatMode` | `normal` | Default chat mode for new chats (`normal` or `agent`). |
 | `liberide.useRag` | `false` | Default for RAG on new chats. |
-| `liberide.toolsEnabled` | `true` | Default for tool calling on new chats. |
 | `liberide.systemPrompt` | `""` | Optional system prompt appended to every LiberIDE chat request. |
 | `liberide.copilot.enabled` | `false` | Re-enable the bundled Copilot Chat UI. Leave off while using LiberIDE's chat surface. |
 | `liberide.copilot.modelsEnabled` | `true` | Enable Copilot models via VS Code's Language Model API (`vscode.lm`). Requires the Copilot model provider to be installed. |
+
+LiberIDE chat always runs in agent mode with tools enabled so the IDE workflow remains consistent.
 
 ### GitHub Copilot
 

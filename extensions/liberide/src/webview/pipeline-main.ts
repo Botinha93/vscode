@@ -37,6 +37,7 @@ interface AppState {
   activeFeatureId: string | null;
   activeTasks: TaskSummary[];
   runs: Map<string, RunState>;
+  busyAction: "scaffold" | "dispatch" | "cancel" | null;
 }
 
 const state: AppState = {
@@ -45,6 +46,7 @@ const state: AppState = {
   activeFeatureId: null,
   activeTasks: [],
   runs: new Map(),
+  busyAction: null,
 };
 
 const root = document.getElementById("root") as HTMLDivElement;
@@ -81,6 +83,7 @@ function pipelineHtml(): string {
         </div>
         <button class="icon-btn" id="chat-open" title="Open LiberIDE chat" aria-label="Open LiberIDE chat">\u270E</button>
       </header>
+      <div class="notice-stack" id="pipeline-notices"></div>
       <div class="pipeline-stack">
         <section class="pipeline-section">
           <h3>Features</h3>
@@ -124,7 +127,9 @@ function bindPipeline(): void {
     const name = scaffoldInput.value.trim();
     if (!name) return;
     send({ type: "scaffoldFeature", name });
-    scaffoldInput.value = "";
+  });
+  scaffoldInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") scaffoldBtn.click();
   });
   root.querySelector<HTMLButtonElement>("#dispatch-btn")!.addEventListener("click", () => {
     if (!state.activeFeatureId) return;
@@ -154,6 +159,11 @@ function renderTasks(): void {
   const list = root.querySelector<HTMLDivElement>("#task-list");
   if (!list) return;
   list.innerHTML = "";
+  const dispatch = root.querySelector<HTMLButtonElement>("#dispatch-btn");
+  if (dispatch) {
+    dispatch.disabled = state.busyAction !== null || !state.activeFeatureId;
+    dispatch.textContent = state.busyAction === "dispatch" ? "Dispatching..." : "Dispatch";
+  }
   if (!state.activeFeatureId) {
     list.innerHTML = `<div class="meta empty-row">Select a feature to see tasks.</div>`;
     return;
@@ -198,7 +208,8 @@ function renderRuns(): void {
     wrapper.innerHTML = `
       <header>
         <div><strong>${escapeHtml(run.label)}</strong><div class="meta">graph ${escapeHtml(run.graphId)}</div></div>
-        <span class="pill">${escapeHtml(run.status)}</span>
+        <div class="run-actions"><span class="pill">${escapeHtml(run.status)}</span>
+        ${run.status === "running" ? `<button class="icon-btn run-cancel" title="Cancel run" aria-label="Cancel run">&times;</button>` : ""}</div>
       </header>
       <div class="nodes"></div>
     `;
@@ -211,6 +222,11 @@ function renderRuns(): void {
       nodesEl.appendChild(chip);
     }
     wrapper.addEventListener("click", () => focusGraph(run.graphId));
+    wrapper.querySelector<HTMLButtonElement>(".run-cancel")?.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (!window.confirm(`Cancel ${run.label}?`)) return;
+      send({ type: "cancelGraph", graphId: run.graphId });
+    });
     container.appendChild(wrapper);
   }
 }
@@ -298,6 +314,24 @@ function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] ?? ch);
 }
 
+function showNotice(message: string, severity: "info" | "warning" | "error" = "warning"): void {
+  const stack = root.querySelector<HTMLDivElement>("#pipeline-notices");
+  if (!stack) return;
+  const notice = document.createElement("div");
+  notice.className = `inline-notice ${severity}`;
+  notice.innerHTML = `<span>${escapeHtml(message)}</span><button class="icon-btn" title="Dismiss" aria-label="Dismiss">&times;</button>`;
+  notice.querySelector("button")?.addEventListener("click", () => notice.remove());
+  stack.appendChild(notice);
+}
+
+function renderBusyState(): void {
+  const scaffold = root.querySelector<HTMLButtonElement>("#scaffold-btn");
+  const scaffoldInput = root.querySelector<HTMLInputElement>("#scaffold-name");
+  if (scaffold) scaffold.disabled = state.busyAction !== null;
+  if (scaffoldInput) scaffoldInput.disabled = state.busyAction !== null;
+  renderTasks();
+}
+
 function handleMessage(msg: PipelineHostToWebview): void {
   switch (msg.type) {
     case "init":
@@ -349,8 +383,18 @@ function handleMessage(msg: PipelineHostToWebview): void {
       renderRuns();
       break;
     }
+    case "operation":
+      state.busyAction = msg.status === "running" ? msg.action : null;
+      if (msg.status === "success" && msg.action === "scaffold") {
+        const input = root.querySelector<HTMLInputElement>("#scaffold-name");
+        if (input) input.value = "";
+      }
+      if (msg.message) showNotice(msg.message, msg.status === "error" ? "error" : "info");
+      renderBusyState();
+      break;
     case "log":
       console.warn("[liberide.pipeline]", msg.message);
+      showNotice(msg.message, msg.severity);
       break;
   }
 }

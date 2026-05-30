@@ -660,7 +660,10 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       try {
         await deleteConversation(id);
       } catch (err) {
-        this.output.appendLine(`[chat.delete] ${err instanceof Error ? err.message : String(err)}`);
+        const message = err instanceof Error ? err.message : String(err);
+        this.output.appendLine(`[chat.delete] ${message}`);
+        this.broadcast({ type: "log", message: `Could not delete chat: ${message}`, severity: "error" });
+        return;
       }
       this.conversations.delete(id);
       this.messagesCache.delete(id);
@@ -1146,7 +1149,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       });
     }).then(async () => {
       await this.revealFile(clean);
-      this.broadcast({ type: "log", message: `Reverted ${clean} to last git state.` });
+      this.broadcast({ type: "log", message: `Reverted ${clean} to last git state.`, severity: "info" });
     }).catch((err) => {
       this.broadcast({ type: "log", message: `Undo failed for ${clean}: ${err instanceof Error ? err.message : err}` });
     });
@@ -1445,7 +1448,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
         method: "POST",
         body: JSON.stringify({ accessToken: session.accessToken }),
       });
-      this.broadcast({ type: "log", message: "GitHub linked for Copilot." });
+      this.broadcast({ type: "log", message: "GitHub linked for Copilot.", severity: "info" });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.broadcast({ type: "log", message: `GitHub sign-in failed: ${msg}` });

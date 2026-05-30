@@ -32,6 +32,8 @@ export class RunsTreeProvider implements vscode.TreeDataProvider<Item> {
     if (item.kind === "run") {
       const tree = new vscode.TreeItem(item.run.label, vscode.TreeItemCollapsibleState.Expanded);
       tree.description = item.run.status;
+      tree.contextValue = "run";
+      tree.iconPath = new vscode.ThemeIcon(item.run.status === "running" ? "loading~spin" : "run-all");
       return tree;
     }
     const tree = new vscode.TreeItem(item.nodeId);

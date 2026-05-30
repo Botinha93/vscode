@@ -229,6 +229,9 @@ function subscribeConversationListSync(onChange) {
   };
 }
 
+// src/panel/panel.ts
+var vscode3 = __toESM(require("vscode"));
+
 // src/spec/dag.ts
 function validateDag(tasks) {
   const ids = new Set(tasks.map((task) => task.id));
@@ -356,9 +359,6 @@ function subscribeExecutionGraphEvents(graphId, onEvent) {
 async function cancelExecutionGraph(graphId) {
   await apiFetch(`/api/execution-graphs/${graphId}/cancel`, { method: "POST" });
 }
-
-// src/panel/panel.ts
-var vscode3 = __toESM(require("vscode"));
 
 // src/settings.ts
 var vscode = __toESM(require("vscode"));
@@ -548,10 +548,11 @@ function regenerateTasksIndex(tasks) {
 
 // src/panel/panel.ts
 var LiberidePipelineController = class _LiberidePipelineController {
-  constructor(context, store2, output) {
+  constructor(context, store2, output, runsTree) {
     this.context = context;
     this.store = store2;
     this.output = output;
+    this.runsTree = runsTree;
     this.disposables.push(
       onSettingsChange((settings) => this.broadcast({ type: "settings", settings })),
       this.store.onDidChange(() => this.broadcastFeatures())
@@ -645,9 +646,7 @@ var LiberidePipelineController = class _LiberidePipelineController {
           await this.dispatch(message.featureId, message.taskIds);
           break;
         case "cancelGraph":
-          await cancelExecutionGraph(message.graphId);
-          this.graphs.get(message.graphId)?.dispose();
-          this.graphs.delete(message.graphId);
+          await this.cancel(message.graphId);
           break;
         case "openTask": {
           const task = this.store.getTask(message.featureId, message.taskId);
@@ -661,13 +660,17 @@ var LiberidePipelineController = class _LiberidePipelineController {
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       this.output.appendLine(`[pipeline] ${msg}`);
-      this.broadcast({ type: "log", message: msg });
+      this.broadcast({ type: "operation", action: message.type === "scaffoldFeature" ? "scaffold" : message.type === "cancelGraph" ? "cancel" : "dispatch", status: "error", message: msg });
+      this.broadcast({ type: "log", message: msg, severity: "error" });
     }
   }
   async scaffold(name) {
+    this.broadcast({ type: "operation", action: "scaffold", status: "running" });
     const folder = vscode3.workspace.workspaceFolders?.[0];
     if (!folder) {
-      this.broadcast({ type: "log", message: "Open a workspace folder to scaffold a feature." });
+      const message = "Open a workspace folder to scaffold a feature.";
+      this.broadcast({ type: "operation", action: "scaffold", status: "error", message });
+      this.broadcast({ type: "log", message, severity: "warning" });
       return;
     }
     const root = await scaffoldFeature(folder, name);
@@ -675,17 +678,23 @@ var LiberidePipelineController = class _LiberidePipelineController {
     this.store.setActiveFeature(id);
     await this.context.workspaceState.update("liberide.activeFeatureId", id);
     await this.store.refresh();
+    this.broadcast({ type: "operation", action: "scaffold", status: "success", message: `Created ${name}.` });
   }
   async dispatch(featureId, taskIds) {
+    this.broadcast({ type: "operation", action: "dispatch", status: "running" });
     const feature = this.store.getFeature(featureId);
     if (!feature) {
-      this.broadcast({ type: "log", message: `Unknown feature ${featureId}` });
+      const message = `Unknown feature ${featureId}`;
+      this.broadcast({ type: "operation", action: "dispatch", status: "error", message });
+      this.broadcast({ type: "log", message, severity: "error" });
       return;
     }
     const tasks = taskIds?.length ? feature.tasks.filter((t) => taskIds.includes(t.id)) : feature.tasks;
     const validation = validateDag(tasks);
     if (!validation.ok) {
-      this.broadcast({ type: "log", message: `Cannot dispatch: ${validation.error}` });
+      const message = `Cannot dispatch: ${validation.error}`;
+      this.broadcast({ type: "operation", action: "dispatch", status: "error", message });
+      this.broadcast({ type: "log", message, severity: "warning" });
       return;
     }
     const readiness = computeTaskReadiness(feature.tasks);
@@ -701,6 +710,7 @@ var LiberidePipelineController = class _LiberidePipelineController {
       }))
     };
     this.broadcast({ type: "graphStart", payload: startEvent });
+    this.runsTree.trackRun(result.graphId, feature.id, startEvent.label, tasks.map((task) => task.id));
     for (const task of tasks) {
       const ready = readiness.get(task.id);
       this.broadcast({
@@ -724,6 +734,16 @@ var LiberidePipelineController = class _LiberidePipelineController {
       }
     });
     this.graphs.set(result.graphId, { graphId: result.graphId, dispose });
+    this.broadcast({ type: "operation", action: "dispatch", status: "success", message: `Dispatched ${startEvent.label}.` });
+  }
+  async cancel(graphId) {
+    this.broadcast({ type: "operation", action: "cancel", status: "running" });
+    await cancelExecutionGraph(graphId);
+    this.graphs.get(graphId)?.dispose();
+    this.graphs.delete(graphId);
+    this.runsTree.cancelRun(graphId);
+    this.broadcast({ type: "graphDone", payload: { graphId, status: "cancelled" } });
+    this.broadcast({ type: "operation", action: "cancel", status: "success", message: `Cancelled ${graphId}.` });
   }
   renderHtml(webview) {
     const scriptUri = webview.asWebviewUri(vscode3.Uri.joinPath(this.context.extensionUri, "media", "pipeline.js"));
@@ -1753,7 +1773,10 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
       try {
         await deleteConversation(id);
       } catch (err) {
-        this.output.appendLine(`[chat.delete] ${err instanceof Error ? err.message : String(err)}`);
+        const message = err instanceof Error ? err.message : String(err);
+        this.output.appendLine(`[chat.delete] ${message}`);
+        this.broadcast({ type: "log", message: `Could not delete chat: ${message}`, severity: "error" });
+        return;
       }
       this.conversations.delete(id);
       this.messagesCache.delete(id);
@@ -2179,7 +2202,7 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
       });
     }).then(async () => {
       await this.revealFile(clean);
-      this.broadcast({ type: "log", message: `Reverted ${clean} to last git state.` });
+      this.broadcast({ type: "log", message: `Reverted ${clean} to last git state.`, severity: "info" });
     }).catch((err) => {
       this.broadcast({ type: "log", message: `Undo failed for ${clean}: ${err instanceof Error ? err.message : err}` });
     });
@@ -2466,7 +2489,7 @@ _Failed to scaffold pipeline files: ${msg}_`;
         method: "POST",
         body: JSON.stringify({ accessToken: session.accessToken })
       });
-      this.broadcast({ type: "log", message: "GitHub linked for Copilot." });
+      this.broadcast({ type: "log", message: "GitHub linked for Copilot.", severity: "info" });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.broadcast({ type: "log", message: `GitHub sign-in failed: ${msg}` });
@@ -2916,6 +2939,8 @@ var RunsTreeProvider = class {
     if (item.kind === "run") {
       const tree2 = new vscode9.TreeItem(item.run.label, vscode9.TreeItemCollapsibleState.Expanded);
       tree2.description = item.run.status;
+      tree2.contextValue = "run";
+      tree2.iconPath = new vscode9.ThemeIcon(item.run.status === "running" ? "loading~spin" : "run-all");
       return tree2;
     }
     const tree = new vscode9.TreeItem(item.nodeId);
@@ -3021,7 +3046,7 @@ async function activate(context) {
       await store.refresh();
     }
   });
-  pipeline = new LiberidePipelineController(context, store, output);
+  pipeline = new LiberidePipelineController(context, store, output, runsTree);
   chat = new LiberideChatPanelController(context, store, output);
   context.subscriptions.push(
     output,
@@ -3099,9 +3124,13 @@ function commands4(context, specsTree, tasksTree, runsTree) {
       const feature = store.getActiveFeature();
       if (feature?.tasksDirUri) await writeTextFile(vscode12.Uri.joinPath(feature.tasksDirUri, "index.md"), regenerateTasksIndex(feature.tasks));
     }),
-    vscode12.commands.registerCommand("liberide.cancelRun", async () => {
-      const graphId = await vscode12.window.showInputBox({ prompt: "Graph id to cancel" });
-      if (graphId) await cancelExecutionGraph(graphId);
+    vscode12.commands.registerCommand("liberide.cancelRun", async (arg) => {
+      const graphId = typeof arg === "string" ? arg : arg?.run?.graphId;
+      if (!graphId) {
+        void vscode12.window.showInformationMessage("Select an active run from the Agent Runs view to cancel it.");
+        return;
+      }
+      await pipeline.cancel(graphId);
     })
   ];
 }

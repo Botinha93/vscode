@@ -175,9 +175,20 @@ function shellHtml(): string {
         </footer>
       </aside>
       <div class="chat-main">
+        <header class="chat-header">
+          <button class="icon-btn header-back" id="sidebar-toggle" title="Open chats" aria-label="Open chats">&#9776;</button>
+          <div class="chat-title" id="chat-title"></div>
+          <div class="header-actions">
+            <button class="icon-btn" id="new-chat" title="New chat" aria-label="New chat">+</button>
+            <button class="icon-btn" id="header-history" title="Chat history" aria-label="Chat history">&#8634;</button>
+            <button class="icon-btn" id="header-pipeline" title="Open pipeline" aria-label="Open pipeline">&#8644;</button>
+            <button class="icon-btn" id="header-settings" title="Settings" aria-label="Settings">&#9881;</button>
+          </div>
+        </header>
         <div class="activity-topbar" id="activity-topbar" data-active="false"></div>
         <div class="project-bar" id="project-bar"></div>
         <div class="backend-banner" id="backend-banner" hidden></div>
+        <div class="notice-stack" id="notice-stack"></div>
         <section class="chat-transcript" id="transcript"></section>
         <footer class="chat-composer">
           <div class="composer-card">
@@ -367,6 +378,7 @@ function renderSidebar(): void {
     });
     row.querySelector<HTMLButtonElement>(".session-delete")?.addEventListener("click", (event) => {
       event.stopPropagation();
+      if (!window.confirm(`Delete "${s.title}"? This cannot be undone.`)) return;
       send({ type: "deleteSession", sessionId: s.id });
     });
     list.appendChild(row);
@@ -829,7 +841,9 @@ function bindAssistantMeta(turn: HTMLElement, message: ChatMessage): void {
     });
   });
   turn.querySelector<HTMLButtonElement>('[data-act="undo-all"]')?.addEventListener("click", () => {
-    for (const f of message.editedFiles ?? []) send({ type: "undoEdit", path: f.path });
+    const files = message.editedFiles ?? [];
+    if (!files.length || !window.confirm(`Revert ${files.length} edited file${files.length === 1 ? "" : "s"} to the last git state?`)) return;
+    for (const f of files) send({ type: "undoEdit", path: f.path });
   });
   turn.querySelector<HTMLButtonElement>('[data-act="review-all"]')?.addEventListener("click", () => {
     const first = message.editedFiles?.[0];
@@ -1153,10 +1167,17 @@ function renderSettings(): void {
     <textarea id="set-system" data-key="systemPrompt" placeholder="(empty)">${escapeHtml(s.systemPrompt)}</textarea>
 
     <div class="hint">Models, agents, MCP servers, and skills are managed in VoxChat settings. Per-chat picks are stored on the conversation.</div>
+
+    <h2>Integrations</h2>
+    <label>GitHub Copilot</label>
+    <div><button class="ghost-btn" id="copilot-github-login" type="button">Sign in to GitHub for Copilot</button></div>
   `;
   for (const input of grid.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>("[data-key]")) {
     input.addEventListener("change", () => emitSettingChange(input));
   }
+  grid.querySelector<HTMLButtonElement>("#copilot-github-login")?.addEventListener("click", () => {
+    send({ type: "copilotGithubLogin" });
+  });
 }
 
 function emitSettingChange(input: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement): void {
@@ -1599,6 +1620,16 @@ function rerenderMessageInDom(messageId: string): void {
 
 function cssAttr(id: string): string { return id.replace(/"/g, '\\"'); }
 
+function showNotice(message: string, severity: "info" | "warning" | "error" = "warning"): void {
+  const stack = root.querySelector<HTMLDivElement>("#notice-stack");
+  if (!stack) return;
+  const notice = document.createElement("div");
+  notice.className = `inline-notice ${severity}`;
+  notice.innerHTML = `<span>${escapeHtml(message)}</span><button class="icon-btn" title="Dismiss" aria-label="Dismiss">&times;</button>`;
+  notice.querySelector("button")?.addEventListener("click", () => notice.remove());
+  stack.appendChild(notice);
+}
+
 // ---------------------------------------------------------------------------
 // Inbound messages
 // ---------------------------------------------------------------------------
@@ -1726,6 +1757,7 @@ function handleMessage(msg: ChatHostToWebview): void {
       break;
     case "log":
       console.warn("[liberide]", msg.message);
+      showNotice(msg.message, msg.severity);
       break;
   }
 }

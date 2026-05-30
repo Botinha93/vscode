@@ -138,7 +138,7 @@ export type ChatHostToWebview =
   | { type: "messageError"; sessionId: string; messageId: string; error: string; completedAt: number }
   | { type: "toolUpdate"; sessionId: string; messageId: string; entry: ToolTimelineEntry; editedFiles: EditedFileSummary[] }
   | { type: "project"; project: ProjectInfo }
-  | { type: "log"; message: string };
+  | { type: "log"; message: string; severity?: "info" | "warning" | "error" };
 
 export type ChatWebviewToHost =
   | { type: "ready" }

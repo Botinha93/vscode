@@ -6,6 +6,7 @@ import type { SpecStore } from "../spec/store";
 import { scaffoldFeature, updateTaskStatus } from "../spec/writer";
 import { getApiOrigin } from "../api";
 import type { FeatureSummary, PipelineHostToWebview, PipelineWebviewToHost, TaskSummary } from "./protocol";
+import type { RunsTreeProvider } from "../views/runsTree";
 
 interface ActiveGraph {
   graphId: string;
@@ -23,6 +24,7 @@ export class LiberidePipelineController implements vscode.WebviewViewProvider, v
     private readonly context: vscode.ExtensionContext,
     private readonly store: SpecStore,
     private readonly output: vscode.OutputChannel,
+    private readonly runsTree: RunsTreeProvider,
   ) {
     this.disposables.push(
       onSettingsChange((settings) => this.broadcast({ type: "settings", settings })),
@@ -125,9 +127,7 @@ export class LiberidePipelineController implements vscode.WebviewViewProvider, v
           await this.dispatch(message.featureId, message.taskIds);
           break;
         case "cancelGraph":
-          await cancelExecutionGraph(message.graphId);
-          this.graphs.get(message.graphId)?.dispose();
-          this.graphs.delete(message.graphId);
+          await this.cancel(message.graphId);
           break;
         case "openTask": {
           const task = this.store.getTask(message.featureId, message.taskId);
@@ -141,14 +141,18 @@ export class LiberidePipelineController implements vscode.WebviewViewProvider, v
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       this.output.appendLine(`[pipeline] ${msg}`);
-      this.broadcast({ type: "log", message: msg });
+      this.broadcast({ type: "operation", action: message.type === "scaffoldFeature" ? "scaffold" : message.type === "cancelGraph" ? "cancel" : "dispatch", status: "error", message: msg });
+      this.broadcast({ type: "log", message: msg, severity: "error" });
     }
   }
 
   private async scaffold(name: string): Promise<void> {
+    this.broadcast({ type: "operation", action: "scaffold", status: "running" });
     const folder = vscode.workspace.workspaceFolders?.[0];
     if (!folder) {
-      this.broadcast({ type: "log", message: "Open a workspace folder to scaffold a feature." });
+      const message = "Open a workspace folder to scaffold a feature.";
+      this.broadcast({ type: "operation", action: "scaffold", status: "error", message });
+      this.broadcast({ type: "log", message, severity: "warning" });
       return;
     }
     const root = await scaffoldFeature(folder, name);
@@ -156,18 +160,24 @@ export class LiberidePipelineController implements vscode.WebviewViewProvider, v
     this.store.setActiveFeature(id);
     await this.context.workspaceState.update("liberide.activeFeatureId", id);
     await this.store.refresh();
+    this.broadcast({ type: "operation", action: "scaffold", status: "success", message: `Created ${name}.` });
   }
 
   async dispatch(featureId: string, taskIds?: string[]): Promise<void> {
+    this.broadcast({ type: "operation", action: "dispatch", status: "running" });
     const feature = this.store.getFeature(featureId);
     if (!feature) {
-      this.broadcast({ type: "log", message: `Unknown feature ${featureId}` });
+      const message = `Unknown feature ${featureId}`;
+      this.broadcast({ type: "operation", action: "dispatch", status: "error", message });
+      this.broadcast({ type: "log", message, severity: "error" });
       return;
     }
     const tasks = taskIds?.length ? feature.tasks.filter((t) => taskIds.includes(t.id)) : feature.tasks;
     const validation = validateDag(tasks);
     if (!validation.ok) {
-      this.broadcast({ type: "log", message: `Cannot dispatch: ${validation.error}` });
+      const message = `Cannot dispatch: ${validation.error}`;
+      this.broadcast({ type: "operation", action: "dispatch", status: "error", message });
+      this.broadcast({ type: "log", message, severity: "warning" });
       return;
     }
     const readiness = computeTaskReadiness(feature.tasks);
@@ -183,6 +193,7 @@ export class LiberidePipelineController implements vscode.WebviewViewProvider, v
       })),
     };
     this.broadcast({ type: "graphStart", payload: startEvent });
+    this.runsTree.trackRun(result.graphId, feature.id, startEvent.label, tasks.map((task) => task.id));
     for (const task of tasks) {
       const ready = readiness.get(task.id);
       this.broadcast({
@@ -206,6 +217,17 @@ export class LiberidePipelineController implements vscode.WebviewViewProvider, v
       }
     });
     this.graphs.set(result.graphId, { graphId: result.graphId, dispose });
+    this.broadcast({ type: "operation", action: "dispatch", status: "success", message: `Dispatched ${startEvent.label}.` });
+  }
+
+  async cancel(graphId: string): Promise<void> {
+    this.broadcast({ type: "operation", action: "cancel", status: "running" });
+    await cancelExecutionGraph(graphId);
+    this.graphs.get(graphId)?.dispose();
+    this.graphs.delete(graphId);
+    this.runsTree.cancelRun(graphId);
+    this.broadcast({ type: "graphDone", payload: { graphId, status: "cancelled" } });
+    this.broadcast({ type: "operation", action: "cancel", status: "success", message: `Cancelled ${graphId}.` });
   }
 
   private renderHtml(webview: vscode.Webview): string {

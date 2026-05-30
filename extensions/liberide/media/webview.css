@@ -319,6 +319,20 @@ button { font: inherit; }
   font-family: var(--vscode-editor-font-family, monospace);
   font-size: 0.95em;
 }
+.notice-stack:empty { display: none; }
+.inline-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--chatllm-border);
+  background: color-mix(in srgb, var(--vscode-editorWarning-foreground, #c4a000) 12%, transparent);
+  color: var(--vscode-foreground);
+  font-size: 0.82em;
+}
+.inline-notice span { flex: 1; }
+.inline-notice.error { background: color-mix(in srgb, var(--vscode-errorForeground, #f48771) 14%, transparent); }
+.inline-notice.info { background: color-mix(in srgb, var(--chatllm-accent) 12%, transparent); }
 .link-btn {
   background: transparent;
   border: none;
@@ -1353,7 +1367,7 @@ button { font: inherit; }
  * PIPELINE
  * ========================================================================= */
 
-main.chatllm-main {
+main.liberide-main {
   flex: 1;
   overflow: hidden;
   display: flex;
@@ -1361,12 +1375,12 @@ main.chatllm-main {
   position: relative;
 }
 
-section.chatllm-tab {
+section.liberide-tab {
   display: none;
   flex: 1;
   overflow: hidden;
 }
-section.chatllm-tab.active { display: flex; flex-direction: column; }
+section.liberide-tab.active { display: flex; flex-direction: column; }
 
 .pipeline-shell {
   display: flex;
@@ -1554,6 +1568,7 @@ section.chatllm-tab.active { display: flex; flex-direction: column; }
   background: var(--vscode-badge-background);
   color: var(--vscode-badge-foreground);
 }
+.run-actions { display: flex; align-items: center; gap: 4px; }
 .run-item .nodes {
   display: flex;
   flex-wrap: wrap;

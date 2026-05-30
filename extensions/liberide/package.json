@@ -274,9 +274,28 @@
           "command": "liberide.setActiveFeature",
           "when": "view == liberide.specs && viewItem == feature",
           "group": "inline"
+        },
+        {
+          "command": "liberide.cancelRun",
+          "when": "view == liberide.runs && viewItem == run",
+          "group": "inline"
         }
       ]
-    }
+    },
+    "viewsWelcome": [
+      {
+        "view": "liberide.specs",
+        "contents": "No spec features yet.\n[Scaffold a feature](command:liberide.scaffoldFeature)"
+      },
+      {
+        "view": "liberide.tasks",
+        "contents": "Select a feature in the Specs view to inspect and dispatch its tasks."
+      },
+      {
+        "view": "liberide.runs",
+        "contents": "Dispatched feature and task runs appear here.\n[Open Pipeline](command:liberide.openPipeline)"
+      }
+    ]
   },
   "dependencies": {
     "@nexus/shared": "file:../../../packages/shared",

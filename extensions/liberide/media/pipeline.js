@@ -38343,7 +38343,8 @@
     features: [],
     activeFeatureId: null,
     activeTasks: [],
-    runs: /* @__PURE__ */ new Map()
+    runs: /* @__PURE__ */ new Map(),
+    busyAction: null
   };
   var root = document.getElementById("root");
   var cy = null;
@@ -38375,6 +38376,7 @@
         </div>
         <button class="icon-btn" id="chat-open" title="Open LiberIDE chat" aria-label="Open LiberIDE chat">\u270E</button>
       </header>
+      <div class="notice-stack" id="pipeline-notices"></div>
       <div class="pipeline-stack">
         <section class="pipeline-section">
           <h3>Features</h3>
@@ -38417,7 +38419,9 @@
       const name = scaffoldInput.value.trim();
       if (!name) return;
       send({ type: "scaffoldFeature", name });
-      scaffoldInput.value = "";
+    });
+    scaffoldInput.addEventListener("keydown", (event3) => {
+      if (event3.key === "Enter") scaffoldBtn.click();
     });
     root.querySelector("#dispatch-btn").addEventListener("click", () => {
       if (!state.activeFeatureId) return;
@@ -38445,6 +38449,11 @@
     const list = root.querySelector("#task-list");
     if (!list) return;
     list.innerHTML = "";
+    const dispatch = root.querySelector("#dispatch-btn");
+    if (dispatch) {
+      dispatch.disabled = state.busyAction !== null || !state.activeFeatureId;
+      dispatch.textContent = state.busyAction === "dispatch" ? "Dispatching..." : "Dispatch";
+    }
     if (!state.activeFeatureId) {
       list.innerHTML = `<div class="meta empty-row">Select a feature to see tasks.</div>`;
       return;
@@ -38488,7 +38497,8 @@
       wrapper.innerHTML = `
       <header>
         <div><strong>${escapeHtml(run.label)}</strong><div class="meta">graph ${escapeHtml(run.graphId)}</div></div>
-        <span class="pill">${escapeHtml(run.status)}</span>
+        <div class="run-actions"><span class="pill">${escapeHtml(run.status)}</span>
+        ${run.status === "running" ? `<button class="icon-btn run-cancel" title="Cancel run" aria-label="Cancel run">&times;</button>` : ""}</div>
       </header>
       <div class="nodes"></div>
     `;
@@ -38501,6 +38511,11 @@
         nodesEl.appendChild(chip);
       }
       wrapper.addEventListener("click", () => focusGraph(run.graphId));
+      wrapper.querySelector(".run-cancel")?.addEventListener("click", (event3) => {
+        event3.stopPropagation();
+        if (!window.confirm(`Cancel ${run.label}?`)) return;
+        send({ type: "cancelGraph", graphId: run.graphId });
+      });
       container2.appendChild(wrapper);
     }
   }
@@ -38581,6 +38596,22 @@
   function escapeHtml(value) {
     return value.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] ?? ch);
   }
+  function showNotice(message, severity = "warning") {
+    const stack = root.querySelector("#pipeline-notices");
+    if (!stack) return;
+    const notice = document.createElement("div");
+    notice.className = `inline-notice ${severity}`;
+    notice.innerHTML = `<span>${escapeHtml(message)}</span><button class="icon-btn" title="Dismiss" aria-label="Dismiss">&times;</button>`;
+    notice.querySelector("button")?.addEventListener("click", () => notice.remove());
+    stack.appendChild(notice);
+  }
+  function renderBusyState() {
+    const scaffold = root.querySelector("#scaffold-btn");
+    const scaffoldInput = root.querySelector("#scaffold-name");
+    if (scaffold) scaffold.disabled = state.busyAction !== null;
+    if (scaffoldInput) scaffoldInput.disabled = state.busyAction !== null;
+    renderTasks();
+  }
   function handleMessage(msg) {
     switch (msg.type) {
       case "init":
@@ -38632,8 +38663,18 @@
         renderRuns();
         break;
       }
+      case "operation":
+        state.busyAction = msg.status === "running" ? msg.action : null;
+        if (msg.status === "success" && msg.action === "scaffold") {
+          const input = root.querySelector("#scaffold-name");
+          if (input) input.value = "";
+        }
+        if (msg.message) showNotice(msg.message, msg.status === "error" ? "error" : "info");
+        renderBusyState();
+        break;
       case "log":
         console.warn("[liberide.pipeline]", msg.message);
+        showNotice(msg.message, msg.severity);
         break;
     }
   }

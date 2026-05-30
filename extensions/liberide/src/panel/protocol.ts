@@ -43,7 +43,8 @@ export type PipelineHostToWebview =
   | { type: "graphStart"; payload: GraphStartEvent }
   | { type: "graphNode"; payload: GraphNodeUpdate }
   | { type: "graphDone"; payload: GraphDoneEvent }
-  | { type: "log"; message: string };
+  | { type: "operation"; action: "scaffold" | "dispatch" | "cancel"; status: "running" | "success" | "error"; message?: string }
+  | { type: "log"; message: string; severity?: "info" | "warning" | "error" };
 
 export type PipelineWebviewToHost =
   | { type: "ready" }
