@@ -58,18 +58,27 @@ function commands(
   tasksTree: TasksTreeProvider,
   runsTree: RunsTreeProvider,
 ): vscode.Disposable[] {
+  /** Wrap an async command handler so uncaught errors show a VS Code notification. */
+  function safe<T extends unknown[]>(fn: (...args: T) => Promise<void>): (...args: T) => void {
+    return (...args: T) => {
+      fn(...args).catch((err: unknown) => {
+        void vscode.window.showErrorMessage(err instanceof Error ? err.message : String(err));
+      });
+    };
+  }
+
   return [
     vscode.commands.registerCommand("liberide.openChat", () => chat.show()),
-    vscode.commands.registerCommand("liberide.newChat", async () => {
+    vscode.commands.registerCommand("liberide.newChat", safe(async () => {
       chat.show();
       await chat.newSession();
-    }),
+    })),
     vscode.commands.registerCommand("liberide.openSettings", () => chat.openSettings()),
     vscode.commands.registerCommand("liberide.openPipeline", () => pipeline.show()),
-    vscode.commands.registerCommand("liberide.refreshSpecs", async () => { await store.refresh(); specsTree.refresh(); }),
-    vscode.commands.registerCommand("liberide.refreshTasks", async () => { await store.refresh(); tasksTree.refresh(); }),
+    vscode.commands.registerCommand("liberide.refreshSpecs", safe(async () => { await store.refresh(); specsTree.refresh(); })),
+    vscode.commands.registerCommand("liberide.refreshTasks", safe(async () => { await store.refresh(); tasksTree.refresh(); })),
     vscode.commands.registerCommand("liberide.refreshRuns", () => runsTree.refresh()),
-    vscode.commands.registerCommand("liberide.scaffoldFeature", async () => {
+    vscode.commands.registerCommand("liberide.scaffoldFeature", safe(async () => {
       const folder = vscode.workspace.workspaceFolders?.[0];
       const name = await vscode.window.showInputBox({ prompt: "Feature name" });
       if (!folder || !name) return;
@@ -79,43 +88,43 @@ function commands(
       await context.workspaceState.update("liberide.activeFeatureId", id);
       await store.refresh();
       specsTree.refresh();
-    }),
-    vscode.commands.registerCommand("liberide.setActiveFeature", async (id: string) => {
+    })),
+    vscode.commands.registerCommand("liberide.setActiveFeature", safe(async (id: string) => {
       store.setActiveFeature(id);
       await context.workspaceState.update("liberide.activeFeatureId", id);
       tasksTree.refresh();
-    }),
-    vscode.commands.registerCommand("liberide.openTask", async (arg?: { featureId: string; task: { id: string } }) => {
+    })),
+    vscode.commands.registerCommand("liberide.openTask", safe(async (arg?: { featureId: string; task: { id: string } }) => {
       const task = arg && store.getTask(arg.featureId, arg.task.id);
       if (task) await vscode.window.showTextDocument(task.filePath);
-    }),
-    vscode.commands.registerCommand("liberide.runTask", async (arg?: { featureId: string; task: { id: string } }) => {
+    })),
+    vscode.commands.registerCommand("liberide.runTask", safe(async (arg?: { featureId: string; task: { id: string } }) => {
       const feature = arg && store.getFeature(arg.featureId);
       if (!feature || !arg) return;
       await pipeline.dispatch(feature.id, [arg.task.id]);
-    }),
-    vscode.commands.registerCommand("liberide.markTaskReady", async (arg?: { featureId: string; task: { id: string } }) => {
+    })),
+    vscode.commands.registerCommand("liberide.markTaskReady", safe(async (arg?: { featureId: string; task: { id: string } }) => {
       const task = arg && store.getTask(arg.featureId, arg.task.id);
       if (task) await updateTaskStatus(task.filePath, "ready");
       await store.refresh();
-    }),
-    vscode.commands.registerCommand("liberide.dispatchFeature", async () => {
+    })),
+    vscode.commands.registerCommand("liberide.dispatchFeature", safe(async () => {
       const feature = store.getActiveFeature();
       if (!feature) return;
       await pipeline.dispatch(feature.id);
-    }),
-    vscode.commands.registerCommand("liberide.regenerateTasksIndex", async () => {
+    })),
+    vscode.commands.registerCommand("liberide.regenerateTasksIndex", safe(async () => {
       const feature = store.getActiveFeature();
       if (feature?.tasksDirUri) await writeTextFile(vscode.Uri.joinPath(feature.tasksDirUri, "index.md"), regenerateTasksIndex(feature.tasks));
-    }),
-    vscode.commands.registerCommand("liberide.cancelRun", async (arg?: { kind?: string; run?: { graphId?: string } } | string) => {
+    })),
+    vscode.commands.registerCommand("liberide.cancelRun", safe(async (arg?: { kind?: string; run?: { graphId?: string } } | string) => {
       const graphId = typeof arg === "string" ? arg : arg?.run?.graphId;
       if (!graphId) {
         void vscode.window.showInformationMessage("Select an active run from the Agent Runs view to cancel it.");
         return;
       }
       await pipeline.cancel(graphId);
-    }),
+    })),
   ];
 }
 

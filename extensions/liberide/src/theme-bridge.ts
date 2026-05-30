@@ -122,9 +122,15 @@ export function createThemeBridge(output: vscode.OutputChannel): vscode.Disposab
     }).catch((error) => output.appendLine(`Theme publish error: ${error instanceof Error ? error.message : String(error)}`));
   }
 
+  let retryDelay = 1000;
+  const MAX_RETRY_DELAY = 30_000;
+
   function connect() {
     if (disposed) return;
     ws = new WebSocket(`${apiOrigin.replace(/^http/, "ws")}/api/theme/stream`);
+    ws.addEventListener("open", () => {
+      retryDelay = 1000; // reset on successful connection
+    });
     ws.addEventListener("message", (event) => {
       const payload = JSON.parse(String(event.data)) as { type?: string; snapshot?: ThemeSnapshotPayload };
       if (payload.type !== "theme" || payload.snapshot?.source === "vscode") return;
@@ -134,7 +140,11 @@ export function createThemeBridge(output: vscode.OutputChannel): vscode.Disposab
         .then(() => applyColorOverrides(snapshot?.colorOverrides))
         .then(() => applyTokenColorOverrides(snapshot?.tokenColorOverrides));
     });
-    ws.addEventListener("close", () => setTimeout(connect, 1000));
+    ws.addEventListener("close", () => {
+      const delay = retryDelay;
+      retryDelay = Math.min(retryDelay * 2, MAX_RETRY_DELAY);
+      setTimeout(connect, delay);
+    });
   }
 
   const envTheme = NEXUS_TO_VSCODE[`${process.env.LIBERVOX_THEME_FAMILY}:${process.env.LIBERVOX_THEME_MODE === "system" ? "dark" : process.env.LIBERVOX_THEME_MODE}`];

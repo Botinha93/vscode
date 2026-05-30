@@ -126,6 +126,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
 
   private conversations = new Map<string, Conversation>();
   private messagesCache = new Map<string, ConversationMessage[]>();
+  private static readonly MAX_CACHED_CONVERSATIONS = 20;
   private attachmentBytes = new Map<string, { data: Uint8Array; mimeType: string; name: string }>();
   private overrides: OverridesCache = {};
   private sessionKinds = new Map<string, ChatSession["kind"]>();
@@ -474,7 +475,18 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
   }
 
   private async ensureMessagesLoaded(conversationId: string): Promise<void> {
-    if (this.messagesCache.has(conversationId)) return;
+    if (this.messagesCache.has(conversationId)) {
+      // Re-insert to mark as most-recently-used for LRU eviction.
+      const cached = this.messagesCache.get(conversationId)!;
+      this.messagesCache.delete(conversationId);
+      this.messagesCache.set(conversationId, cached);
+      return;
+    }
+    // Evict the oldest entry when the cache is at capacity.
+    if (this.messagesCache.size >= LiberideChatPanelController.MAX_CACHED_CONVERSATIONS) {
+      const oldest = this.messagesCache.keys().next().value;
+      if (oldest) this.messagesCache.delete(oldest);
+    }
     try {
       const messages = await listConversationMessages(conversationId);
       this.messagesCache.set(conversationId, messages);
@@ -765,6 +777,8 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     if (!session) return;
     const next = (session.overrides.documentIds ?? []).filter((id) => id !== documentId);
     await this.updateOverrides(sessionId, { documentIds: next });
+    // Free the buffered file bytes so repeated attach/remove cycles don't leak memory.
+    this.attachmentBytes.delete(documentId);
   }
 
   private async updateOverrides(id: string, overrides: ChatOverrides): Promise<void> {

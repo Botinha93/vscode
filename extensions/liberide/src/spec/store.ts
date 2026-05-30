@@ -9,15 +9,26 @@ export class SpecStore implements vscode.Disposable {
   private watcher?: vscode.FileSystemWatcher;
   private promptWatcher?: vscode.FileSystemWatcher;
   private activeFeatureId?: string;
+  private refreshTimer?: ReturnType<typeof setTimeout>;
+  private refreshInProgress = false;
+  private refreshQueued = false;
 
   constructor(private readonly output: vscode.OutputChannel) {}
+
+  private scheduleRefresh(): void {
+    if (this.refreshTimer) clearTimeout(this.refreshTimer);
+    this.refreshTimer = setTimeout(() => {
+      this.refreshTimer = undefined;
+      void this.refresh();
+    }, 300);
+  }
 
   async initialize(context: vscode.ExtensionContext): Promise<void> {
     this.activeFeatureId = context.workspaceState.get("liberide.activeFeatureId");
     this.watcher = vscode.workspace.createFileSystemWatcher("**//.liberide/specs/**/*.md");
-    this.watcher.onDidCreate(() => void this.refresh());
-    this.watcher.onDidChange(() => void this.refresh());
-    this.watcher.onDidDelete(() => void this.refresh());
+    this.watcher.onDidCreate(() => this.scheduleRefresh());
+    this.watcher.onDidChange(() => this.scheduleRefresh());
+    this.watcher.onDidDelete(() => this.scheduleRefresh());
     context.subscriptions.push(this.watcher);
     this.promptWatcher = vscode.workspace.createFileSystemWatcher("**/.chatllm/**/*.md");
     const syncPrompts = () => {
@@ -43,21 +54,34 @@ export class SpecStore implements vscode.Disposable {
   getTask(featureId: string, taskId: string): TaskContract | undefined { return this.features.get(featureId)?.tasks.find((task) => task.id === taskId); }
 
   async refresh(): Promise<void> {
-    this.features.clear();
-    for (const folder of vscode.workspace.workspaceFolders ?? []) {
-      const root = vscode.Uri.joinPath(folder.uri, ".liberide", "specs");
-      try {
-        for (const [name, type] of await vscode.workspace.fs.readDirectory(root)) {
-          if (type === vscode.FileType.Directory) {
-            const feature = await this.loadFeature(root, name);
-            if (feature) this.features.set(feature.id, feature);
+    if (this.refreshInProgress) {
+      this.refreshQueued = true;
+      return;
+    }
+    this.refreshInProgress = true;
+    try {
+      this.features.clear();
+      for (const folder of vscode.workspace.workspaceFolders ?? []) {
+        const root = vscode.Uri.joinPath(folder.uri, ".liberide", "specs");
+        try {
+          for (const [name, type] of await vscode.workspace.fs.readDirectory(root)) {
+            if (type === vscode.FileType.Directory) {
+              const feature = await this.loadFeature(root, name);
+              if (feature) this.features.set(feature.id, feature);
+            }
           }
+        } catch {
+          // Workspace has no spec directory yet.
         }
-      } catch {
-        // Workspace has no spec directory yet.
+      }
+      this.changeEmitter.fire();
+    } finally {
+      this.refreshInProgress = false;
+      if (this.refreshQueued) {
+        this.refreshQueued = false;
+        void this.refresh();
       }
     }
-    this.changeEmitter.fire();
   }
 
   private async loadFeature(specsRoot: vscode.Uri, id: string): Promise<FeatureSpec> {
@@ -96,6 +120,7 @@ export class SpecStore implements vscode.Disposable {
   }
 
   dispose(): void {
+    if (this.refreshTimer) clearTimeout(this.refreshTimer);
     this.watcher?.dispose();
     this.promptWatcher?.dispose();
     this.changeEmitter.dispose();

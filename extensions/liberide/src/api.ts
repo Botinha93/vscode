@@ -232,10 +232,17 @@ export function subscribeConversationListSync(onChange: () => void): () => void 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+      const MAX_SSE_BUFFER_BYTES = 1_000_000; // 1 MB cap against malformed/stuck streams
       while (!closed) {
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
+        if (buffer.length > MAX_SSE_BUFFER_BYTES) {
+          console.warn("[liberide] SSE buffer exceeded limit — resetting stream");
+          reader.cancel().catch(() => undefined);
+          if (!closed) startPoll();
+          return;
+        }
         const parts = buffer.split("\n\n");
         buffer = parts.pop() ?? "";
         for (const part of parts) {
