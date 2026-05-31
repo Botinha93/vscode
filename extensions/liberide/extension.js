@@ -379,7 +379,8 @@ function readSettings() {
     toolsEnabled: true,
     systemPrompt: cfg.get("systemPrompt") ?? "",
     copilotUiEnabled: cfg.get("copilot.enabled") ?? false,
-    copilotModelsEnabled: cfg.get("copilot.modelsEnabled") ?? true
+    copilotModelsEnabled: cfg.get("copilot.modelsEnabled") ?? true,
+    defaultAllowedAgentIds: cfg.get("defaultAllowedAgentIds") ?? []
   };
 }
 var FLAT_TO_DOTTED = {
@@ -1173,7 +1174,13 @@ async function streamChat(body, handlers, signal) {
     const event = rawEvent.match(/^event: (.+)$/m)?.[1];
     const dataLine = rawEvent.match(/^data: (.+)$/m)?.[1];
     if (!event || !dataLine) return;
-    const data = JSON.parse(dataLine);
+    let data;
+    try {
+      data = JSON.parse(dataLine);
+    } catch {
+      console.warn("[stream-client] could not parse SSE chunk:", dataLine.slice(0, 200));
+      return;
+    }
     if (event === "token") handlers.onToken?.(data.token);
     if (event === "tool") handlers.onToolEvent?.(data);
     if (event === "terminal_delegate") {
@@ -1187,15 +1194,19 @@ async function streamChat(body, handlers, signal) {
     if (event === "error") throw new Error(data.error);
     if (event === "done") finalResponse = data;
   };
-  while (true) {
-    const { value, done } = await reader.read();
-    buffer += decoder.decode(value, { stream: !done });
-    const parts = buffer.split("\n\n");
-    buffer = parts.pop() ?? "";
-    for (const part of parts) consume(part);
-    if (done) break;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop() ?? "";
+      for (const part of parts) consume(part);
+      if (done) break;
+    }
+    if (buffer.trim()) consume(buffer);
+  } finally {
+    reader.cancel().catch(() => void 0);
   }
-  if (buffer.trim()) consume(buffer);
   if (!finalResponse) throw new Error("Stream ended before the chat response completed.");
   return finalResponse;
 }
@@ -1269,6 +1280,11 @@ var import_node_child_process2 = require("node:child_process");
 var import_node_path2 = require("node:path");
 var OVERRIDES_STORAGE_KEY = "liberide.chat.overrides";
 var ACTIVE_SESSION_STORAGE_KEY = "liberide.chat.activeSession";
+function resolveAllowedAgentIds(agents, configured) {
+  const invokable = agents.filter((agent) => !agent.disableModelInvocation).map((agent) => agent.id);
+  if (!configured?.length) return invokable;
+  return configured.filter((id) => invokable.includes(id));
+}
 function toolActivityKind(name) {
   if (name === "request_approval") return "approval";
   if (name === "agent" || name === "agent_group" || name === "agent_result") return "agent";
@@ -1744,13 +1760,16 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
   }
   conversationOverrides(conv) {
     const stored = this.overrides[conv.id] ?? {};
+    const settings = readSettings();
+    const defaultAllowed = resolveAllowedAgentIds(this.catalog.agents, settings.defaultAllowedAgentIds);
     return {
       provider: conv.provider ?? stored.provider,
       model: conv.model ?? stored.model,
       chatMode: "agent",
       useRag: stored.useRag,
       toolsEnabled: true,
-      agentIds: conv.agentIds ?? stored.agentIds,
+      agentId: conv.agentId ?? stored.agentId,
+      allowedAgentIds: conv.allowedAgentIds?.length ? conv.allowedAgentIds : stored.allowedAgentIds?.length ? stored.allowedAgentIds : defaultAllowed,
       skillIds: stored.skillIds,
       mcpServerIds: stored.mcpServerIds,
       documentIds: stored.documentIds ?? []
@@ -1922,7 +1941,8 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     const patch = {};
     if (normalizedOverrides.provider) patch.provider = toWireProvider(normalizedOverrides.provider);
     if (normalizedOverrides.model) patch.model = normalizedOverrides.model;
-    if (normalizedOverrides.agentIds) patch.agentIds = normalizedOverrides.agentIds;
+    if (normalizedOverrides.agentId !== void 0) patch.agentId = normalizedOverrides.agentId;
+    if (normalizedOverrides.allowedAgentIds) patch.allowedAgentIds = normalizedOverrides.allowedAgentIds;
     if (Object.keys(patch).length > 0) {
       try {
         const updated = await patchConversation(id, patch);
@@ -1976,7 +1996,7 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     if (!conversation) {
       const draftId = session.id;
       const draftKind = session.kind;
-      conversation = await this.createSessionConversation(content);
+      conversation = await this.createSessionConversation(content, session.overrides);
       if (!conversation) return;
       this.conversations.set(conversation.id, conversation);
       this.messagesCache.set(conversation.id, []);
@@ -2030,7 +2050,8 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
       useRag: pipelineMode ? false : useRag,
       toolsEnabled,
       mcpServerIds: pipelineMode ? [] : overrides.mcpServerIds ?? [],
-      agentIds: pipelineMode ? [] : overrides.agentIds ?? [],
+      agentId: pipelineMode ? void 0 : overrides.agentId,
+      allowedAgentIds: pipelineMode ? [] : overrides.allowedAgentIds ?? [],
       maxAgentSpawns: this.catalog.maxAgentSpawns,
       ideContext: this.buildIdeContext(conversationId)
     };
@@ -2187,10 +2208,18 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
       return existing ?? null;
     }
   }
-  async createSessionConversation(firstMessage) {
+  async createSessionConversation(firstMessage, overrides = {}) {
     try {
       const title = deriveTitle(firstMessage);
-      const conv = await createConversation(title);
+      let conv = await createConversation(title);
+      const settings = readSettings();
+      const allowedAgentIds = overrides.allowedAgentIds?.length ? overrides.allowedAgentIds : resolveAllowedAgentIds(this.catalog.agents, settings.defaultAllowedAgentIds);
+      const patch = {};
+      if (overrides.agentId) patch.agentId = overrides.agentId;
+      if (allowedAgentIds.length) patch.allowedAgentIds = allowedAgentIds;
+      if (Object.keys(patch).length) {
+        conv = await patchConversation(conv.id, patch);
+      }
       const assigned = await this.assignConversationToProject(conv);
       return assigned ?? conv;
     } catch (err) {
@@ -2365,7 +2394,7 @@ ${block}
       useRag: false,
       toolsEnabled: true,
       mcpServerIds: [],
-      agentIds: [],
+      allowedAgentIds: [],
       maxAgentSpawns: this.catalog.maxAgentSpawns
     };
     const abort = new AbortController();

@@ -52,6 +52,12 @@
           "type": "boolean",
           "default": true,
           "description": "Enable Copilot model access via VS Code's Language Model API (vscode.lm). Requires the Copilot model provider to be available."
+        },
+        "liberide.defaultAllowedAgentIds": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Default agents the model may spawn via the agent tool for new LiberIDE chats. Empty means all callable agents. Per-conversation values sync with VoxChat."
         }
       }
     },

@@ -818,17 +818,22 @@
   function send(msg) {
     vscode.postMessage(msg);
   }
+  function invokableAgents(agents) {
+    return agents.filter((agent) => !agent.disableModelInvocation);
+  }
   function effective() {
     const s = state.settings;
     const o = state.activeSession?.overrides ?? {};
     const fallbackModel = state.catalog.models.find((m) => m.enabled);
+    const defaultAllowed = s?.defaultAllowedAgentIds?.length ? s.defaultAllowedAgentIds.filter((id) => invokableAgents(state.catalog.agents).some((agent) => agent.id === id)) : invokableAgents(state.catalog.agents).map((agent) => agent.id);
     return {
       provider: o.provider ?? fallbackModel?.provider,
       model: o.model ?? fallbackModel?.modelId,
       chatMode: "agent",
       useRag: o.useRag ?? s?.useRag ?? false,
       toolsEnabled: true,
-      agentIds: o.agentIds ?? [],
+      agentId: o.agentId,
+      allowedAgentIds: o.allowedAgentIds?.length ? o.allowedAgentIds : defaultAllowed,
       skillIds: o.skillIds ?? [],
       mcpServerIds: o.mcpServerIds ?? [],
       documentIds: o.documentIds ?? []
@@ -1505,11 +1510,12 @@
     if (!toolbar) return;
     const eff = effective();
     const modelLabel = describeModel(eff.provider, eff.model);
-    const agentCount = eff.agentIds.length;
+    const primaryAgent = state.catalog.agents.find((agent) => agent.id === eff.agentId);
+    const agentLabel = primaryAgent ? primaryAgent.name : "Agent";
     toolbar.innerHTML = `
     <button class="composer-icon-btn" id="attach-btn" title="Attach files for chat and RAG" aria-label="Attach">+</button>
-    <button class="chip${agentCount > 0 ? " chip-on" : ""}" id="chip-agents" title="Attach agents from LiberIDE" ${state.catalog.agents.length === 0 ? "disabled" : ""}>
-      \u269B Agents${agentCount ? ` (${agentCount})` : ""}
+    <button class="chip${primaryAgent ? " chip-on" : ""}" id="chip-agents" title="Choose conversation agent" ${state.catalog.agents.length === 0 ? "disabled" : ""}>
+      \u269B ${escapeHtml2(agentLabel)}
     </button>
     <span class="composer-spacer"></span>
     <button class="chip chip-model" id="chip-model" title="Pick model for this chat" ${state.catalog.models.length === 0 ? "disabled" : ""}>
@@ -1668,7 +1674,7 @@
     if (state.catalog.agents.length === 0) {
       el.innerHTML = `
       <header class="popover-header">
-        <span>Agents</span>
+        <span>Conversation agent</span>
         <button class="icon-btn" id="agent-close">\u2715</button>
       </header>
       <div class="popover-empty">No agents configured in LiberIDE.</div>
@@ -1676,13 +1682,17 @@
     } else {
       el.innerHTML = `
       <header class="popover-header">
-        <span>Agents for this chat</span>
+        <span>Conversation agent</span>
         <button class="icon-btn" id="agent-close">\u2715</button>
       </header>
       <div class="popover-body">
         <ul>
+          <li class="popover-row${!eff.agentId ? " selected" : ""}" data-id="">
+            <div class="popover-row-title">No primary agent</div>
+            <div class="popover-row-detail">Use the default assistant persona for this chat.</div>
+          </li>
           ${state.catalog.agents.map((a) => {
-        const selected = eff.agentIds.includes(a.id);
+        const selected = eff.agentId === a.id;
         return `<li class="popover-row${selected ? " selected" : ""}" data-id="${escapeAttr(a.id)}">
               <div class="popover-row-title">${escapeHtml2(a.name)}</div>
               <div class="popover-row-detail">${escapeHtml2(a.description || "")}</div>
@@ -1698,11 +1708,8 @@
     });
     for (const li of el.querySelectorAll(".popover-row")) {
       li.addEventListener("click", () => {
-        const id = li.dataset.id;
-        const current = new Set(eff.agentIds);
-        if (current.has(id)) current.delete(id);
-        else current.add(id);
-        setOverrides({ agentIds: [...current] });
+        const id = li.dataset.id || void 0;
+        setOverrides({ agentId: id });
       });
     }
   }
@@ -1730,7 +1737,22 @@
     <label for="set-system">Local system prompt</label>
     <textarea id="set-system" data-key="systemPrompt" placeholder="(empty)">${escapeHtml2(s.systemPrompt)}</textarea>
 
-    <div class="hint">Models, agents, MCP servers, and skills are managed in VoxChat settings. Per-chat picks are stored on the conversation.</div>
+    <h2>Callable agents</h2>
+    <p class="hint">Default allowed agents for new chats. Existing conversations keep their saved list and stay in sync with VoxChat.</p>
+    <div class="settings-agent-list">
+      ${invokableAgents(state.catalog.agents).map((agent) => {
+      const selected = (s.defaultAllowedAgentIds ?? []).includes(agent.id);
+      return `<label class="settings-agent-option">
+          <input type="checkbox" data-default-agent="${escapeAttr(agent.id)}" ${selected ? "checked" : ""} />
+          <span>
+            <strong>${escapeHtml2(agent.name)}</strong>
+            <span>${escapeHtml2(agent.description || "")}</span>
+          </span>
+        </label>`;
+    }).join("") || '<p class="hint">No callable agents configured in VoxChat.</p>'}
+    </div>
+
+    <div class="hint">Models, MCP servers, and skills are managed in VoxChat settings. The conversation agent is chosen per chat above the composer.</div>
 
     <h2>Integrations</h2>
     <label>GitHub Copilot</label>
@@ -1738,6 +1760,15 @@
   `;
     for (const input of grid.querySelectorAll("[data-key]")) {
       input.addEventListener("change", () => emitSettingChange(input));
+    }
+    for (const input of grid.querySelectorAll("input[data-default-agent]")) {
+      input.addEventListener("change", () => {
+        const current = new Set(s.defaultAllowedAgentIds ?? []);
+        const id = input.dataset.defaultAgent;
+        if (input.checked) current.add(id);
+        else current.delete(id);
+        send({ type: "updateSetting", key: "defaultAllowedAgentIds", value: [...current] });
+      });
     }
     grid.querySelector("#copilot-github-login")?.addEventListener("click", () => {
       send({ type: "copilotGithubLogin" });

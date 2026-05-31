@@ -37,7 +37,15 @@ export async function streamChat(
     const event = rawEvent.match(/^event: (.+)$/m)?.[1];
     const dataLine = rawEvent.match(/^data: (.+)$/m)?.[1];
     if (!event || !dataLine) return;
-    const data = JSON.parse(dataLine) as unknown;
+    let data: unknown;
+    try {
+      data = JSON.parse(dataLine);
+    } catch {
+      // Malformed SSE chunk (debug log, partial flush, error page). Skip it
+      // rather than letting a SyntaxError unwind the whole stream loop.
+      console.warn("[stream-client] could not parse SSE chunk:", dataLine.slice(0, 200));
+      return;
+    }
     if (event === "token") handlers.onToken?.((data as { token: string }).token);
     if (event === "tool") handlers.onToolEvent?.(data as ToolCallEvent);
     if (event === "terminal_delegate") {
@@ -52,15 +60,21 @@ export async function streamChat(
     if (event === "done") finalResponse = data as ChatResponse;
   };
 
-  while (true) {
-    const { value, done } = await reader.read();
-    buffer += decoder.decode(value, { stream: !done });
-    const parts = buffer.split("\n\n");
-    buffer = parts.pop() ?? "";
-    for (const part of parts) consume(part);
-    if (done) break;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop() ?? "";
+      for (const part of parts) consume(part);
+      if (done) break;
+    }
+    if (buffer.trim()) consume(buffer);
+  } finally {
+    // Always release the reader so the underlying fetch connection is closed,
+    // even if the loop exits due to an exception.
+    reader.cancel().catch(() => undefined);
   }
-  if (buffer.trim()) consume(buffer);
   if (!finalResponse) throw new Error("Stream ended before the chat response completed.");
   return finalResponse;
 }

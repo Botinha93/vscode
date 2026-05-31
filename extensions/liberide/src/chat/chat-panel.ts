@@ -45,6 +45,7 @@ import type {
   ConversationMessage,
   Provider,
   SharingFolder,
+  AgentDefinition,
 } from "./types";
 import type {
   BackendCatalog,
@@ -69,6 +70,12 @@ import { regenerateTasksIndex, scaffoldFeature, writeTaskContract, writeTextFile
 
 const OVERRIDES_STORAGE_KEY = "liberide.chat.overrides";
 const ACTIVE_SESSION_STORAGE_KEY = "liberide.chat.activeSession";
+
+function resolveAllowedAgentIds(agents: AgentDefinition[], configured: string[] | undefined): string[] {
+  const invokable = agents.filter((agent) => !agent.disableModelInvocation).map((agent) => agent.id);
+  if (!configured?.length) return invokable;
+  return configured.filter((id) => invokable.includes(id));
+}
 
 interface OverridesCache {
   [conversationId: string]: ChatOverrides;
@@ -619,13 +626,18 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
 
   private conversationOverrides(conv: Conversation): ChatOverrides {
     const stored = this.overrides[conv.id] ?? {};
+    const settings = readSettings();
+    const defaultAllowed = resolveAllowedAgentIds(this.catalog.agents, settings.defaultAllowedAgentIds);
     return {
       provider: (conv.provider as ConfiguredProvider) ?? stored.provider,
       model: conv.model ?? stored.model,
       chatMode: "agent",
       useRag: stored.useRag,
       toolsEnabled: true,
-      agentIds: conv.agentIds ?? stored.agentIds,
+      agentId: conv.agentId ?? stored.agentId,
+      allowedAgentIds: conv.allowedAgentIds?.length
+        ? conv.allowedAgentIds
+        : (stored.allowedAgentIds?.length ? stored.allowedAgentIds : defaultAllowed),
       skillIds: stored.skillIds,
       mcpServerIds: stored.mcpServerIds,
       documentIds: stored.documentIds ?? [],
@@ -822,7 +834,8 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     const patch: Record<string, unknown> = {};
     if (normalizedOverrides.provider) patch.provider = toWireProvider(normalizedOverrides.provider);
     if (normalizedOverrides.model) patch.model = normalizedOverrides.model;
-    if (normalizedOverrides.agentIds) patch.agentIds = normalizedOverrides.agentIds;
+    if (normalizedOverrides.agentId !== undefined) patch.agentId = normalizedOverrides.agentId;
+    if (normalizedOverrides.allowedAgentIds) patch.allowedAgentIds = normalizedOverrides.allowedAgentIds;
     if (Object.keys(patch).length > 0) {
       try {
         const updated = await patchConversation(id, patch);
@@ -888,7 +901,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     if (!conversation) {
       const draftId = session.id;
       const draftKind = session.kind;
-      conversation = await this.createSessionConversation(content);
+      conversation = await this.createSessionConversation(content, session.overrides);
       if (!conversation) return;
       this.conversations.set(conversation.id, conversation);
       this.messagesCache.set(conversation.id, []);
@@ -951,7 +964,8 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       useRag: pipelineMode ? false : useRag,
       toolsEnabled,
       mcpServerIds: pipelineMode ? [] : (overrides.mcpServerIds ?? []),
-      agentIds: pipelineMode ? [] : (overrides.agentIds ?? []),
+      agentId: pipelineMode ? undefined : overrides.agentId,
+      allowedAgentIds: pipelineMode ? [] : (overrides.allowedAgentIds ?? []),
       maxAgentSpawns: this.catalog.maxAgentSpawns,
       ideContext: this.buildIdeContext(conversationId),
     };
@@ -1127,10 +1141,20 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     }
   }
 
-  private async createSessionConversation(firstMessage: string): Promise<Conversation | null> {
+  private async createSessionConversation(firstMessage: string, overrides: ChatOverrides = {}): Promise<Conversation | null> {
     try {
       const title = deriveTitle(firstMessage);
-      const conv = await createConversation(title);
+      let conv = await createConversation(title);
+      const settings = readSettings();
+      const allowedAgentIds = overrides.allowedAgentIds?.length
+        ? overrides.allowedAgentIds
+        : resolveAllowedAgentIds(this.catalog.agents, settings.defaultAllowedAgentIds);
+      const patch: Record<string, unknown> = {};
+      if (overrides.agentId) patch.agentId = overrides.agentId;
+      if (allowedAgentIds.length) patch.allowedAgentIds = allowedAgentIds;
+      if (Object.keys(patch).length) {
+        conv = await patchConversation(conv.id, patch);
+      }
       const assigned = await this.assignConversationToProject(conv);
       return assigned ?? conv;
     } catch (err) {
@@ -1317,7 +1341,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       useRag: false,
       toolsEnabled: true,
       mcpServerIds: [],
-      agentIds: [],
+      allowedAgentIds: [],
       maxAgentSpawns: this.catalog.maxAgentSpawns,
     };
 

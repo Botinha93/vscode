@@ -58,7 +58,8 @@ export interface ChatOverrides {
   toolGroupIds?: string[];
   useRag?: boolean;
   toolsEnabled?: boolean;
-  agentIds?: string[];
+  agentId?: string;
+  allowedAgentIds?: string[];
   skillIds?: string[];
   mcpServerIds?: string[];
   documentIds?: string[];

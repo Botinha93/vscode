@@ -40,6 +40,7 @@ export interface AgentDefinition {
   tools?: string[];
   skillIds?: string[];
   agentIds?: string[];
+  disableModelInvocation?: boolean;
   builtIn?: boolean;
 }
 
@@ -88,7 +89,8 @@ export interface Conversation {
   model?: string;
   modelSelection?: ChatModelSelectionMode;
   chatMode?: ConversationChatMode;
-  agentIds?: string[];
+  agentId?: string;
+  allowedAgentIds?: string[];
   folder?: string;
   folderIds?: string[];
   tags?: string[];
@@ -149,7 +151,8 @@ export interface ChatRequest {
   useRag: boolean;
   toolsEnabled: boolean;
   mcpServerIds: string[];
-  agentIds: string[];
+  agentId?: string;
+  allowedAgentIds: string[];
   maxAgentSpawns: number;
   ideContext?: IdeToolContextPayload;
 }

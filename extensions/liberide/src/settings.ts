@@ -8,6 +8,8 @@ export interface LiberideSettings {
   systemPrompt: string;
   copilotUiEnabled: boolean;
   copilotModelsEnabled: boolean;
+  /** Global default callable agents applied to new conversations. */
+  defaultAllowedAgentIds: string[];
 }
 
 const SECTION = "liberide";
@@ -22,6 +24,7 @@ export function readSettings(): LiberideSettings {
     systemPrompt: cfg.get<string>("systemPrompt") ?? "",
     copilotUiEnabled: cfg.get<boolean>("copilot.enabled") ?? false,
     copilotModelsEnabled: cfg.get<boolean>("copilot.modelsEnabled") ?? true,
+    defaultAllowedAgentIds: cfg.get<string[]>("defaultAllowedAgentIds") ?? [],
   };
 }
 
