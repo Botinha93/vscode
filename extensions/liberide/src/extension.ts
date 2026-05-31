@@ -74,6 +74,10 @@ function commands(
       await chat.newSession();
     })),
     vscode.commands.registerCommand("liberide.openSettings", () => chat.openSettings()),
+    vscode.commands.registerCommand("liberide.openChatHistory", () => chat.openChatHistory()),
+    vscode.commands.registerCommand("liberide.renameChat", safe(async () => {
+      await chat.renameActiveChat();
+    })),
     vscode.commands.registerCommand("liberide.openPipeline", () => pipeline.show()),
     vscode.commands.registerCommand("liberide.refreshSpecs", safe(async () => { await store.refresh(); specsTree.refresh(); })),
     vscode.commands.registerCommand("liberide.refreshTasks", safe(async () => { await store.refresh(); tasksTree.refresh(); })),

@@ -37,6 +37,10 @@ export class LiberidePipelineController implements vscode.WebviewViewProvider, v
     this.bindWebview(view.webview);
     view.onDidDispose(() => {
       if (this.view === view) this.view = undefined;
+      // Cancel all active graph subscriptions — the user closed the panel so
+      // there is no longer a recipient for SSE events.
+      for (const g of this.graphs.values()) g.dispose();
+      this.graphs.clear();
     });
   }
 

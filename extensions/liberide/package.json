@@ -75,6 +75,17 @@
         "icon": "$(gear)"
       },
       {
+        "command": "liberide.openChatHistory",
+        "title": "Show Chat History",
+        "category": "LiberIDE",
+        "icon": "$(history)"
+      },
+      {
+        "command": "liberide.renameChat",
+        "title": "Rename Current Chat",
+        "category": "LiberIDE"
+      },
+      {
         "command": "liberide.openPipeline",
         "title": "Open LiberIDE Pipeline",
         "category": "LiberIDE",
@@ -203,6 +214,12 @@
           "command": "liberide.openSettings"
         },
         {
+          "command": "liberide.openChatHistory"
+        },
+        {
+          "command": "liberide.renameChat"
+        },
+        {
           "command": "liberide.openPipeline"
         },
         {
@@ -219,7 +236,7 @@
           "group": "navigation@1"
         },
         {
-          "command": "liberide.openSettings",
+          "command": "liberide.openChatHistory",
           "when": "view == liberide.chat",
           "group": "navigation@2"
         },
@@ -227,6 +244,16 @@
           "command": "liberide.openPipeline",
           "when": "view == liberide.chat",
           "group": "navigation@3"
+        },
+        {
+          "command": "liberide.openSettings",
+          "when": "view == liberide.chat",
+          "group": "navigation@4"
+        },
+        {
+          "command": "liberide.renameChat",
+          "when": "view == liberide.chat",
+          "group": "1_modify"
         },
         {
           "command": "liberide.refreshSpecs",

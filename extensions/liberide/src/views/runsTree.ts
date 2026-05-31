@@ -5,6 +5,8 @@ import type { TaskStatus } from "../spec/schema";
 type Run = { graphId: string; featureId: string; label: string; status: string; nodes: Map<string, string>; dispose?: () => void };
 type Item = { kind: "run"; run: Run } | { kind: "node"; nodeId: string; status: string };
 
+const MAX_COMPLETED_RUNS = 20;
+
 export class RunsTreeProvider implements vscode.TreeDataProvider<Item> {
   private readonly emitter = new vscode.EventEmitter<Item | undefined>();
   readonly onDidChangeTreeData = this.emitter.event;
@@ -21,7 +23,18 @@ export class RunsTreeProvider implements vscode.TreeDataProvider<Item> {
         const mapped = mapStatus(event.status);
         if (mapped) void this.writeback?.(featureId, event.nodeId, mapped);
       }
-      if (event.type === "done" && event.status) run.status = event.status;
+      if (event.type === "done" && event.status) {
+        run.status = event.status;
+        // Tear down the SSE subscription — no more events will arrive.
+        run.dispose?.();
+        run.dispose = undefined;
+        // Prune oldest completed runs if the map is at capacity.
+        const completed = [...this.runs.entries()].filter(([, r]) => r.status !== "running");
+        if (completed.length > MAX_COMPLETED_RUNS) {
+          const [oldestId] = completed[0];
+          this.runs.delete(oldestId);
+        }
+      }
       this.refresh();
     });
     this.runs.set(graphId, run);

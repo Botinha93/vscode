@@ -200,10 +200,17 @@ function subscribeConversationListSync(onChange) {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+      const MAX_SSE_BUFFER_BYTES = 1e6;
       while (!closed) {
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
+        if (buffer.length > MAX_SSE_BUFFER_BYTES) {
+          console.warn("[liberide] SSE buffer exceeded limit \u2014 resetting stream");
+          reader.cancel().catch(() => void 0);
+          if (!closed) startPoll();
+          return;
+        }
         const parts = buffer.split("\n\n");
         buffer = parts.pop() ?? "";
         for (const part of parts) {
@@ -567,6 +574,8 @@ var LiberidePipelineController = class _LiberidePipelineController {
     this.bindWebview(view.webview);
     view.onDidDispose(() => {
       if (this.view === view) this.view = void 0;
+      for (const g of this.graphs.values()) g.dispose();
+      this.graphs.clear();
     });
   }
   show() {
@@ -1303,6 +1312,7 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
   backendStatus = "unconfigured";
   conversations = /* @__PURE__ */ new Map();
   messagesCache = /* @__PURE__ */ new Map();
+  static MAX_CACHED_CONVERSATIONS = 20;
   attachmentBytes = /* @__PURE__ */ new Map();
   overrides = {};
   sessionKinds = /* @__PURE__ */ new Map();
@@ -1337,6 +1347,24 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
   openSettings() {
     this.show();
     this.broadcast({ type: "openSettings" });
+  }
+  openChatHistory() {
+    this.show();
+    this.broadcast({ type: "openSidebar" });
+  }
+  async renameActiveChat() {
+    this.show();
+    const session = this.activeSession();
+    if (!session) {
+      void vscode6.window.showInformationMessage("No active chat to rename.");
+      return;
+    }
+    const next = await vscode6.window.showInputBox({
+      prompt: "Rename chat",
+      value: session.title
+    });
+    if (next == null) return;
+    await this.renameSession(session.id, next);
   }
   dispose() {
     this.conversationSyncDispose?.();
@@ -1603,7 +1631,16 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     }
   }
   async ensureMessagesLoaded(conversationId) {
-    if (this.messagesCache.has(conversationId)) return;
+    if (this.messagesCache.has(conversationId)) {
+      const cached = this.messagesCache.get(conversationId);
+      this.messagesCache.delete(conversationId);
+      this.messagesCache.set(conversationId, cached);
+      return;
+    }
+    if (this.messagesCache.size >= _LiberideChatPanelController.MAX_CACHED_CONVERSATIONS) {
+      const oldest = this.messagesCache.keys().next().value;
+      if (oldest) this.messagesCache.delete(oldest);
+    }
     try {
       const messages = await listConversationMessages(conversationId);
       this.messagesCache.set(conversationId, messages);
@@ -1863,6 +1900,7 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     if (!session) return;
     const next = (session.overrides.documentIds ?? []).filter((id) => id !== documentId);
     await this.updateOverrides(sessionId, { documentIds: next });
+    this.attachmentBytes.delete(documentId);
   }
   async updateOverrides(id, overrides) {
     const normalizedOverrides = { ...overrides };
@@ -2700,12 +2738,22 @@ var SpecStore = class {
   watcher;
   promptWatcher;
   activeFeatureId;
+  refreshTimer;
+  refreshInProgress = false;
+  refreshQueued = false;
+  scheduleRefresh() {
+    if (this.refreshTimer) clearTimeout(this.refreshTimer);
+    this.refreshTimer = setTimeout(() => {
+      this.refreshTimer = void 0;
+      void this.refresh();
+    }, 300);
+  }
   async initialize(context) {
     this.activeFeatureId = context.workspaceState.get("liberide.activeFeatureId");
     this.watcher = vscode7.workspace.createFileSystemWatcher("**//.liberide/specs/**/*.md");
-    this.watcher.onDidCreate(() => void this.refresh());
-    this.watcher.onDidChange(() => void this.refresh());
-    this.watcher.onDidDelete(() => void this.refresh());
+    this.watcher.onDidCreate(() => this.scheduleRefresh());
+    this.watcher.onDidChange(() => this.scheduleRefresh());
+    this.watcher.onDidDelete(() => this.scheduleRefresh());
     context.subscriptions.push(this.watcher);
     this.promptWatcher = vscode7.workspace.createFileSystemWatcher("**/.chatllm/**/*.md");
     const syncPrompts = () => {
@@ -2739,20 +2787,33 @@ var SpecStore = class {
     return this.features.get(featureId)?.tasks.find((task) => task.id === taskId);
   }
   async refresh() {
-    this.features.clear();
-    for (const folder of vscode7.workspace.workspaceFolders ?? []) {
-      const root = vscode7.Uri.joinPath(folder.uri, ".liberide", "specs");
-      try {
-        for (const [name, type] of await vscode7.workspace.fs.readDirectory(root)) {
-          if (type === vscode7.FileType.Directory) {
-            const feature = await this.loadFeature(root, name);
-            if (feature) this.features.set(feature.id, feature);
+    if (this.refreshInProgress) {
+      this.refreshQueued = true;
+      return;
+    }
+    this.refreshInProgress = true;
+    try {
+      this.features.clear();
+      for (const folder of vscode7.workspace.workspaceFolders ?? []) {
+        const root = vscode7.Uri.joinPath(folder.uri, ".liberide", "specs");
+        try {
+          for (const [name, type] of await vscode7.workspace.fs.readDirectory(root)) {
+            if (type === vscode7.FileType.Directory) {
+              const feature = await this.loadFeature(root, name);
+              if (feature) this.features.set(feature.id, feature);
+            }
           }
+        } catch {
         }
-      } catch {
+      }
+      this.changeEmitter.fire();
+    } finally {
+      this.refreshInProgress = false;
+      if (this.refreshQueued) {
+        this.refreshQueued = false;
+        void this.refresh();
       }
     }
-    this.changeEmitter.fire();
   }
   async loadFeature(specsRoot, id) {
     const rootUri = vscode7.Uri.joinPath(specsRoot, id);
@@ -2791,6 +2852,7 @@ var SpecStore = class {
     }
   }
   dispose() {
+    if (this.refreshTimer) clearTimeout(this.refreshTimer);
     this.watcher?.dispose();
     this.promptWatcher?.dispose();
     this.changeEmitter.dispose();
@@ -2878,9 +2940,14 @@ function createThemeBridge(output) {
       body: JSON.stringify({ kind: "name", family: mapped.family, mode: mapped.mode, vsCodeThemeId: themeId, source: "vscode" })
     }).catch((error) => output.appendLine(`Theme publish error: ${error instanceof Error ? error.message : String(error)}`));
   }
+  let retryDelay = 1e3;
+  const MAX_RETRY_DELAY = 3e4;
   function connect() {
     if (disposed) return;
     ws = new WebSocket(`${apiOrigin.replace(/^http/, "ws")}/api/theme/stream`);
+    ws.addEventListener("open", () => {
+      retryDelay = 1e3;
+    });
     ws.addEventListener("message", (event) => {
       const payload = JSON.parse(String(event.data));
       if (payload.type !== "theme" || payload.snapshot?.source === "vscode") return;
@@ -2888,7 +2955,11 @@ function createThemeBridge(output) {
       const themeId = snapshot?.vsCodeThemeId ?? NEXUS_TO_VSCODE2[`${snapshot?.family}:${snapshot?.mode}`];
       void applyTheme(themeId).then(() => applyColorOverrides(snapshot?.colorOverrides)).then(() => applyTokenColorOverrides(snapshot?.tokenColorOverrides));
     });
-    ws.addEventListener("close", () => setTimeout(connect, 1e3));
+    ws.addEventListener("close", () => {
+      const delay = retryDelay;
+      retryDelay = Math.min(retryDelay * 2, MAX_RETRY_DELAY);
+      setTimeout(connect, delay);
+    });
   }
   const envTheme = NEXUS_TO_VSCODE2[`${process.env.LIBERVOX_THEME_FAMILY}:${process.env.LIBERVOX_THEME_MODE === "system" ? "dark" : process.env.LIBERVOX_THEME_MODE}`];
   void applyTheme(envTheme);
@@ -2906,6 +2977,7 @@ function createThemeBridge(output) {
 
 // src/views/runsTree.ts
 var vscode9 = __toESM(require("vscode"));
+var MAX_COMPLETED_RUNS = 20;
 var RunsTreeProvider = class {
   constructor(writeback) {
     this.writeback = writeback;
@@ -2924,7 +2996,16 @@ var RunsTreeProvider = class {
         const mapped = mapStatus2(event.status);
         if (mapped) void this.writeback?.(featureId, event.nodeId, mapped);
       }
-      if (event.type === "done" && event.status) run.status = event.status;
+      if (event.type === "done" && event.status) {
+        run.status = event.status;
+        run.dispose?.();
+        run.dispose = void 0;
+        const completed = [...this.runs.entries()].filter(([, r]) => r.status !== "running");
+        if (completed.length > MAX_COMPLETED_RUNS) {
+          const [oldestId] = completed[0];
+          this.runs.delete(oldestId);
+        }
+      }
       this.refresh();
     });
     this.runs.set(graphId, run);
@@ -3068,24 +3149,35 @@ async function activate(context) {
   );
 }
 function commands4(context, specsTree, tasksTree, runsTree) {
+  function safe(fn) {
+    return (...args) => {
+      fn(...args).catch((err) => {
+        void vscode12.window.showErrorMessage(err instanceof Error ? err.message : String(err));
+      });
+    };
+  }
   return [
     vscode12.commands.registerCommand("liberide.openChat", () => chat.show()),
-    vscode12.commands.registerCommand("liberide.newChat", async () => {
+    vscode12.commands.registerCommand("liberide.newChat", safe(async () => {
       chat.show();
       await chat.newSession();
-    }),
+    })),
     vscode12.commands.registerCommand("liberide.openSettings", () => chat.openSettings()),
+    vscode12.commands.registerCommand("liberide.openChatHistory", () => chat.openChatHistory()),
+    vscode12.commands.registerCommand("liberide.renameChat", safe(async () => {
+      await chat.renameActiveChat();
+    })),
     vscode12.commands.registerCommand("liberide.openPipeline", () => pipeline.show()),
-    vscode12.commands.registerCommand("liberide.refreshSpecs", async () => {
+    vscode12.commands.registerCommand("liberide.refreshSpecs", safe(async () => {
       await store.refresh();
       specsTree.refresh();
-    }),
-    vscode12.commands.registerCommand("liberide.refreshTasks", async () => {
+    })),
+    vscode12.commands.registerCommand("liberide.refreshTasks", safe(async () => {
       await store.refresh();
       tasksTree.refresh();
-    }),
+    })),
     vscode12.commands.registerCommand("liberide.refreshRuns", () => runsTree.refresh()),
-    vscode12.commands.registerCommand("liberide.scaffoldFeature", async () => {
+    vscode12.commands.registerCommand("liberide.scaffoldFeature", safe(async () => {
       const folder = vscode12.workspace.workspaceFolders?.[0];
       const name = await vscode12.window.showInputBox({ prompt: "Feature name" });
       if (!folder || !name) return;
@@ -3095,43 +3187,43 @@ function commands4(context, specsTree, tasksTree, runsTree) {
       await context.workspaceState.update("liberide.activeFeatureId", id);
       await store.refresh();
       specsTree.refresh();
-    }),
-    vscode12.commands.registerCommand("liberide.setActiveFeature", async (id) => {
+    })),
+    vscode12.commands.registerCommand("liberide.setActiveFeature", safe(async (id) => {
       store.setActiveFeature(id);
       await context.workspaceState.update("liberide.activeFeatureId", id);
       tasksTree.refresh();
-    }),
-    vscode12.commands.registerCommand("liberide.openTask", async (arg) => {
+    })),
+    vscode12.commands.registerCommand("liberide.openTask", safe(async (arg) => {
       const task = arg && store.getTask(arg.featureId, arg.task.id);
       if (task) await vscode12.window.showTextDocument(task.filePath);
-    }),
-    vscode12.commands.registerCommand("liberide.runTask", async (arg) => {
+    })),
+    vscode12.commands.registerCommand("liberide.runTask", safe(async (arg) => {
       const feature = arg && store.getFeature(arg.featureId);
       if (!feature || !arg) return;
       await pipeline.dispatch(feature.id, [arg.task.id]);
-    }),
-    vscode12.commands.registerCommand("liberide.markTaskReady", async (arg) => {
+    })),
+    vscode12.commands.registerCommand("liberide.markTaskReady", safe(async (arg) => {
       const task = arg && store.getTask(arg.featureId, arg.task.id);
       if (task) await updateTaskStatus(task.filePath, "ready");
       await store.refresh();
-    }),
-    vscode12.commands.registerCommand("liberide.dispatchFeature", async () => {
+    })),
+    vscode12.commands.registerCommand("liberide.dispatchFeature", safe(async () => {
       const feature = store.getActiveFeature();
       if (!feature) return;
       await pipeline.dispatch(feature.id);
-    }),
-    vscode12.commands.registerCommand("liberide.regenerateTasksIndex", async () => {
+    })),
+    vscode12.commands.registerCommand("liberide.regenerateTasksIndex", safe(async () => {
       const feature = store.getActiveFeature();
       if (feature?.tasksDirUri) await writeTextFile(vscode12.Uri.joinPath(feature.tasksDirUri, "index.md"), regenerateTasksIndex(feature.tasks));
-    }),
-    vscode12.commands.registerCommand("liberide.cancelRun", async (arg) => {
+    })),
+    vscode12.commands.registerCommand("liberide.cancelRun", safe(async (arg) => {
       const graphId = typeof arg === "string" ? arg : arg?.run?.graphId;
       if (!graphId) {
         void vscode12.window.showInformationMessage("Select an active run from the Agent Runs view to cancel it.");
         return;
       }
       await pipeline.cancel(graphId);
-    })
+    }))
   ];
 }
 function statusBar() {

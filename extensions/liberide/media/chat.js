@@ -855,7 +855,6 @@
     }
     renderProjectBar();
     renderSidebar();
-    renderHeader();
     renderTranscript();
     renderComposer();
     renderComposerAttachments();
@@ -882,16 +881,6 @@
         </footer>
       </aside>
       <div class="chat-main">
-        <header class="chat-header">
-          <button class="icon-btn header-back" id="sidebar-toggle" title="Open chats" aria-label="Open chats">&#9776;</button>
-          <div class="chat-title" id="chat-title"></div>
-          <div class="header-actions">
-            <button class="icon-btn" id="new-chat" title="New chat" aria-label="New chat">+</button>
-            <button class="icon-btn" id="header-history" title="Chat history" aria-label="Chat history">&#8634;</button>
-            <button class="icon-btn" id="header-pipeline" title="Open pipeline" aria-label="Open pipeline">&#8644;</button>
-            <button class="icon-btn" id="header-settings" title="Settings" aria-label="Settings">&#9881;</button>
-          </div>
-        </header>
         <div class="activity-topbar" id="activity-topbar" data-active="false"></div>
         <div class="project-bar" id="project-bar"></div>
         <div class="backend-banner" id="backend-banner" hidden></div>
@@ -927,10 +916,6 @@
   `;
   }
   function bindShell() {
-    root.querySelector("#sidebar-toggle")?.addEventListener("click", () => {
-      state.sidebarOpen = !state.sidebarOpen;
-      applySidebar();
-    });
     root.querySelector("#sidebar-close")?.addEventListener("click", () => {
       state.sidebarOpen = false;
       applySidebar();
@@ -941,16 +926,6 @@
       applySidebar();
     });
     root.querySelector("#sidebar-refresh")?.addEventListener("click", () => send({ type: "refreshSessions" }));
-    root.querySelector("#new-chat")?.addEventListener("click", () => send({ type: "newSession" }));
-    root.querySelector("#header-pipeline")?.addEventListener("click", () => send({ type: "openPipeline" }));
-    root.querySelector("#header-history")?.addEventListener("click", () => {
-      state.sidebarOpen = true;
-      applySidebar();
-    });
-    root.querySelector("#header-settings")?.addEventListener("click", () => {
-      state.settingsOpen = true;
-      applySettings();
-    });
     root.querySelector("#settings-close")?.addEventListener("click", () => {
       state.settingsOpen = false;
       applySettings();
@@ -1079,20 +1054,6 @@
       });
       list.appendChild(row);
     }
-  }
-  function renderHeader() {
-    const title = root.querySelector("#chat-title");
-    if (!title) return;
-    const t = state.activeSession?.title || "New chat";
-    const isPipeline = state.activeSession?.kind === "pipeline";
-    title.innerHTML = `<span class="chat-title-text">${escapeHtml2(t)}</span>${isPipeline ? `<span class="kind-pill kind-pipeline">Pipeline</span>` : ""}`;
-    title.title = "Click to rename";
-    title.onclick = (event) => {
-      if (!state.activeSession) return;
-      if (event.target.closest(".kind-pill")) return;
-      const next = window.prompt("Rename chat", state.activeSession.title);
-      if (next != null) send({ type: "renameSession", sessionId: state.activeSession.id, title: next });
-    };
   }
   function renderBackendBanner() {
     const banner = root.querySelector("#backend-banner");
@@ -2208,11 +2169,15 @@
         break;
       case "project":
         state.project = msg.project;
-        renderHeader();
+        renderProjectBar();
         break;
       case "openSettings":
         state.settingsOpen = true;
         applySettings();
+        break;
+      case "openSidebar":
+        state.sidebarOpen = true;
+        applySidebar();
         break;
       case "sessions":
         state.sessions = msg.sessions;
@@ -2223,7 +2188,6 @@
         state.activeSession = msg.session;
         state.activeSessionId = msg.session.id;
         state.streaming = msg.session.messages.some((m) => m.status === "streaming");
-        renderHeader();
         renderTranscript();
         renderComposer();
         renderComposerAttachments();

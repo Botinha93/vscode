@@ -189,6 +189,26 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     this.broadcast({ type: "openSettings" });
   }
 
+  openChatHistory(): void {
+    this.show();
+    this.broadcast({ type: "openSidebar" });
+  }
+
+  async renameActiveChat(): Promise<void> {
+    this.show();
+    const session = this.activeSession();
+    if (!session) {
+      void vscode.window.showInformationMessage("No active chat to rename.");
+      return;
+    }
+    const next = await vscode.window.showInputBox({
+      prompt: "Rename chat",
+      value: session.title,
+    });
+    if (next == null) return;
+    await this.renameSession(session.id, next);
+  }
+
   dispose(): void {
     this.conversationSyncDispose?.();
     for (const d of this.disposables) d.dispose();
