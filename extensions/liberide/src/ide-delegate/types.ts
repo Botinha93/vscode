@@ -14,7 +14,31 @@ export type IdeDelegateKind =
   | "vscode.git.log"
   | "vscode.git.diff"
   | "vscode.git.blame"
-  | "vscode.terminalSession";
+  | "vscode.terminalSession"
+  | "vscode.codeActions"
+  | "vscode.codeActions.apply"
+  | "vscode.rename"
+  | "vscode.formatDocument"
+  | "vscode.formatRange"
+  | "vscode.applyWorkspaceEdit"
+  | "vscode.tasks.list"
+  | "vscode.tasks.run"
+  | "vscode.tasks.cancel"
+  | "vscode.tests.list"
+  | "vscode.tests.run"
+  | "vscode.tests.status"
+  | "vscode.debug.start"
+  | "vscode.debug.stop"
+  | "vscode.debug.list"
+  | "vscode.debug.stackTrace"
+  | "vscode.notebook.read"
+  | "vscode.notebook.edit"
+  | "vscode.notebook.execute"
+  | "vscode.config.read"
+  | "vscode.config.write"
+  | "vscode.extensions.list"
+  | "vscode.problemsByOwner"
+  | "vscode.semanticTokens";
 
 export interface IdeDelegatePayload {
   delegateId: string;

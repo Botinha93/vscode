@@ -113,6 +113,17 @@ function toolActivityKind(name: string): ToolTimelineEntry["activityKind"] {
     name === "ide_git_log" ||
     name === "ide_git_diff" ||
     name === "ide_git_blame" ||
+    name === "ide_code_actions" ||
+    name === "ide_test_list" ||
+    name === "ide_test_status" ||
+    name === "ide_tasks_list" ||
+    name === "ide_debug_list" ||
+    name === "ide_debug_stacktrace" ||
+    name === "ide_notebook_read" ||
+    name === "ide_workspace_config_read" ||
+    name === "ide_extensions_list" ||
+    name === "ide_problems_by_owner" ||
+    name === "ide_semantic_tokens" ||
     name === "read" ||
     name === "find_symbol" ||
     name === "find_references" ||
@@ -127,9 +138,14 @@ function toolActivityKind(name: string): ToolTimelineEntry["activityKind"] {
 
   if (name === "ide_search_code" || name === "search" || name === "recall") return "searching";
 
-  if (name === "ide_write_file" || name === "ide_edit_file" || name === "userspace" || name === "artifact") return "writing";
+  if (name === "ide_write_file" || name === "ide_edit_file" || name === "userspace" || name === "artifact" ||
+    name === "ide_rename_symbol" || name === "ide_format_document" || name === "ide_format_range" ||
+    name === "ide_apply_workspace_edit" || name === "ide_apply_code_action" || name === "ide_notebook_edit") return "writing";
 
-  if (name === "ide_terminal_session" || name === "terminal_run" || name === "ide_run_command") return "executing";
+  if (name === "ide_terminal_session" || name === "terminal_run" || name === "ide_run_command" ||
+    name === "ide_tasks_run" || name === "ide_tasks_cancel" || name === "ide_test_run" ||
+    name === "ide_debug_start" || name === "ide_debug_stop" || name === "ide_notebook_execute" ||
+    name === "ide_workspace_config_write") return "executing";
 
   return "executing";
 }

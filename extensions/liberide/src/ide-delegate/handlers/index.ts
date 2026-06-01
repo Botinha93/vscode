@@ -12,6 +12,22 @@ import { handleFindFiles } from "./files";
 import { handleGitStatus, handleGitLog, handleGitDiff, handleGitBlame } from "./git";
 import { handleTerminalSession } from "./terminal-session";
 import { handleTerminalRun } from "./terminal-run";
+import {
+  handleCodeActions,
+  handleApplyCodeAction,
+  handleRenameSymbol,
+  handleFormatDocument,
+  handleFormatRange,
+} from "./refactor";
+import { handleApplyWorkspaceEdit } from "./workspace-edit";
+import { handleTasksList, handleTasksRun, handleTasksCancel } from "./tasks";
+import { handleTestsList, handleTestsRun, handleTestsStatus } from "./tests";
+import { handleDebugStart, handleDebugStop, handleDebugList, handleDebugStackTrace } from "./debug";
+import { handleNotebookRead, handleNotebookEdit, handleNotebookExecute } from "./notebook";
+import { handleConfigRead, handleConfigWrite } from "./config";
+import { handleExtensionsList } from "./extensions";
+import { handleProblemsByOwner } from "./problems";
+import { handleSemanticTokens } from "./semantic";
 
 export async function dispatchIdeDelegate(request: IdeDelegatePayload): Promise<unknown> {
   const { kind, payload } = request;
@@ -48,6 +64,54 @@ export async function dispatchIdeDelegate(request: IdeDelegatePayload): Promise<
       return handleGitBlame(payload);
     case "vscode.terminalSession":
       return handleTerminalSession(payload);
+    case "vscode.codeActions":
+      return handleCodeActions(payload);
+    case "vscode.codeActions.apply":
+      return handleApplyCodeAction(payload);
+    case "vscode.rename":
+      return handleRenameSymbol(payload);
+    case "vscode.formatDocument":
+      return handleFormatDocument(payload);
+    case "vscode.formatRange":
+      return handleFormatRange(payload);
+    case "vscode.applyWorkspaceEdit":
+      return handleApplyWorkspaceEdit(payload);
+    case "vscode.tasks.list":
+      return handleTasksList(payload);
+    case "vscode.tasks.run":
+      return handleTasksRun(payload);
+    case "vscode.tasks.cancel":
+      return handleTasksCancel(payload);
+    case "vscode.tests.list":
+      return handleTestsList();
+    case "vscode.tests.run":
+      return handleTestsRun(payload);
+    case "vscode.tests.status":
+      return handleTestsStatus(payload);
+    case "vscode.debug.start":
+      return handleDebugStart(payload);
+    case "vscode.debug.stop":
+      return handleDebugStop();
+    case "vscode.debug.list":
+      return handleDebugList();
+    case "vscode.debug.stackTrace":
+      return handleDebugStackTrace(payload);
+    case "vscode.notebook.read":
+      return handleNotebookRead(payload);
+    case "vscode.notebook.edit":
+      return handleNotebookEdit(payload);
+    case "vscode.notebook.execute":
+      return handleNotebookExecute(payload);
+    case "vscode.config.read":
+      return handleConfigRead(payload);
+    case "vscode.config.write":
+      return handleConfigWrite(payload);
+    case "vscode.extensions.list":
+      return handleExtensionsList();
+    case "vscode.problemsByOwner":
+      return handleProblemsByOwner(payload);
+    case "vscode.semanticTokens":
+      return handleSemanticTokens(payload);
     default:
       throw new Error(`Unsupported IDE delegate kind: ${kind}`);
   }
