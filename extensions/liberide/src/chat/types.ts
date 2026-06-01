@@ -126,6 +126,7 @@ export interface IdeToolContextPayload {
   terminalExecutor?: "server" | "client";
   conversationId?: string;
   agentRunId?: string;
+  delegateAvailable?: boolean;
 }
 
 export interface TerminalDelegateEvent {

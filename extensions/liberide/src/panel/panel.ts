@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { cancelExecutionGraph, dispatchFeature, subscribeExecutionGraphEvents } from "../dispatch/client";
+import { buildIdeContextPayload } from "../ide-delegate/context";
 import { onSettingsChange, readSettings } from "../settings";
 import { computeTaskReadiness, validateDag } from "../spec/dag";
 import type { SpecStore } from "../spec/store";
@@ -185,7 +186,7 @@ export class LiberidePipelineController implements vscode.WebviewViewProvider, v
       return;
     }
     const readiness = computeTaskReadiness(feature.tasks);
-    const result = await dispatchFeature(feature, { taskIds });
+    const result = await dispatchFeature(feature, { taskIds, ideContext: buildIdeContextPayload() });
     const startEvent = {
       graphId: result.graphId,
       featureId: feature.id,

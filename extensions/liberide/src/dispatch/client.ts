@@ -23,7 +23,7 @@ function taskInput(feature: FeatureSpec, task: TaskContract): string {
   ].join("\n").slice(0, 2000);
 }
 
-export async function dispatchFeature(feature: FeatureSpec, options: { conversationId?: string; taskIds?: string[] } = {}): Promise<SpecDispatchResult> {
+export async function dispatchFeature(feature: FeatureSpec, options: { conversationId?: string; taskIds?: string[]; ideContext?: Record<string, unknown> } = {}): Promise<SpecDispatchResult> {
   const tasks = options.taskIds?.length ? feature.tasks.filter((task) => options.taskIds!.includes(task.id)) : feature.tasks;
   const validation = validateDag(tasks);
   if (!validation.ok) throw new Error(validation.error);
@@ -33,6 +33,7 @@ export async function dispatchFeature(feature: FeatureSpec, options: { conversat
       feature: feature.id,
       goal: `Spec dispatch: ${feature.name}`,
       conversationId: options.conversationId,
+      ideContext: options.ideContext,
       priority: "FOREGROUND",
       nodes: tasks.map((task) => ({
         id: task.id,

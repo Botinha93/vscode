@@ -8,6 +8,7 @@ import { createThemeBridge } from "./theme-bridge";
 import { RunsTreeProvider } from "./views/runsTree";
 import { SpecsTreeProvider } from "./views/specsTree";
 import { TasksTreeProvider } from "./views/tasksTree";
+import { startIdeDelegateStream } from "./ide-delegate/stream";
 
 let store: SpecStore;
 let pipeline: LiberidePipelineController;
@@ -48,6 +49,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.window.registerTreeDataProvider("liberide.runs", runsTree),
     createThemeBridge(output),
     statusBar(),
+    startIdeDelegateStream(output),
     ...commands(context, specsTree, tasksTree, runsTree),
   );
 }

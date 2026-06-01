@@ -67,6 +67,7 @@ import { basename } from "node:path";
 import { parseTaskContract } from "../spec/schema";
 import type { SpecStore } from "../spec/store";
 import { regenerateTasksIndex, scaffoldFeature, writeTaskContract, writeTextFile } from "../spec/writer";
+import { buildIdeContextPayload } from "../ide-delegate/context";
 
 const OVERRIDES_STORAGE_KEY = "liberide.chat.overrides";
 const ACTIVE_SESSION_STORAGE_KEY = "liberide.chat.activeSession";
@@ -98,6 +99,20 @@ function toolActivityKind(name: string): ToolTimelineEntry["activityKind"] {
   if (
     name === "ide_read_file" ||
     name === "ide_list_directory" ||
+    name === "ide_open_editors" ||
+    name === "ide_dirty_buffers" ||
+    name === "ide_active_selection" ||
+    name === "ide_workspace_diagnostics" ||
+    name === "ide_workspace_symbols" ||
+    name === "ide_document_symbols" ||
+    name === "ide_definition" ||
+    name === "ide_references" ||
+    name === "ide_hover" ||
+    name === "ide_find_files" ||
+    name === "ide_git_status" ||
+    name === "ide_git_log" ||
+    name === "ide_git_diff" ||
+    name === "ide_git_blame" ||
     name === "read" ||
     name === "find_symbol" ||
     name === "find_references" ||
@@ -113,6 +128,8 @@ function toolActivityKind(name: string): ToolTimelineEntry["activityKind"] {
   if (name === "ide_search_code" || name === "search" || name === "recall") return "searching";
 
   if (name === "ide_write_file" || name === "ide_edit_file" || name === "userspace" || name === "artifact") return "writing";
+
+  if (name === "ide_terminal_session" || name === "terminal_run" || name === "ide_run_command") return "executing";
 
   return "executing";
 }
@@ -862,16 +879,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
   }
 
   private buildIdeContext(conversationId: string): IdeToolContextPayload | undefined {
-    const folder = vscode.workspace.workspaceFolders?.[0];
-    if (!folder) return undefined;
-    return {
-      sessionId: `vscode-${folder.name}`,
-      userId: "default",
-      projectPath: folder.uri.fsPath,
-      mode: "desktop",
-      terminalExecutor: "client",
-      conversationId,
-    };
+    return buildIdeContextPayload(conversationId);
   }
 
   private async sendChat(sessionId: string, content: string): Promise<void> {
