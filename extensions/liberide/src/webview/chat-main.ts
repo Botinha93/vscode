@@ -1081,7 +1081,7 @@ function renderAgentPicker(): void {
             <div class="popover-row-title">No primary agent</div>
             <div class="popover-row-detail">Use the default assistant persona for this chat.</div>
           </li>
-          ${state.catalog.agents.map((a) => {
+          ${invokableAgents(state.catalog.agents).map((a) => {
             const selected = eff.agentId === a.id;
             return `<li class="popover-row${selected ? " selected" : ""}" data-id="${escapeAttr(a.id)}">
               <div class="popover-row-title">${escapeHtml(a.name)}</div>
