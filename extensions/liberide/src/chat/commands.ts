@@ -43,6 +43,20 @@ export const PIPELINE_GENERATE_SYSTEM_PROMPT = `You are generating a complete fe
 ## D-2 <short title>
 <...>
 
+# Documentation
+
+## DOC-1 <short title>
+target: <path/to/doc-or-section, optional>
+<what needs documenting and why>
+
+# Blockers
+
+## BLK-1 [hard] <short title>
+<why this hard blocker must be resolved before implementation can proceed>
+
+## BLK-2 [soft] <short title>
+<advisory risk or open question that does not halt execution>
+
 \`\`\`task
 id: T-1
 title: <imperative title>
@@ -75,7 +89,8 @@ agent: coder
 Rules:
 - The first line MUST be the [[FEATURE_NAME: ...]] marker. No leading whitespace, no other text on that line.
 - Use EARS-style requirement statements ("When X, the system shall Y" / "While X, ..." / "Where X, ...").
-- Every \`## R-N\` and \`## D-N\` heading must use a unique id.
+- Every \`## R-N\`, \`## D-N\`, \`## DOC-N\`, and \`## BLK-N\` heading must use a unique id.
+- The \`# Documentation\` and \`# Blockers\` sections are optional — omit a section entirely if it has no items. Each blocker heading MUST be tagged \`[hard]\` (gates the run for approval) or \`[soft]\` (advisory).
 - Emit one or more fenced \`\`\`task blocks. Each block must contain valid YAML frontmatter with: id, title, status, requirement_refs, design_refs, depends_on, expected_files, architecture_hints, acceptance, agent.
 - For list fields (\`requirement_refs\`, \`design_refs\`, \`depends_on\`, \`expected_files\`, \`acceptance\`), use either inline \`[a, b]\` arrays or block-style YAML lists (\`key:\` then indented \`- item\` lines) for list fields. Prefer block-style when items contain commas or are long sentences. Use \`[]\` for empty lists.
 - \`architecture_hints\` MUST be a YAML block string introduced by \`|\` and its continuation lines indented by two spaces.

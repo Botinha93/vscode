@@ -25,6 +25,21 @@ export interface TaskContract {
   featureId: string;
 }
 
+export interface DocumentationItem {
+  id: string;
+  title: string;
+  target?: string;
+  featureId?: string;
+}
+
+export interface BlockerItem {
+  id: string;
+  title: string;
+  severity: "hard" | "soft";
+  detail?: string;
+  blocksFeatureIds?: string[];
+}
+
 export interface FeatureSpec {
   id: string;
   name: string;
@@ -37,6 +52,10 @@ export interface FeatureSpec {
   requirementIds: string[];
   designIds: string[];
   tasks: TaskContract[];
+  /** Documentation tasks parsed from the optional `documentation.md` plan section. */
+  documentation?: DocumentationItem[];
+  /** Blockers/risks parsed from the optional `blockers.md` plan section. */
+  blockers?: BlockerItem[];
 }
 
 const TASK_STATUSES = new Set<TaskStatus>(["pending", "ready", "running", "completed", "blocked", "failed"]);
@@ -138,4 +157,51 @@ export function extractSectionIds(markdown: string, prefix: string): string[] {
   let match: RegExpExecArray | null;
   while ((match = re.exec(markdown)) !== null) ids.push(match[1]);
   return ids;
+}
+
+/**
+ * Split markdown into `## ` sections, returning each heading line plus the body
+ * text until the next `## ` heading.
+ */
+function splitSections(markdown: string): Array<{ heading: string; body: string }> {
+  const sections: Array<{ heading: string; body: string }> = [];
+  const lines = markdown.split(/\r?\n/);
+  let current: { heading: string; body: string[] } | undefined;
+  for (const line of lines) {
+    const h = line.match(/^##\s+(.*)$/);
+    if (h) {
+      if (current) sections.push({ heading: current.heading, body: current.body.join("\n").trim() });
+      current = { heading: h[1].trim(), body: [] };
+    } else if (current) {
+      current.body.push(line);
+    }
+  }
+  if (current) sections.push({ heading: current.heading, body: current.body.join("\n").trim() });
+  return sections;
+}
+
+/**
+ * Parse `documentation.md`. Each `## <id> <title>` heading becomes a doc item;
+ * an optional `target: <path>` line in the body sets the target file.
+ */
+export function parseDocumentationItems(markdown: string): DocumentationItem[] {
+  return splitSections(markdown).map((s) => {
+    const [id, ...rest] = s.heading.split(/\s+/);
+    const target = s.body.match(/^target:\s*(.+)$/im)?.[1]?.trim();
+    return { id, title: rest.join(" ") || id, ...(target ? { target } : {}) };
+  }).filter((d) => d.id);
+}
+
+/**
+ * Parse `blockers.md`. Each `## <id> [hard|soft] <title>` heading becomes a
+ * blocker; the remaining body is its detail. Severity defaults to `hard`.
+ */
+export function parseBlockerItems(markdown: string): BlockerItem[] {
+  return splitSections(markdown).map((s) => {
+    const m = s.heading.match(/^(\S+)\s*(?:\[(hard|soft)\])?\s*(.*)$/);
+    const id = m?.[1] ?? "";
+    const severity: "hard" | "soft" = m?.[2] === "soft" ? "soft" : "hard";
+    const title = (m?.[3] || id).trim();
+    return { id, title, severity, ...(s.body ? { detail: s.body } : {}) };
+  }).filter((b) => b.id);
 }

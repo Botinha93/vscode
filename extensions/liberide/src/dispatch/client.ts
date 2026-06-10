@@ -23,7 +23,7 @@ function taskInput(feature: FeatureSpec, task: TaskContract): string {
   ].join("\n").slice(0, 2000);
 }
 
-export async function dispatchFeature(feature: FeatureSpec, options: { conversationId?: string; taskIds?: string[]; ideContext?: Record<string, unknown> } = {}): Promise<SpecDispatchResult> {
+export async function dispatchFeature(feature: FeatureSpec, options: { conversationId?: string; taskIds?: string[]; ideContext?: Record<string, unknown>; swarm?: boolean; isolation?: "worktree" | "shared" } = {}): Promise<SpecDispatchResult> {
   const tasks = options.taskIds?.length ? feature.tasks.filter((task) => options.taskIds!.includes(task.id)) : feature.tasks;
   const validation = validateDag(tasks);
   if (!validation.ok) throw new Error(validation.error);
@@ -35,6 +35,9 @@ export async function dispatchFeature(feature: FeatureSpec, options: { conversat
       conversationId: options.conversationId,
       ideContext: options.ideContext,
       priority: "FOREGROUND",
+      ...(options.swarm ? { swarm: true, isolation: options.isolation ?? "shared" } : {}),
+      ...(feature.documentation?.length ? { documentation: feature.documentation } : {}),
+      ...(feature.blockers?.length ? { blockers: feature.blockers } : {}),
       nodes: tasks.map((task) => ({
         id: task.id,
         type: "IMPLEMENT",

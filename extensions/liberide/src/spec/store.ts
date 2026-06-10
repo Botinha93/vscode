@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { extractSectionIds, parseFeatureStatus, parseTaskContract, type FeatureSpec, type TaskContract } from "./schema";
+import { extractSectionIds, parseBlockerItems, parseDocumentationItems, parseFeatureStatus, parseTaskContract, type BlockerItem, type DocumentationItem, type FeatureSpec, type TaskContract } from "./schema";
 import { readTextFile } from "./writer";
 
 export class SpecStore implements vscode.Disposable {
@@ -112,11 +112,26 @@ export class SpecStore implements vscode.Disposable {
     } catch {
       // No tasks yet.
     }
-    return { id, name, status, rootUri, featureMdUri, requirementsUri, designUri, tasksDirUri, requirementIds, designIds, tasks };
+    const documentation = await this.readDocumentation(vscode.Uri.joinPath(rootUri, "documentation.md"));
+    const blockers = await this.readBlockers(vscode.Uri.joinPath(rootUri, "blockers.md"));
+    return {
+      id, name, status, rootUri, featureMdUri, requirementsUri, designUri, tasksDirUri,
+      requirementIds, designIds, tasks,
+      ...(documentation.length ? { documentation } : {}),
+      ...(blockers.length ? { blockers } : {}),
+    };
   }
 
   private async readIds(uri: vscode.Uri, prefix: string): Promise<string[]> {
     try { return extractSectionIds(await readTextFile(uri), prefix); } catch { return []; }
+  }
+
+  private async readDocumentation(uri: vscode.Uri): Promise<DocumentationItem[]> {
+    try { return parseDocumentationItems(await readTextFile(uri)); } catch { return []; }
+  }
+
+  private async readBlockers(uri: vscode.Uri): Promise<BlockerItem[]> {
+    try { return parseBlockerItems(await readTextFile(uri)); } catch { return []; }
   }
 
   dispose(): void {

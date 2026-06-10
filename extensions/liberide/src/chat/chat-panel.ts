@@ -1443,6 +1443,12 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
         const sections = parsePipelineSections(buffer);
         await writeTextFile(requirementsUri, `# Requirements\n\n${sections.requirements}\n`);
         await writeTextFile(designUri, `# Design\n\n${sections.design}\n`);
+        if (sections.documentation) {
+          await writeTextFile(vscode.Uri.joinPath(root, "documentation.md"), `# Documentation\n\n${sections.documentation}\n`);
+        }
+        if (sections.blockers) {
+          await writeTextFile(vscode.Uri.joinPath(root, "blockers.md"), `# Blockers\n\n${sections.blockers}\n`);
+        }
         taskCount = await this.writeTaskContractsForFeature(slug, tasksDirUri, buffer);
         this.store.setActiveFeature(slug);
         await this.context.workspaceState.update("liberide.activeFeatureId", slug);
@@ -1586,18 +1592,19 @@ function catalogFromConfig(config: AppConfig, documents: BackendCatalog["documen
   };
 }
 
-function parsePipelineSections(buffer: string): { requirements: string; design: string } {
+function parsePipelineSections(buffer: string): { requirements: string; design: string; documentation: string; blockers: string } {
   const lines = buffer.replace(/\r\n?/g, "\n").split("\n");
   let i = 0;
   while (i < lines.length && !/^\s*#\s+/.test(lines[i])) i++;
   const sections = new Map<string, string[]>();
+  const KNOWN = new Set(["requirements", "design", "documentation", "blockers"]);
   let currentKey: string | null = null;
   for (; i < lines.length; i++) {
     const line = lines[i];
     const match = line.match(/^\s*#\s+(.+?)\s*$/);
     if (match) {
       const heading = match[1].toLowerCase();
-      if (heading === "requirements" || heading === "design") {
+      if (KNOWN.has(heading)) {
         currentKey = heading;
         sections.set(currentKey, []);
         continue;
@@ -1618,7 +1625,12 @@ function parsePipelineSections(buffer: string): { requirements: string; design: 
   if (!requirements && !design) {
     throw new Error("Generated output did not contain # Requirements or # Design sections.");
   }
-  return { requirements, design };
+  return {
+    requirements,
+    design,
+    documentation: trim(sections.get("documentation")),
+    blockers: trim(sections.get("blockers")),
+  };
 }
 
 function deriveTitle(text: string): string {

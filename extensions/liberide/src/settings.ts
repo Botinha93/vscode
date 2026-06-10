@@ -10,6 +10,10 @@ export interface LiberideSettings {
   copilotModelsEnabled: boolean;
   /** Global default callable agents applied to new conversations. */
   defaultAllowedAgentIds: string[];
+  /** When enabled, feature dispatch runs the swarm graph: independent, non-blocking tasks implemented in parallel, gated on hard blockers. */
+  swarm: boolean;
+  /** Isolation for parallel branches: `worktree` (one git worktree per branch, merged at the end) or `shared` working tree. */
+  isolation: "worktree" | "shared";
 }
 
 const SECTION = "liberide";
@@ -25,6 +29,8 @@ export function readSettings(): LiberideSettings {
     copilotUiEnabled: cfg.get<boolean>("copilot.enabled") ?? false,
     copilotModelsEnabled: cfg.get<boolean>("copilot.modelsEnabled") ?? true,
     defaultAllowedAgentIds: cfg.get<string[]>("defaultAllowedAgentIds") ?? [],
+    swarm: cfg.get<boolean>("swarm") ?? false,
+    isolation: cfg.get<"worktree" | "shared">("isolation") ?? "shared",
   };
 }
 

@@ -58,6 +58,21 @@
           "items": { "type": "string" },
           "default": [],
           "description": "Default agents the model may spawn via the agent tool for new LiberIDE chats. Empty means all callable agents. Per-conversation values sync with VoxChat."
+        },
+        "liberide.swarm": {
+          "type": "boolean",
+          "default": false,
+          "description": "When enabled, Dispatch Feature runs the swarm execution graph: independent, non-blocking tasks are implemented in parallel and hard blockers gate the run for approval."
+        },
+        "liberide.isolation": {
+          "type": "string",
+          "enum": ["shared", "worktree"],
+          "enumDescriptions": [
+            "All parallel branches edit the same working tree.",
+            "Each parallel branch runs in its own git worktree, merged when the branch join completes."
+          ],
+          "default": "shared",
+          "description": "Isolation strategy for parallel implementation branches when swarm is enabled."
         }
       }
     },

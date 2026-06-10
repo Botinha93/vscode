@@ -186,7 +186,13 @@ export class LiberidePipelineController implements vscode.WebviewViewProvider, v
       return;
     }
     const readiness = computeTaskReadiness(feature.tasks);
-    const result = await dispatchFeature(feature, { taskIds, ideContext: buildIdeContextPayload() });
+    const settings = readSettings();
+    const result = await dispatchFeature(feature, {
+      taskIds,
+      ideContext: buildIdeContextPayload(),
+      swarm: settings.swarm,
+      isolation: settings.isolation,
+    });
     const startEvent = {
       graphId: result.graphId,
       featureId: feature.id,
