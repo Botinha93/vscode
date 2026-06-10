@@ -1,16 +1,24 @@
 import * as vscode from "vscode";
-import { apiFetch, getApiOrigin, getAuthToken } from "../api";
-import type { IdeDelegatePayload } from "./types";
+import { getApiOrigin, getAuthToken } from "../api";
+import type { JsonRpcRequest } from "@nexus/shared";
+import { isJsonRpcRequest } from "@nexus/shared";
+import type { IdeDelegateKind, IdeDelegatePayload } from "./types";
 import { dispatchIdeDelegate } from "./handlers";
 
 const RECONNECT_BASE_MS = 2_000;
 const RECONNECT_MAX_MS = 30_000;
 
+function wsOrigin(httpOrigin: string): string {
+  if (httpOrigin.startsWith("https://")) return `wss://${httpOrigin.slice("https://".length)}`;
+  if (httpOrigin.startsWith("http://")) return `ws://${httpOrigin.slice("http://".length)}`;
+  return httpOrigin;
+}
+
 export class IdeDelegateStream implements vscode.Disposable {
   private closed = false;
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
-  private abort?: AbortController;
+  private ws: WebSocket | undefined;
 
   constructor(
     private readonly target: { userId: string; projectPath: string; sessionId: string },
@@ -25,7 +33,12 @@ export class IdeDelegateStream implements vscode.Disposable {
   dispose(): void {
     this.closed = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-    this.abort?.abort();
+    try {
+      this.ws?.close();
+    } catch {
+      // ignore
+    }
+    this.ws = undefined;
   }
 
   private log(message: string): void {
@@ -39,73 +52,104 @@ export class IdeDelegateStream implements vscode.Disposable {
     this.reconnectTimer = setTimeout(() => void this.connect(), delay);
   }
 
-  private async connect(): Promise<void> {
-    if (this.closed || !getApiOrigin()) return;
-    this.abort?.abort();
-    this.abort = new AbortController();
-    const params = new URLSearchParams({
-      projectPath: this.target.projectPath,
-      sessionId: this.target.sessionId,
-    });
-    try {
-      const response = await fetch(`${getApiOrigin()}/api/ide/delegate/stream?${params.toString()}`, {
-        headers: {
-          Accept: "text/event-stream",
-          ...(getAuthToken() ? { Authorization: `Bearer ${getAuthToken()}` } : {}),
-        },
-        signal: this.abort.signal,
-      });
-      if (!response.ok || !response.body) {
-        this.log(`stream failed: ${response.status}`);
-        this.scheduleReconnect();
-        return;
-      }
-      this.reconnectAttempt = 0;
-      this.log("delegate stream connected");
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      while (!this.closed) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const parts = buffer.split("\n\n");
-        buffer = parts.pop() ?? "";
-        for (const part of parts) {
-          await this.consumeEvent(part);
-        }
-      }
-    } catch (err) {
-      if (!this.closed && !(err instanceof DOMException && err.name === "AbortError")) {
-        this.log(err instanceof Error ? err.message : String(err));
-      }
-    }
-    if (!this.closed) this.scheduleReconnect();
+  private buildRpcUrl(): string | undefined {
+    const origin = getApiOrigin();
+    const token = getAuthToken();
+    if (!origin || !token) return undefined;
+    const url = new URL(`${wsOrigin(origin)}/api/ide/rpc`);
+    url.searchParams.set("token", token);
+    url.searchParams.set("projectPath", this.target.projectPath);
+    url.searchParams.set("sessionId", this.target.sessionId);
+    return url.toString();
   }
 
-  private async consumeEvent(raw: string): Promise<void> {
-    const event = raw.match(/^event: (.+)$/m)?.[1];
-    const dataLine = raw.match(/^data: (.+)$/m)?.[1];
-    if (!event || !dataLine) return;
-    if (event !== "delegate") return;
-    let request: IdeDelegatePayload;
+  private async connect(): Promise<void> {
+    if (this.closed) return;
+    const rpcUrl = this.buildRpcUrl();
+    if (!rpcUrl) {
+      this.log("missing API origin or auth token");
+      this.scheduleReconnect();
+      return;
+    }
+
     try {
-      request = JSON.parse(dataLine) as IdeDelegatePayload;
+      this.ws?.close();
+    } catch {
+      // ignore
+    }
+
+    const ws = new WebSocket(rpcUrl);
+    this.ws = ws;
+
+    ws.onopen = () => {
+      this.reconnectAttempt = 0;
+      this.log("IDE RPC connected");
+    };
+
+    ws.onmessage = (event) => {
+      void this.handleMessage(String(event.data));
+    };
+
+    ws.onerror = () => {
+      this.log("IDE RPC socket error");
+    };
+
+    ws.onclose = () => {
+      if (this.closed) return;
+      this.log("IDE RPC disconnected");
+      this.scheduleReconnect();
+    };
+  }
+
+  private sendJson(payload: unknown): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(JSON.stringify(payload));
+  }
+
+  private async handleMessage(raw: string): Promise<void> {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
     } catch {
       return;
     }
+
+    if (!isJsonRpcRequest(parsed)) {
+      if (typeof parsed === "object" && parsed && "method" in parsed && (parsed as { method?: string }).method === "connected") {
+        this.log("IDE RPC handshake received");
+      }
+      return;
+    }
+
+    await this.handleRpcRequest(parsed);
+  }
+
+  private async handleRpcRequest(request: JsonRpcRequest): Promise<void> {
+    const params = (request.params && typeof request.params === "object")
+      ? request.params as Record<string, unknown>
+      : {};
+    const timeoutMs = Number(params.timeoutMs ?? 30_000);
+    const delegateRequest: IdeDelegatePayload = {
+      delegateId: request.id,
+      kind: request.method as IdeDelegateKind,
+      payload: {
+        ...params,
+        delegateId: request.id,
+      },
+      target: this.target,
+      timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 30_000,
+    };
+
     try {
-      const result = await dispatchIdeDelegate(request);
-      await apiFetch(`/api/ide/delegate/${encodeURIComponent(request.delegateId)}/complete`, {
-        method: "POST",
-        body: JSON.stringify({ ok: true, result }),
-      });
+      const result = await dispatchIdeDelegate(delegateRequest);
+      this.sendJson({ jsonrpc: "2.0", id: request.id, result });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      await apiFetch(`/api/ide/delegate/${encodeURIComponent(request.delegateId)}/complete`, {
-        method: "POST",
-        body: JSON.stringify({ ok: false, error: message }),
-      }).catch(() => undefined);
+      this.sendJson({
+        jsonrpc: "2.0",
+        id: request.id,
+        error: { code: -32603, message },
+      });
     }
   }
 }

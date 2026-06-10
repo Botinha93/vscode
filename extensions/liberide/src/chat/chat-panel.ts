@@ -34,12 +34,10 @@ import {
 import { defaultEnabledModel, findConfiguredModel, toWireProvider } from "./models";
 import { listCopilotLmModels, streamCopilotChat } from "./copilot-lm";
 import { streamChat } from "./stream-client";
-import { runLocalTerminal } from "../terminal/local-runner";
 import type {
   AppConfig,
   ChatRequest,
   IdeToolContextPayload,
-  TerminalDelegateEvent,
   ConfiguredProvider,
   Conversation,
   ConversationMessage,
@@ -1028,21 +1026,6 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
             entry: update.entry,
             editedFiles: update.editedFiles,
           });
-        },
-        onTerminalDelegate: async (delegate: TerminalDelegateEvent) => {
-          this.broadcast({
-            type: "log",
-            message: `Running command locally: ${delegate.command.slice(0, 72)}${delegate.command.length > 72 ? "…" : ""}`,
-          });
-          const result = await runLocalTerminal(delegate);
-          const complete = await apiFetch(`/api/ide/terminal/${encodeURIComponent(delegate.delegateId)}/complete`, {
-            method: "POST",
-            body: JSON.stringify(result),
-          });
-          if (!complete.ok) {
-            const errText = await complete.text().catch(() => complete.statusText);
-            throw new Error(errText || "Failed to report terminal output to API");
-          }
         },
       };
 
