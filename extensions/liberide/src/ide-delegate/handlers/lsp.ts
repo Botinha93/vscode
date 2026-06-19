@@ -1,21 +1,5 @@
 import * as vscode from "vscode";
-import * as path from "node:path";
-
-function workspaceFolder(): vscode.WorkspaceFolder | undefined {
-  return vscode.workspace.workspaceFolders?.[0];
-}
-
-function relativePath(fsPath: string): string {
-  const root = workspaceFolder()?.uri.fsPath;
-  if (!root) return fsPath;
-  return path.relative(root, fsPath).replace(/\\/g, "/") || fsPath;
-}
-
-function resolveFileUri(relative: string): vscode.Uri {
-  const folder = workspaceFolder();
-  if (!folder) throw new Error("No workspace folder open");
-  return vscode.Uri.joinPath(folder.uri, relative);
-}
+import { relativePath, resolveFileUri } from "./helpers";
 
 function locationToJson(loc: vscode.Location | vscode.LocationLink): Record<string, unknown> {
   if ("uri" in loc && loc.uri) {
@@ -36,12 +20,20 @@ function locationToJson(loc: vscode.Location | vscode.LocationLink): Record<stri
 export async function handleWorkspaceSymbols(payload: Record<string, unknown>): Promise<unknown> {
   const query = String(payload.query ?? "");
   const maxResults = Number(payload.maxResults ?? 50);
+  const offset = Math.max(0, Number(payload.offset ?? 0));
   const symbols = (await vscode.commands.executeCommand<vscode.SymbolInformation[]>(
     "vscode.executeWorkspaceSymbolProvider",
     query
   )) ?? [];
+  const page = symbols.slice(offset, offset + maxResults);
+  const nextOffset = offset + maxResults;
+  const hasMore = nextOffset < symbols.length;
   return {
-    symbols: symbols.slice(0, maxResults).map((s) => ({
+    total: symbols.length,
+    offset,
+    hasMore,
+    ...(hasMore ? { nextCursor: nextOffset } : {}),
+    symbols: page.map((s) => ({
       name: s.name,
       kind: vscode.SymbolKind[s.kind],
       path: relativePath(s.location.uri.fsPath),

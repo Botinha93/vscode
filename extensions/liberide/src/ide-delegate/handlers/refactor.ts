@@ -1,7 +1,24 @@
 import * as vscode from "vscode";
 import { positionFromPayload, rangeFromPayload, resolveFileUri } from "./helpers";
+import { readSettings } from "../../settings";
 
 const codeActionCache = new Map<string, vscode.CodeAction>();
+
+/**
+ * Provider-built WorkspaceEdits can't carry per-entry `needsConfirmation`
+ * metadata (the native refactor-preview path used by applyWorkspaceEdit), so
+ * gate rename/code-action behind a modal confirm when `confirmEdits` is on.
+ * Returns true when the mutation may proceed.
+ */
+async function confirmMutation(summary: string): Promise<boolean> {
+  if (readSettings().confirmEdits === "off") return true;
+  const choice = await vscode.window.showWarningMessage(
+    `Apply agent change?\n\n${summary}`,
+    { modal: true },
+    "Apply",
+  );
+  return choice === "Apply";
+}
 
 function cacheAction(action: vscode.CodeAction): string {
   const id = crypto.randomUUID();
@@ -16,7 +33,13 @@ function cacheAction(action: vscode.CodeAction): string {
 export async function handleCodeActions(payload: Record<string, unknown>): Promise<unknown> {
   const uri = resolveFileUri(String(payload.path ?? ""));
   const range = rangeFromPayload(payload);
-  const only = payload.only ? (String(payload.only).split(",") as vscode.CodeActionKind[]) : undefined;
+  const only = payload.only
+    ? String(payload.only)
+        .split(",")
+        .map((k) => k.trim())
+        .filter(Boolean)
+        .map((k) => vscode.CodeActionKind.Empty.append(k))
+    : undefined;
   const actions =
     (await vscode.commands.executeCommand<vscode.CodeAction[]>(
       "vscode.executeCodeActionProvider",
@@ -39,6 +62,9 @@ export async function handleApplyCodeAction(payload: Record<string, unknown>): P
   const actionId = String(payload.actionId ?? "");
   const action = codeActionCache.get(actionId);
   if (!action) throw new Error(`Unknown code action id: ${actionId}`);
+  if (!(await confirmMutation(`Code action: ${action.title}`))) {
+    return { applied: false, title: action.title, cancelled: true };
+  }
   if (action.edit) {
     const applied = await vscode.workspace.applyEdit(action.edit);
     if (!applied) throw new Error("Failed to apply code action edit");
@@ -62,6 +88,9 @@ export async function handleRenameSymbol(payload: Record<string, unknown>): Prom
     newName
   );
   if (!edit) throw new Error("Rename provider returned no edit");
+  if (!(await confirmMutation(`Rename symbol to "${newName}"`))) {
+    return { applied: false, newName, cancelled: true };
+  }
   const applied = await vscode.workspace.applyEdit(edit);
   return { applied, newName };
 }

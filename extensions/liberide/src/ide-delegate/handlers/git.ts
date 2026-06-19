@@ -1,5 +1,7 @@
 import * as vscode from "vscode";
 import * as path from "node:path";
+import { workspaceFolder } from "./helpers";
+import { resolveContainedRelativePath } from "./path-containment";
 
 type GitExtension = {
   getAPI(version: 1): {
@@ -23,7 +25,7 @@ async function getGitRepo() {
   if (!ext) throw new Error("vscode.git extension is not available");
   if (!ext.isActive) await ext.activate();
   const api = ext.exports.getAPI(1);
-  const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  const root = workspaceFolder()?.uri.fsPath;
   const repo = api.repositories.find((r) => root && r.rootUri.fsPath === root) ?? api.repositories[0];
   if (!repo) throw new Error("No git repository found in workspace");
   return repo;
@@ -34,7 +36,7 @@ function rel(fsPath: string, root: string): string {
 }
 
 export async function handleGitStatus(): Promise<unknown> {
-  const repo = getGitRepo();
+  const repo = await getGitRepo();
   const root = repo.rootUri.fsPath;
   const { state } = repo;
   return {
@@ -49,7 +51,7 @@ export async function handleGitStatus(): Promise<unknown> {
 }
 
 export async function handleGitLog(payload: Record<string, unknown>): Promise<unknown> {
-  const repo = getGitRepo();
+  const repo = await getGitRepo();
   const maxCount = Number(payload.maxCount ?? 20);
   if (!repo.log) throw new Error("Git log API unavailable");
   const commits = await repo.log({ maxEntries: maxCount });
@@ -64,10 +66,10 @@ export async function handleGitLog(payload: Record<string, unknown>): Promise<un
 }
 
 export async function handleGitDiff(payload: Record<string, unknown>): Promise<unknown> {
-  const repo = getGitRepo();
+  const repo = await getGitRepo();
   const root = repo.rootUri.fsPath;
   const relPath = payload.path ? String(payload.path) : undefined;
-  const uri = relPath ? vscode.Uri.file(path.join(root, relPath)) : undefined;
+  const uri = relPath ? vscode.Uri.file(resolveContainedRelativePath(root, relPath)) : undefined;
   if (!repo.diff) throw new Error("Git diff API unavailable");
   const diff = await repo.diff(uri);
   const maxBytes = Number(payload.maxBytes ?? 80_000);
@@ -80,10 +82,10 @@ export async function handleGitDiff(payload: Record<string, unknown>): Promise<u
 }
 
 export async function handleGitBlame(payload: Record<string, unknown>): Promise<unknown> {
-  const repo = getGitRepo();
+  const repo = await getGitRepo();
   const root = repo.rootUri.fsPath;
   const relPath = String(payload.path ?? "");
-  const uri = vscode.Uri.file(path.join(root, relPath));
+  const uri = vscode.Uri.file(resolveContainedRelativePath(root, relPath));
   if (!repo.blame) throw new Error("Git blame API unavailable");
   const lines = await repo.blame(uri);
   return { path: relPath, lines: lines.slice(0, 500) };

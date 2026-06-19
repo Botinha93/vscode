@@ -1,4 +1,5 @@
 import type { IdeDelegateKind, IdeDelegatePayload } from "../types";
+import { delegateContext } from "./delegate-context";
 import { handleOpenEditors, handleDirtyBuffers, handleActiveSelection } from "./editors";
 import { handleDiagnostics } from "./diagnostics";
 import {
@@ -10,7 +11,13 @@ import {
 } from "./lsp";
 import { handleFindFiles } from "./files";
 import { handleGitStatus, handleGitLog, handleGitDiff, handleGitBlame } from "./git";
-import { handleTerminalSession } from "./terminal-session";
+import {
+  handleTerminalSession,
+  handleTerminalSessionOpen,
+  handleTerminalSessionSend,
+  handleTerminalSessionRead,
+  handleTerminalSessionClose,
+} from "./terminal-session";
 import { handleTerminalRun } from "./terminal-run";
 import {
   handleCodeActions,
@@ -20,7 +27,7 @@ import {
   handleFormatRange,
 } from "./refactor";
 import { handleApplyWorkspaceEdit } from "./workspace-edit";
-import { handleTasksList, handleTasksRun, handleTasksCancel } from "./tasks";
+import { handleTasksList, handleTasksRun, handleTasksCancel, handleTasksStatus } from "./tasks";
 import { handleTestsList, handleTestsRun, handleTestsStatus } from "./tests";
 import { handleDebugStart, handleDebugStop, handleDebugList, handleDebugStackTrace } from "./debug";
 import { handleNotebookRead, handleNotebookEdit, handleNotebookExecute } from "./notebook";
@@ -30,6 +37,10 @@ import { handleProblemsByOwner } from "./problems";
 import { handleSemanticTokens } from "./semantic";
 
 export async function dispatchIdeDelegate(request: IdeDelegatePayload): Promise<unknown> {
+  return delegateContext.run({ root: request.target.projectPath }, () => dispatchIdeDelegateInner(request));
+}
+
+async function dispatchIdeDelegateInner(request: IdeDelegatePayload): Promise<unknown> {
   const { kind, payload } = request;
   switch (kind as IdeDelegateKind) {
     case "terminal.run":
@@ -64,6 +75,14 @@ export async function dispatchIdeDelegate(request: IdeDelegatePayload): Promise<
       return handleGitBlame(payload);
     case "vscode.terminalSession":
       return handleTerminalSession(payload);
+    case "vscode.terminalSession.open":
+      return handleTerminalSessionOpen(payload);
+    case "vscode.terminalSession.send":
+      return handleTerminalSessionSend(payload);
+    case "vscode.terminalSession.read":
+      return handleTerminalSessionRead(payload);
+    case "vscode.terminalSession.close":
+      return handleTerminalSessionClose(payload);
     case "vscode.codeActions":
       return handleCodeActions(payload);
     case "vscode.codeActions.apply":
@@ -82,6 +101,8 @@ export async function dispatchIdeDelegate(request: IdeDelegatePayload): Promise<
       return handleTasksRun(payload);
     case "vscode.tasks.cancel":
       return handleTasksCancel(payload);
+    case "vscode.tasks.status":
+      return handleTasksStatus(payload);
     case "vscode.tests.list":
       return handleTestsList();
     case "vscode.tests.run":

@@ -3,17 +3,21 @@ import * as path from "path";
 import type { TerminalDelegateEvent } from "../chat/types";
 
 export interface LocalTerminalResult {
+  status: "completed" | "failed" | "timed_out";
   exitCode: number | null;
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  durationMs: number;
+  truncated: boolean;
+  stillRunning?: boolean;
 }
 
 const MAX_OUTPUT = 100_000;
 
-function truncate(text: string): string {
-  if (text.length <= MAX_OUTPUT) return text;
-  return `${text.slice(0, MAX_OUTPUT)}\n... [output truncated]`;
+function truncate(text: string): { text: string; truncated: boolean } {
+  if (text.length <= MAX_OUTPUT) return { text, truncated: false };
+  return { text: `${text.slice(0, MAX_OUTPUT)}\n... [output truncated]`, truncated: true };
 }
 
 function shellArgv(command: string): { argv: string[]; cwd: string } {
@@ -29,6 +33,7 @@ export function runLocalTerminal(delegate: TerminalDelegateEvent): Promise<Local
   const cwd = path.resolve(delegate.cwd || delegate.projectPath);
   const { argv } = shellArgv(delegate.command);
   const timeoutMs = delegate.timeoutMs > 0 ? delegate.timeoutMs : 120_000;
+  const startedAt = Date.now();
 
   return new Promise((resolve) => {
     const proc = spawn(argv[0], argv.slice(1), {
@@ -58,21 +63,31 @@ export function runLocalTerminal(delegate: TerminalDelegateEvent): Promise<Local
 
     proc.on("close", (code) => {
       clearTimeout(timer);
+      const out = truncate(stdout);
+      const err = truncate(stderr);
       resolve({
+        status: timedOut ? "timed_out" : code === 0 ? "completed" : "failed",
         exitCode: code,
-        stdout: truncate(stdout),
-        stderr: truncate(stderr),
+        stdout: out.text,
+        stderr: err.text,
         timedOut,
+        durationMs: Date.now() - startedAt,
+        truncated: out.truncated || err.truncated,
+        stillRunning: false,
       });
     });
 
     proc.on("error", (err) => {
       clearTimeout(timer);
       resolve({
+        status: "failed",
         exitCode: 1,
         stdout: "",
         stderr: err.message,
         timedOut: false,
+        durationMs: Date.now() - startedAt,
+        truncated: false,
+        stillRunning: false,
       });
     });
   });

@@ -1,3 +1,5 @@
+import type { WorkspaceIntelligence } from "../workspace/intelligence";
+
 export type Provider = "openai" | "openrouter" | "google" | "copilot" | "ollama" | "llamacpp" | "lmstudio" | "custom";
 export type ConfiguredProvider = Provider | "ollama-internal";
 export type Role = "system" | "user" | "assistant" | "tool";
@@ -121,12 +123,15 @@ export interface AppConfig {
 export interface IdeToolContextPayload {
   sessionId: string;
   userId: string;
+  ideUserId?: string;
+  ideSessionId?: string;
   projectPath: string;
   mode: "web" | "desktop";
   terminalExecutor?: "server" | "client";
   conversationId?: string;
   agentRunId?: string;
   delegateAvailable?: boolean;
+  workspaceIntelligence?: WorkspaceIntelligence;
 }
 
 export interface TerminalDelegateEvent {

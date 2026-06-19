@@ -1,6 +1,9 @@
 import * as vscode from "vscode";
 import { extractSectionIds, parseBlockerItems, parseDocumentationItems, parseFeatureStatus, parseTaskContract, type BlockerItem, type DocumentationItem, type FeatureSpec, type TaskContract } from "./schema";
 import { readTextFile } from "./writer";
+import { apiFetch } from "../api";
+
+const REFRESH_TIMEOUT_MS = 15_000;
 
 export class SpecStore implements vscode.Disposable {
   private readonly changeEmitter = new vscode.EventEmitter<void>();
@@ -12,6 +15,7 @@ export class SpecStore implements vscode.Disposable {
   private refreshTimer?: ReturnType<typeof setTimeout>;
   private refreshInProgress = false;
   private refreshQueued = false;
+  private promptSyncTimer?: ReturnType<typeof setTimeout>;
 
   constructor(private readonly output: vscode.OutputChannel) {}
 
@@ -23,6 +27,31 @@ export class SpecStore implements vscode.Disposable {
     }, 300);
   }
 
+  /** Debounced workspace-prompt import; logs failures instead of swallowing them. */
+  private schedulePromptSync(): void {
+    if (this.promptSyncTimer) clearTimeout(this.promptSyncTimer);
+    this.promptSyncTimer = setTimeout(() => {
+      this.promptSyncTimer = undefined;
+      const roots = (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
+      if (roots.length === 0) return;
+      void (async () => {
+        for (const rootPath of roots) {
+          try {
+            const res = await apiFetch("/api/skills/import-from-workspace", {
+              method: "POST",
+              body: JSON.stringify({ rootPath }),
+            });
+            if (!res.ok) {
+              this.output.appendLine(`[spec.prompts] import-from-workspace failed (${rootPath}): ${res.status} ${res.statusText}`);
+            }
+          } catch (err) {
+            this.output.appendLine(`[spec.prompts] import-from-workspace error (${rootPath}): ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+      })();
+    }, 500);
+  }
+
   async initialize(context: vscode.ExtensionContext): Promise<void> {
     this.activeFeatureId = context.workspaceState.get("liberide.activeFeatureId");
     this.watcher = vscode.workspace.createFileSystemWatcher("**//.liberide/specs/**/*.md");
@@ -31,15 +60,7 @@ export class SpecStore implements vscode.Disposable {
     this.watcher.onDidDelete(() => this.scheduleRefresh());
     context.subscriptions.push(this.watcher);
     this.promptWatcher = vscode.workspace.createFileSystemWatcher("**/.chatllm/**/*.md");
-    const syncPrompts = () => {
-      const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-      if (!root) return;
-      void fetch(`${process.env.CHATLLM_API_ORIGIN ?? "http://127.0.0.1:3000"}/api/skills/import-from-workspace`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rootPath: root }),
-      }).catch(() => undefined);
-    };
+    const syncPrompts = () => this.schedulePromptSync();
     this.promptWatcher.onDidCreate(syncPrompts);
     this.promptWatcher.onDidChange(syncPrompts);
     this.promptWatcher.onDidDelete(syncPrompts);
@@ -60,26 +81,41 @@ export class SpecStore implements vscode.Disposable {
     }
     this.refreshInProgress = true;
     try {
-      this.features.clear();
-      for (const folder of vscode.workspace.workspaceFolders ?? []) {
-        const root = vscode.Uri.joinPath(folder.uri, ".liberide", "specs");
-        try {
-          for (const [name, type] of await vscode.workspace.fs.readDirectory(root)) {
-            if (type === vscode.FileType.Directory) {
-              const feature = await this.loadFeature(root, name);
-              if (feature) this.features.set(feature.id, feature);
-            }
-          }
-        } catch {
-          // Workspace has no spec directory yet.
-        }
-      }
+      await Promise.race([
+        this.runRefreshBody(),
+        new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error("refresh timeout")), REFRESH_TIMEOUT_MS);
+        }),
+      ]);
       this.changeEmitter.fire();
+    } catch (err) {
+      if (err instanceof Error && err.message === "refresh timeout") {
+        this.output.appendLine(`[spec.refresh] timed out after ${REFRESH_TIMEOUT_MS}ms; refreshInProgress reset`);
+      } else {
+        this.output.appendLine(`[spec.refresh] error: ${err instanceof Error ? err.message : String(err)}`);
+      }
     } finally {
       this.refreshInProgress = false;
       if (this.refreshQueued) {
         this.refreshQueued = false;
         void this.refresh();
+      }
+    }
+  }
+
+  private async runRefreshBody(): Promise<void> {
+    this.features.clear();
+    for (const folder of vscode.workspace.workspaceFolders ?? []) {
+      const root = vscode.Uri.joinPath(folder.uri, ".liberide", "specs");
+      try {
+        for (const [name, type] of await vscode.workspace.fs.readDirectory(root)) {
+          if (type === vscode.FileType.Directory) {
+            const feature = await this.loadFeature(root, name);
+            if (feature) this.features.set(feature.id, feature);
+          }
+        }
+      } catch {
+        // Workspace has no spec directory yet.
       }
     }
   }
@@ -136,6 +172,7 @@ export class SpecStore implements vscode.Disposable {
 
   dispose(): void {
     if (this.refreshTimer) clearTimeout(this.refreshTimer);
+    if (this.promptSyncTimer) clearTimeout(this.promptSyncTimer);
     this.watcher?.dispose();
     this.promptWatcher?.dispose();
     this.changeEmitter.dispose();

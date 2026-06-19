@@ -1,4 +1,6 @@
 import type { LiberideSettings } from "../settings";
+import type { WorkspaceIntelligence } from "../workspace/intelligence";
+import type { ContextBlockChip } from "./context-blocks";
 import type {
   AgentDefinition,
   ConfiguredModel,
@@ -98,6 +100,7 @@ export interface ProjectInfo {
   branch?: string;
   rootPath?: string;
   folderName: string;
+  workspaceIntelligence?: WorkspaceIntelligence;
 }
 
 export interface BackendCatalog {
@@ -140,6 +143,7 @@ export type ChatHostToWebview =
   | { type: "toolUpdate"; sessionId: string; messageId: string; entry: ToolTimelineEntry; editedFiles: EditedFileSummary[] }
   | { type: "project"; project: ProjectInfo }
   | { type: "openSidebar" }
+  | { type: "contextBlocks"; blocks: ContextBlockChip[] }
   | { type: "log"; message: string; severity?: "info" | "warning" | "error" };
 
 export type ChatWebviewToHost =
@@ -163,4 +167,5 @@ export type ChatWebviewToHost =
   | { type: "openSettings" }
   | { type: "openPipeline" }
   | { type: "revealFile"; path: string }
-  | { type: "undoEdit"; path: string };
+  | { type: "undoEdit"; path: string }
+  | { type: "removeContextBlock"; id: string };

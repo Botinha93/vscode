@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import type { ConfiguredModel, ModelCapability, ToolCallEvent } from "./types";
 import { PROVIDER_LABELS } from "./models";
 import { apiFetch } from "../api";
+import { buildIdeContextPayload } from "../ide-delegate/context";
 
 export async function listCopilotLmModels(): Promise<ConfiguredModel[]> {
   const models = await vscode.lm.selectChatModels({ vendor: "copilot" });
@@ -172,20 +173,8 @@ async function buildToolStubs(): Promise<vscode.LanguageModelChatTool[]> {
   }));
 }
 
-function buildIdeContextForInvoke(): Record<string, unknown> | undefined {
-  const folder = vscode.workspace.workspaceFolders?.[0];
-  if (!folder) return undefined;
-  return {
-    sessionId: `vscode-${folder.name}`,
-    userId: "default",
-    projectPath: folder.uri.fsPath,
-    mode: "desktop",
-    terminalExecutor: "client",
-  };
-}
-
 async function invokeBackendTool(body: { name: string; arguments: Record<string, unknown> }): Promise<{ result?: string }> {
-  const ideContext = buildIdeContextForInvoke();
+  const ideContext = buildIdeContextPayload();
   const response = await apiFetch("/api/tools/invoke", {
     method: "POST",
     headers: ideContext ? { "X-Terminal-Executor": "client" } : undefined,
@@ -198,4 +187,3 @@ async function invokeBackendTool(body: { name: string; arguments: Record<string,
   const event = (await response.json()) as ToolCallEvent;
   return { result: event.result };
 }
-

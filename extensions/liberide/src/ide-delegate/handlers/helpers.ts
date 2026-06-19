@@ -1,8 +1,16 @@
 import * as vscode from "vscode";
 import * as path from "node:path";
+import { getDelegateRoot } from "./delegate-context";
+import { resolveContainedRelativePath } from "./path-containment";
 
 export function workspaceFolder(): vscode.WorkspaceFolder | undefined {
-  return vscode.workspace.workspaceFolders?.[0];
+  const root = getDelegateRoot();
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  if (root) {
+    const match = folders.find((f) => f.uri.fsPath === root);
+    if (match) return match;
+  }
+  return folders[0];
 }
 
 export function relativePath(fsPath: string): string {
@@ -14,7 +22,7 @@ export function relativePath(fsPath: string): string {
 export function resolveFileUri(relative: string): vscode.Uri {
   const folder = workspaceFolder();
   if (!folder) throw new Error("No workspace folder open");
-  return vscode.Uri.joinPath(folder.uri, relative);
+  return vscode.Uri.file(resolveContainedRelativePath(folder.uri.fsPath, relative));
 }
 
 export function rangeFromPayload(payload: Record<string, unknown>): vscode.Range {

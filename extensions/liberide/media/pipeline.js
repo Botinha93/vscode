@@ -38344,6 +38344,7 @@
     activeFeatureId: null,
     activeTasks: [],
     runs: /* @__PURE__ */ new Map(),
+    inspector: null,
     busyAction: null
   };
   var root = document.getElementById("root");
@@ -38400,6 +38401,13 @@
           <h3>Graph</h3>
           <div class="graph-area" id="graph-area"><div class="graph-empty">Generate task contracts via the LiberIDE chat (use <strong>/tasks</strong>), then dispatch to see the live execution graph.</div></div>
         </section>
+        <section class="pipeline-section inspector-section">
+          <div class="pipeline-section-header">
+            <h3>Inspector</h3>
+            <button class="icon-btn" id="inspector-refresh" title="Refresh inspector" aria-label="Refresh inspector">\u21BB</button>
+          </div>
+          <div class="run-inspector" id="run-inspector"></div>
+        </section>
         <section class="pipeline-section">
           <h3>Runs</h3>
           <div class="runs-list" id="runs-list"></div>
@@ -38426,6 +38434,9 @@
     root.querySelector("#dispatch-btn").addEventListener("click", () => {
       if (!state.activeFeatureId) return;
       send({ type: "dispatchFeature", featureId: state.activeFeatureId });
+    });
+    root.querySelector("#inspector-refresh")?.addEventListener("click", () => {
+      if (state.inspector) send({ type: "refreshInspector", graphId: state.inspector.graphId, nodeId: state.inspector.nodeId });
     });
   }
   function renderFeatures() {
@@ -38494,10 +38505,13 @@
     for (const run of state.runs.values()) {
       const wrapper = document.createElement("div");
       wrapper.className = "run-item";
+      const total = run.nodes.size;
+      const completed2 = [...run.nodes.values()].filter((n) => n.status === "completed").length;
+      const progress2 = total > 0 ? ` ${completed2}/${total}` : "";
       wrapper.innerHTML = `
       <header>
         <div><strong>${escapeHtml(run.label)}</strong><div class="meta">graph ${escapeHtml(run.graphId)}</div></div>
-        <div class="run-actions"><span class="pill">${escapeHtml(run.status)}</span>
+        <div class="run-actions"><span class="pill">${escapeHtml(run.status)}${progress2}</span>
         ${run.status === "running" ? `<button class="icon-btn run-cancel" title="Cancel run" aria-label="Cancel run">&times;</button>` : ""}</div>
       </header>
       <div class="nodes"></div>
@@ -38518,6 +38532,7 @@
       });
       container2.appendChild(wrapper);
     }
+    renderInspector();
   }
   function ensureCytoscape() {
     if (!graphContainerEl) return null;
@@ -38564,14 +38579,15 @@
     });
     return cy;
   }
-  function renderGraph(run) {
+  function renderNodeGraph(nodes3) {
     const c = ensureCytoscape();
     if (!c) return;
+    const ids = new Set(nodes3.map((n) => n.id));
     const elements = [];
-    for (const [id2, node] of run.nodes) {
-      elements.push({ data: { id: id2, label: node.label, status: node.status } });
+    for (const node of nodes3) {
+      elements.push({ data: { id: node.id, label: node.label, status: node.status } });
       for (const dep of node.dependsOn) {
-        elements.push({ data: { id: `${dep}->${id2}`, source: dep, target: id2 } });
+        if (ids.has(dep)) elements.push({ data: { id: `${dep}->${node.id}`, source: dep, target: node.id } });
       }
     }
     c.elements().remove();
@@ -38579,6 +38595,25 @@
     c.layout({ name: "dagre", rankDir: "TB", nodeSep: 30, rankSep: 50 }).run();
     c.resize();
     c.fit(void 0, 24);
+  }
+  function renderGraph(run) {
+    renderNodeGraph([...run.nodes].map(([id2, node]) => {
+      const meta3 = [node.parallelKey, node.branch, node.worktree].filter(Boolean).join(" \xB7 ");
+      return { id: id2, label: meta3 ? `${node.label}
+${meta3}` : node.label, status: node.status, dependsOn: node.dependsOn };
+    }));
+    cy?.nodes().off("tap");
+    cy?.nodes().on("tap", (event3) => inspectNode(run.graphId, String(event3.target.id())));
+  }
+  function renderFeatureGraph() {
+    if (activeRunId) return;
+    if (state.activeTasks.length === 0) return;
+    renderNodeGraph(state.activeTasks.map((t) => {
+      const base = `${t.id} \xB7 ${t.title}`;
+      const label = t.status === "blocked" && t.blockedBy?.length ? `${base}
+\u26D4 needs ${t.blockedBy.join(", ")}` : base;
+      return { id: t.id, label, status: t.status, dependsOn: t.dependsOn };
+    }));
   }
   function updateGraphNode(graphId, nodeId, status) {
     if (activeRunId !== graphId) return;
@@ -38589,12 +38624,20 @@
     if (!run) return;
     activeRunId = graphId;
     renderGraph(run);
+    send({ type: "inspectRun", graphId });
+  }
+  function inspectNode(graphId, nodeId) {
+    activeRunId = graphId;
+    send({ type: "inspectRun", graphId, nodeId });
   }
   function cssEscape(id2) {
     return id2.replace(/[^a-zA-Z0-9_-]/g, (ch) => `\\${ch}`);
   }
   function escapeHtml(value) {
     return value.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] ?? ch);
+  }
+  function escapeAttr(value) {
+    return escapeHtml(value);
   }
   function showNotice(message, severity = "warning") {
     const stack = root.querySelector("#pipeline-notices");
@@ -38611,6 +38654,73 @@
     if (scaffold) scaffold.disabled = state.busyAction !== null;
     if (scaffoldInput) scaffoldInput.disabled = state.busyAction !== null;
     renderTasks();
+  }
+  function renderInspector() {
+    const el = root.querySelector("#run-inspector");
+    if (!el) return;
+    const inspector = state.inspector;
+    if (!inspector) {
+      el.innerHTML = `<div class="meta empty-row">Select a run or node to inspect.</div>`;
+      return;
+    }
+    const node = inspector.nodeId ? inspector.detail?.nodes.find((n) => n.id === inspector.nodeId) : void 0;
+    const metrics = inspector.metrics;
+    const artifacts = inspector.artifacts ?? [];
+    const approvals = inspector.detail?.approvals ?? [];
+    const memory = inspector.workingMemory;
+    const selectedTitle = node ? `${node.id} \xB7 ${node.title}` : `Run ${inspector.graphId}`;
+    el.innerHTML = `
+    <div class="inspector-title">${escapeHtml(selectedTitle)}</div>
+    ${node ? `<div class="inspector-card"><strong>${escapeHtml(node.status)}</strong><p>${escapeHtml(node.inputSummary ?? "")}</p>${node.error ? `<p class="error">${escapeHtml(node.error)}</p>` : ""}</div>` : ""}
+    <div class="inspector-grid">
+      <section><h4>Cost</h4><p>${metrics ? `${formatCost(metrics.estimatedCostUsd)} \xB7 ${metrics.inputTokens}/${metrics.outputTokens} tokens \xB7 ${metrics.callCount} calls` : "No usage recorded."}</p></section>
+      <section><h4>Working Memory</h4><p>${memory ? escapeHtml([memory.activeGoal, ...memory.blockers, ...memory.nextActions].filter(Boolean).join(" \xB7 ") || "Memory is available.") : "No working memory yet."}</p></section>
+      <section><h4>Verification</h4><p>${renderVerification(inspector.verification ?? [])}</p></section>
+      <section><h4>Approvals</h4>${renderApprovals(inspector.graphId, approvals)}</section>
+      <section class="inspector-wide"><h4>Artifacts</h4>${renderArtifacts(inspector.graphId, artifacts)}</section>
+    </div>
+  `;
+    bindInspectorActions(el, inspector.graphId);
+  }
+  function renderVerification(items) {
+    if (!items.length) return "No verification events yet.";
+    const passed = items.filter((item) => item.passed).length;
+    return `${passed}/${items.length} passed`;
+  }
+  function renderApprovals(graphId, approvals) {
+    if (!approvals.length) return `<p>No approvals for this run.</p>`;
+    return approvals.map((approval) => `
+    <div class="approval-row">
+      <span>${escapeHtml(approval.status)} \xB7 ${escapeHtml(approval.risk)} \xB7 ${escapeHtml(approval.action)}</span>
+      ${approval.status === "pending" ? `<button class="mini-btn approval-approve" data-graph="${escapeAttr(graphId)}" data-id="${escapeAttr(approval.id)}">Approve</button><button class="mini-btn approval-reject" data-graph="${escapeAttr(graphId)}" data-id="${escapeAttr(approval.id)}">Reject</button>` : ""}
+    </div>
+  `).join("");
+  }
+  function renderArtifacts(graphId, artifacts) {
+    if (!artifacts.length) return `<p>No artifacts yet.</p>`;
+    return artifacts.map((artifact) => `
+    <button class="artifact-row" data-graph="${escapeAttr(graphId)}" data-id="${escapeAttr(artifact.id)}">
+      <span>${escapeHtml(artifact.title || artifact.path || artifact.id)}</span>
+      <span class="meta">${escapeHtml(artifact.kind)}${artifact.path ? ` \xB7 ${escapeHtml(artifact.path)}` : ""}</span>
+    </button>
+  `).join("");
+  }
+  function bindInspectorActions(el, graphId) {
+    el.querySelectorAll(".artifact-row").forEach((button) => {
+      button.addEventListener("click", () => send({ type: "openArtifact", graphId, artifactId: button.dataset.id ?? "" }));
+    });
+    el.querySelectorAll(".approval-approve").forEach((button) => {
+      button.addEventListener("click", () => send({ type: "resolveApproval", graphId, approvalId: button.dataset.id ?? "", status: "approved" }));
+    });
+    el.querySelectorAll(".approval-reject").forEach((button) => {
+      button.addEventListener("click", () => {
+        const response = window.prompt("Reason for rejection (optional)") ?? void 0;
+        send({ type: "resolveApproval", graphId, approvalId: button.dataset.id ?? "", status: "rejected", response });
+      });
+    });
+  }
+  function formatCost(value) {
+    return value ? `$${value.toFixed(4)}` : "n/a";
   }
   function handleMessage(msg) {
     switch (msg.type) {
@@ -38629,6 +38739,7 @@
         state.activeTasks = msg.activeFeature?.tasks ?? [];
         renderFeatures();
         renderTasks();
+        renderFeatureGraph();
         break;
       case "graphStart": {
         const ev = msg.payload;
@@ -38663,6 +38774,10 @@
         renderRuns();
         break;
       }
+      case "graphInspector":
+        state.inspector = msg.payload;
+        renderInspector();
+        break;
       case "operation":
         state.busyAction = msg.status === "running" ? msg.action : null;
         if (msg.status === "success" && msg.action === "scaffold") {

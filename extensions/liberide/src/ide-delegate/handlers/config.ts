@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { workspaceFolder } from "./helpers";
 
 const TARGET_MAP: Record<string, vscode.ConfigurationTarget> = {
   global: vscode.ConfigurationTarget.Global,
@@ -9,7 +10,7 @@ const TARGET_MAP: Record<string, vscode.ConfigurationTarget> = {
 export async function handleConfigRead(payload: Record<string, unknown>): Promise<unknown> {
   const section = String(payload.section ?? "");
   const key = payload.key ? String(payload.key) : undefined;
-  const folder = vscode.workspace.workspaceFolders?.[0];
+  const folder = workspaceFolder();
   const config = folder
     ? vscode.workspace.getConfiguration(section || undefined, folder.uri)
     : vscode.workspace.getConfiguration(section || undefined);
@@ -34,7 +35,7 @@ export async function handleConfigWrite(payload: Record<string, unknown>): Promi
   const value = payload.value;
   const targetName = String(payload.target ?? "workspace");
   const target = TARGET_MAP[targetName] ?? vscode.ConfigurationTarget.Workspace;
-  const folder = vscode.workspace.workspaceFolders?.[0];
+  const folder = workspaceFolder();
   const config = folder
     ? vscode.workspace.getConfiguration(section || undefined, folder.uri)
     : vscode.workspace.getConfiguration(section || undefined);

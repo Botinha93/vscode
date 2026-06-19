@@ -13,6 +13,8 @@ import type {
   ToolTimelineEntry,
 } from "../chat/chat-protocol";
 import type { ConfiguredProvider, DocumentRecord } from "../chat/types";
+import type { ContextBlockChip } from "../chat/context-blocks";
+import type { WorkspaceIntelligence } from "../workspace/intelligence";
 import { buildChatSlashCommands, parseSlashQuery } from "@nexus/shared";
 import { highlightCode } from "./highlight";
 
@@ -47,6 +49,8 @@ interface AppState {
   expandedEditCards: Set<string>;
   /** message ids whose pipeline-ready card was acted on locally; must never re-render. */
   consumedPipelineCards: Set<string>;
+  /** Inline context chips applied to the next message. */
+  contextBlocks: ContextBlockChip[];
 }
 
 const state: AppState = {
@@ -67,6 +71,7 @@ const state: AppState = {
   expandedTimelines: new Set(),
   expandedEditCards: new Set(),
   consumedPipelineCards: new Set(),
+  contextBlocks: [],
 };
 
 const PROVIDER_LABELS: Record<string, string> = {
@@ -190,6 +195,7 @@ function shellHtml(): string {
         <section class="chat-transcript" id="transcript"></section>
         <footer class="chat-composer">
           <div class="composer-card">
+            <div class="composer-attachments" id="composer-context" hidden></div>
             <div class="composer-attachments" id="composer-attachments" hidden></div>
             <textarea id="composer" placeholder="Ask for follow-up changes\u2026" rows="1"></textarea>
             <div class="composer-toolbar" id="chip-row"></div>
@@ -320,13 +326,24 @@ function renderProjectBar(): void {
     ? state.project.remoteUrl ?? state.project.id
     : state.project.rootPath ?? "";
   const branch = state.project.branch ? ` <span class="project-branch">\u2387 ${escapeHtml(state.project.branch)}</span>` : "";
+  const profile = workspaceProfileLabel(state.project.workspaceIntelligence);
   bar.innerHTML = `
     <span class="project-icon">${icon}</span>
     <div class="project-text">
       <div class="project-name">${escapeHtml(state.project.name)}${branch}</div>
-      <div class="project-subtitle" title="${escapeAttr(subtitle)}">${escapeHtml(subtitle)}</div>
+      <div class="project-subtitle" title="${escapeAttr(subtitle)}">${escapeHtml(subtitle)}${profile ? ` · ${escapeHtml(profile)}` : ""}</div>
     </div>
   `;
+}
+
+function workspaceProfileLabel(value: WorkspaceIntelligence | undefined): string {
+  if (!value) return "";
+  const manager = typeof value.packageManager === "string" ? value.packageManager : "";
+  const languages = Array.isArray(value.languages) ? value.languages.slice(0, 3).join(", ") : "";
+  const commands = value.commands && typeof value.commands === "object"
+    ? Object.keys(value.commands as Record<string, unknown>).filter((key) => Boolean((value.commands as Record<string, unknown>)[key])).join("/")
+    : "";
+  return [manager, languages, commands].filter(Boolean).join(" · ");
 }
 
 // ---------------------------------------------------------------------------
@@ -951,6 +968,26 @@ function renderComposerAttachments(): void {
       if (!state.activeSession) return;
       send({ type: "removeAttachment", sessionId: state.activeSession.id, documentId: button.dataset.id ?? "" });
     });
+  }
+}
+
+function renderContextBlocks(): void {
+  const container = root.querySelector<HTMLDivElement>("#composer-context");
+  if (!container) return;
+  if (state.contextBlocks.length === 0) {
+    container.hidden = true;
+    container.innerHTML = "";
+    return;
+  }
+  container.hidden = false;
+  container.innerHTML = state.contextBlocks.map((b) => `
+    <span class="composer-attachment" data-id="${escapeAttr(b.id)}">
+      <span class="composer-attachment-name" title="${escapeAttr(b.label)}">@${escapeHtml(b.kind)}: ${escapeHtml(b.label)}</span>
+      <button type="button" class="composer-context-remove" data-id="${escapeAttr(b.id)}" title="Remove" aria-label="Remove">✕</button>
+    </span>
+  `).join("");
+  for (const button of container.querySelectorAll<HTMLButtonElement>(".composer-context-remove")) {
+    button.addEventListener("click", () => send({ type: "removeContextBlock", id: button.dataset.id ?? "" }));
   }
 }
 
@@ -1665,6 +1702,10 @@ function handleMessage(msg: ChatHostToWebview): void {
     case "openSidebar":
       state.sidebarOpen = true;
       applySidebar();
+      break;
+    case "contextBlocks":
+      state.contextBlocks = msg.blocks;
+      renderContextBlocks();
       break;
     case "sessions":
       state.sessions = msg.sessions;
