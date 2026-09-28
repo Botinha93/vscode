@@ -1,5 +1,8 @@
 import type { LiberideSettings } from "../settings";
 import type {
+  ApprovalCardView,
+  FallbackProposalView,
+  GraphProgressView,
   BackendCatalog,
   BackendStatus,
   ChatHostToWebview,
@@ -485,6 +488,8 @@ function renderMessage(message: ChatMessage): HTMLElement {
   const { visibleContent, readyFeatureName, hasOpenPipeline } = extractPipelineMarkers(message);
 
   turn.innerHTML = `
+    ${renderStatusBadges(message)}
+    ${renderThinking(message)}
     <div class="assistant-meta">
       ${timelineHtml}
       ${editCardHtml}
@@ -492,6 +497,7 @@ function renderMessage(message: ChatMessage): HTMLElement {
     </div>
     <div class="turn-content"></div>
     ${message.status === "error" && message.error ? `<div class="turn-error">${escapeHtml(message.error)}</div>` : ""}
+    ${renderTurnExtras(message)}
     ${message.status === "complete" ? `<div class="assistant-actions">
       <button class="icon-btn small" title="Copy" aria-label="Copy" data-act="copy">\u2398</button>
       <button class="icon-btn small" title="Helpful" aria-label="Helpful" data-act="up">\u{1F44D}</button>
@@ -514,10 +520,164 @@ function renderMessage(message: ChatMessage): HTMLElement {
     mountPipelineReadyCard(turn, message, readyFeatureName);
   }
   bindAssistantMeta(turn, message);
+  bindTurnExtras(turn, message);
   turn.querySelector<HTMLButtonElement>('[data-act="copy"]')?.addEventListener("click", async () => {
     try { await navigator.clipboard.writeText(message.content); } catch { /* clipboard blocked */ }
   });
   return turn;
+}
+
+// ---------------------------------------------------------------------------
+// Turn status, warnings, thinking, approval / graph / fallback cards
+// ---------------------------------------------------------------------------
+
+/** messageId -> whether the reasoning block is expanded */
+const expandedThinking = new Set<string>();
+
+const TURN_STATUS_LABEL: Record<NonNullable<ChatMessage["turnStatus"]>, string> = {
+  failed: "Failed",
+  cancelled: "Cancelled",
+  awaiting_approval: "Awaiting approval",
+  resolved: "Approval resolved",
+};
+
+function renderStatusBadges(message: ChatMessage): string {
+  const badges: string[] = [];
+  if (message.turnStatus) {
+    badges.push(`<span class="turn-badge badge-${message.turnStatus}">${escapeHtml(TURN_STATUS_LABEL[message.turnStatus])}</span>`);
+  }
+  const graph = message.graph;
+  if (graph && isTerminalGraph(graph.status) && !message.turnStatus) {
+    badges.push(`<span class="turn-badge badge-graph-${escapeAttr(graph.status)}">Graph ${escapeHtml(graph.status)}</span>`);
+  }
+  return badges.length ? `<div class="turn-badges">${badges.join("")}</div>` : "";
+}
+
+function renderThinking(message: ChatMessage): string {
+  if (!message.thinking) return "";
+  const open = expandedThinking.has(message.id) || (message.status === "streaming" && !message.content);
+  return `<details class="thinking-block"${open ? " open" : ""}>
+    <summary>${message.status === "streaming" && !message.content ? "Thinking\u2026" : "Reasoning"}</summary>
+    <div class="thinking-body">${escapeHtml(message.thinking)}</div>
+  </details>`;
+}
+
+function isTerminalGraph(status: string | undefined): boolean {
+  return status === "completed" || status === "failed" || status === "cancelled";
+}
+
+function renderTurnExtras(message: ChatMessage): string {
+  const parts: string[] = [];
+  if (message.warnings?.length) {
+    parts.push(`<div class="turn-warnings">${message.warnings.map((w) => `<div class="turn-warning">\u26A0 ${escapeHtml(w)}</div>`).join("")}</div>`);
+  }
+  if (message.approval) parts.push(renderApprovalCard(message.approval));
+  if (message.graph) parts.push(renderGraphCard(message.graph));
+  if (message.fallback) parts.push(renderFallbackCard(message.fallback));
+  return parts.join("");
+}
+
+function renderApprovalCard(card: ApprovalCardView): string {
+  const pending = card.status === "pending";
+  const statusText = card.busy
+    ? (pending ? "Submitting\u2026" : "Continuing\u2026")
+    : pending ? "Waiting for your decision" : card.status === "approved" ? "Approved" : "Rejected";
+  return `<div class="approval-card status-${escapeAttr(card.status)}" data-approval-id="${escapeAttr(card.id)}">
+    <div class="approval-head">
+      <span class="approval-title">${escapeHtml(card.action)}</span>
+      ${card.risk ? `<span class="approval-risk risk-${escapeAttr(card.risk)}">${escapeHtml(card.risk)} risk</span>` : ""}
+    </div>
+    ${card.reason ? `<div class="approval-reason">${escapeHtml(card.reason)}</div>` : ""}
+    ${card.details ? `<pre class="approval-details">${escapeHtml(card.details)}</pre>` : ""}
+    ${card.error ? `<div class="turn-error">${escapeHtml(card.error)}</div>` : ""}
+    <div class="approval-actions">
+      <span class="approval-status">${card.busy ? `<span class="turn-indicator"></span>` : ""}${escapeHtml(statusText)}</span>
+      ${pending ? `
+        <button class="btn-secondary" type="button" data-approval="rejected"${card.busy ? " disabled" : ""}>Reject</button>
+        <button class="btn-primary" type="button" data-approval="approved"${card.busy ? " disabled" : ""}>Approve</button>` : ""}
+    </div>
+  </div>`;
+}
+
+function stepIcon(status: string): string {
+  switch (status) {
+    case "running": return `<span class="turn-indicator"></span>`;
+    case "completed": return "\u2713";
+    case "failed": return "\u2717";
+    case "cancelled": return "\u2298";
+    case "skipped": return "\u21B7";
+    case "waiting_approval": return "\u23F8";
+    case "blocked": return "\u29D7";
+    default: return "\u25CB";
+  }
+}
+
+function renderGraphCard(graph: GraphProgressView): string {
+  const terminal = isTerminalGraph(graph.status);
+  // A finished graph from history with no live steps needs no card: the badge covers it.
+  if (terminal && graph.steps.length === 0 && !graph.error) return "";
+  const done = graph.steps.filter((s) => s.status === "completed" || s.status === "skipped").length;
+  const rows = graph.steps
+    .map((step) => `<div class="graph-step status-${escapeAttr(step.status)}"><span class="timeline-icon">${stepIcon(step.status)}</span><span class="graph-step-title">${escapeHtml(step.title || step.nodeId)}</span><span class="graph-step-status">${escapeHtml(step.status.replace(/_/g, " "))}</span></div>`)
+    .join("");
+  return `<div class="graph-card status-${escapeAttr(graph.status)}" data-graph-id="${escapeAttr(graph.graphId)}">
+    <div class="graph-head">
+      ${terminal ? "" : `<span class="turn-indicator"></span>`}
+      <span class="graph-title">${terminal ? `Graph ${escapeHtml(graph.status)}` : `Running graph \u2014 ${escapeHtml(graph.status.replace(/_/g, " "))}`}</span>
+      ${graph.steps.length ? `<span class="graph-count">${done}/${graph.steps.length}</span>` : ""}
+      ${terminal ? "" : `<button class="btn-secondary small" type="button" data-graph-cancel${graph.cancelling ? " disabled" : ""}>${graph.cancelling ? "Cancelling\u2026" : "Cancel"}</button>`}
+    </div>
+    ${rows ? `<div class="graph-steps">${rows}</div>` : ""}
+    ${graph.error ? `<div class="${graph.reconnecting ? "graph-warning" : "turn-error"}">${escapeHtml(graph.error)}</div>` : ""}
+  </div>`;
+}
+
+function renderFallbackCard(fallback: FallbackProposalView): string {
+  const buttons = fallback.alternatives
+    .map((alt, i) => `<button class="btn-secondary" type="button" data-fallback-index="${i}">${escapeHtml(describeModel(alt.provider as ConfiguredProvider, alt.model))}</button>`)
+    .join("");
+  return `<div class="fallback-card">
+    <div class="approval-title">The selected model can't handle this request</div>
+    ${fallback.reason ? `<div class="approval-reason">${escapeHtml(fallback.reason)}</div>` : ""}
+    ${buttons
+      ? `<div class="approval-reason">Retry with a compatible model:</div><div class="fallback-options">${buttons}</div>`
+      : `<div class="approval-reason">No compatible model is configured. Add one under Settings \u2192 Providers.</div>`}
+  </div>`;
+}
+
+function bindTurnExtras(turn: HTMLElement, message: ChatMessage): void {
+  const sessionId = state.activeSession?.id;
+  if (!sessionId) return;
+  turn.querySelector<HTMLDetailsElement>(".thinking-block")?.addEventListener("toggle", (event) => {
+    const el = event.currentTarget as HTMLDetailsElement;
+    if (el.open) expandedThinking.add(message.id);
+    else expandedThinking.delete(message.id);
+  });
+  turn.querySelectorAll<HTMLButtonElement>("[data-approval]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const approval = message.approval;
+      if (!approval || approval.busy) return;
+      const decision = btn.dataset.approval === "approved" ? "approved" : "rejected";
+      approval.busy = true;
+      rerenderMessageInDom(message.id);
+      send({ type: "resolveApproval", sessionId, messageId: message.id, approvalId: approval.id, decision });
+    });
+  });
+  turn.querySelector<HTMLButtonElement>("[data-graph-cancel]")?.addEventListener("click", () => {
+    const graph = message.graph;
+    if (!graph || graph.cancelling) return;
+    graph.cancelling = true;
+    rerenderMessageInDom(message.id);
+    send({ type: "cancelGraph", sessionId, messageId: message.id, graphId: graph.graphId });
+  });
+  turn.querySelectorAll<HTMLButtonElement>("[data-fallback-index]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const fallback = message.fallback;
+      const alt = fallback?.alternatives[Number(btn.dataset.fallbackIndex)];
+      if (!fallback || !alt) return;
+      send({ type: "retryWithModel", sessionId, messageId: message.id, provider: alt.provider, model: alt.model, content: fallback.prompt });
+    });
+  });
 }
 
 const OPEN_PIPELINE_PLACEHOLDER = "OPENPIPELINEBUTTONMOUNTx7n3v8q2t";
@@ -1720,6 +1880,12 @@ function handleMessage(msg: ChatHostToWebview): void {
         }
         state.expandedTimelines.delete(msg.messageId);
         if (m) rerenderMessageInDom(msg.messageId);
+        if (m && msg.serverMessageId && msg.serverMessageId !== msg.messageId) {
+          // Adopt the persisted id so later patches (graph, approval) find this bubble.
+          const turn = root.querySelector<HTMLElement>(`.turn[data-message-id="${cssAttr(msg.messageId)}"]`);
+          m.id = msg.serverMessageId;
+          if (turn) turn.dataset.messageId = m.id;
+        }
         state.streaming = false;
         renderComposer();
         renderActivity();
@@ -1738,6 +1904,31 @@ function handleMessage(msg: ChatHostToWebview): void {
         state.streaming = false;
         renderComposer();
         renderActivity();
+      }
+      break;
+    case "messagePatch":
+      if (state.activeSession && state.activeSession.id === msg.sessionId) {
+        const m = state.activeSession.messages.find((x) => x.id === msg.messageId);
+        if (m) {
+          Object.assign(m, msg.patch);
+          rerenderMessageInDom(msg.messageId);
+          if (msg.patch.content !== undefined) {
+            const transcript = root.querySelector<HTMLDivElement>("#transcript");
+            if (transcript) transcript.scrollTop = transcript.scrollHeight;
+          }
+        }
+      }
+      break;
+    case "restoreDraft":
+      if (state.activeSession && state.activeSession.id === msg.sessionId) {
+        const composer = root.querySelector<HTMLTextAreaElement>("#composer");
+        if (composer && !composer.value.trim()) {
+          composer.value = msg.content;
+          state.draft = msg.content;
+          autosize(composer);
+          renderComposerHints();
+          composer.focus();
+        }
       }
       break;
     case "log":

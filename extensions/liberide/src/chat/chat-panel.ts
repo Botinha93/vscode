@@ -11,11 +11,14 @@ import {
   listConversations,
   listDocuments,
   listFolders,
+  onAuthChanged,
   patchConversation,
   probeBackend,
   subscribeConversationListSync,
   uploadDocument,
+  type ConversationListEvent,
 } from "../api";
+import { cancelExecutionGraph, isTerminalGraphStatus, subscribeExecutionGraphEvents } from "../dispatch/client";
 import { onSettingsChange, readSettings, writeSetting, type LiberideSettings } from "../settings";
 import {
   conversationHasProjectTag,
@@ -33,7 +36,16 @@ import {
 } from "./commands";
 import { defaultEnabledModel, findConfiguredModel, supportsTextGeneration, toWireProvider } from "./models";
 import { listCopilotLmModels, streamCopilotChat } from "./copilot-lm";
-import { streamChat } from "./stream-client";
+import {
+  BUSY_MESSAGE,
+  ChatStreamError,
+  isAgentRunResumed,
+  listConversationApprovals,
+  resolveApproval,
+  streamApprovalResume,
+  streamChat,
+  type ChatStreamHandlers,
+} from "./stream-client";
 import type {
   AppConfig,
   ChatRequest,
@@ -44,8 +56,14 @@ import type {
   Provider,
   SharingFolder,
   AgentDefinition,
+  AgentApprovalRequest,
+  ChatResponse,
+  FallbackRequiredResolution,
 } from "./types";
 import type {
+  ApprovalCardView,
+  FallbackProposalView,
+  GraphProgressView,
   BackendCatalog,
   BackendStatus,
   ChatHostToWebview,
@@ -86,6 +104,30 @@ interface ActiveStream {
   startedAt: number;
   tools: Map<string, ToolTimelineEntry>;
   edits: Map<string, EditedFileSummary>;
+}
+
+interface GraphWatcher {
+  conversationId: string;
+  messageId: string;
+  dispose: () => void;
+}
+
+/** Optimistic messages added for a turn, removed again if the server refuses it (busy). */
+interface OptimisticTurn {
+  userMessage?: ConversationMessage;
+  content?: string;
+}
+
+function approvalCardFrom(request: AgentApprovalRequest): ApprovalCardView {
+  return {
+    id: request.id,
+    action: request.action || "Approval required",
+    reason: request.reason,
+    details: request.details,
+    risk: request.risk,
+    kind: request.kind,
+    status: request.status,
+  };
 }
 
 function toolActivityKind(name: string): ToolTimelineEntry["activityKind"] {
@@ -173,6 +215,25 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
   /** conversationId -> set of message ids whose pipeline-ready card has been consumed. */
   private consumedPipelineCards = new Map<string, Set<string>>();
 
+  // Per-message UI state layered over the cached server messages (keyed by message id).
+  private approvalCards = new Map<string, ApprovalCardView>();
+  private graphViews = new Map<string, GraphProgressView>();
+  private thinkingByMessage = new Map<string, string>();
+  private fallbacks = new Map<string, FallbackProposalView>();
+  private turnWarnings = new Map<string, string[]>();
+  /** Local-only turn outcome until the server copy replaces the optimistic message. */
+  private localTurnStatus = new Map<string, ConversationMessage["status"]>();
+  /** graphId -> live subscription. */
+  private graphWatchers = new Map<string, GraphWatcher>();
+  /** Graphs already seen reaching a terminal state (never re-watched). */
+  private finishedGraphs = new Set<string>();
+  private hydratedApprovalConversations = new Set<string>();
+  /** Conversations whose refresh was deferred because a turn was streaming. */
+  private pendingRefresh = new Set<string>();
+  private patchTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** conversationId -> placeholder shown while a resumed sub-agent works; kept across refreshes until its result lands. */
+  private agentResumeNotes = new Map<string, ConversationMessage>();
+
   /** Locally-staged session for "new chat" before the first message creates it on the backend. */
   private draftSession: ChatSession | null = null;
   private activeSessionId: string | null = null;
@@ -192,9 +253,27 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
         void this.onWorkspaceFoldersChanged();
       }),
     );
-    this.conversationSyncDispose = subscribeConversationListSync(() => {
-      void this.refreshConversations();
+    this.conversationSyncDispose = subscribeConversationListSync((event) => {
+      void this.onConversationListEvent(event);
     });
+    const offAuth = onAuthChanged(() => {
+      void this.refreshCatalog().then(() => this.refreshConversations());
+    });
+    this.disposables.push({ dispose: offAuth });
+  }
+
+  private async onConversationListEvent(event: ConversationListEvent): Promise<void> {
+    if (event.type === "message_updated" && event.conversationId) {
+      // A resumed sub-agent posted its result: the placeholder has served its purpose.
+      this.agentResumeNotes.delete(event.conversationId);
+      // A graph (or another client) changed a message: reload just that conversation.
+      if (this.messagesCache.has(event.conversationId)) await this.refreshSingleConversation(event.conversationId);
+      return;
+    }
+    await this.refreshConversations();
+    if (event.type === "resync" && this.activeSessionId && this.messagesCache.has(this.activeSessionId)) {
+      await this.refreshSingleConversation(this.activeSessionId);
+    }
   }
 
   private async onWorkspaceFoldersChanged(): Promise<void> {
@@ -254,6 +333,10 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     for (const d of this.disposables) d.dispose();
     for (const s of this.streams.values()) s.abort.abort();
     this.streams.clear();
+    for (const watcher of this.graphWatchers.values()) watcher.dispose();
+    this.graphWatchers.clear();
+    for (const timer of this.patchTimers.values()) clearTimeout(timer);
+    this.patchTimers.clear();
   }
 
   // ---------------------------------------------------------------------------
@@ -324,14 +407,18 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
         case "removeAttachment":
           await this.removeAttachment(message.sessionId, message.documentId);
           break;
-        case "cancelMessage": {
-          const stream = this.streams.get(message.sessionId);
-          if (stream) {
-            stream.abort.abort();
-            this.streams.delete(message.sessionId);
-          }
+        case "cancelMessage":
+          await this.cancelTurn(message.sessionId);
           break;
-        }
+        case "resolveApproval":
+          await this.resolveApprovalFromPanel(message.sessionId, message.messageId, message.approvalId, message.decision, message.response);
+          break;
+        case "cancelGraph":
+          await this.cancelGraph(message.graphId, message.messageId);
+          break;
+        case "retryWithModel":
+          await this.retryWithModel(message.sessionId, message.messageId, message.provider, message.model, message.content);
+          break;
         case "setOverrides":
           await this.updateOverrides(message.sessionId, message.overrides);
           break;
@@ -555,9 +642,48 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     try {
       const messages = await listConversationMessages(conversationId);
       this.messagesCache.set(conversationId, messages);
+      this.afterMessagesLoaded(conversationId);
     } catch (err) {
       this.output.appendLine(`[chat.messages] ${err instanceof Error ? err.message : String(err)}`);
       this.messagesCache.set(conversationId, []);
+    }
+  }
+
+  /** Start graph watchers and fetch approval details for freshly loaded messages. */
+  private afterMessagesLoaded(conversationId: string): void {
+    const messages = this.messagesCache.get(conversationId) ?? [];
+    for (const m of messages) {
+      if (m.role !== "assistant" || !m.executionGraphId) continue;
+      if (m.graphStatus && isTerminalGraphStatus(m.graphStatus)) {
+        this.finishedGraphs.add(m.executionGraphId);
+        const view = this.graphViews.get(m.id);
+        if (view) view.status = m.graphStatus;
+        continue;
+      }
+      this.watchGraph(conversationId, m.id, m.executionGraphId);
+    }
+    const needsApprovals = messages.some((m) => m.approvalId && m.status === "awaiting_approval" && !this.approvalCards.has(m.id));
+    if (needsApprovals && !this.hydratedApprovalConversations.has(conversationId)) {
+      this.hydratedApprovalConversations.add(conversationId);
+      void this.hydrateApprovals(conversationId);
+    }
+  }
+
+  private async hydrateApprovals(conversationId: string): Promise<void> {
+    try {
+      const approvals = await listConversationApprovals(conversationId);
+      const byId = new Map(approvals.map((a) => [a.id, a] as const));
+      for (const m of this.messagesCache.get(conversationId) ?? []) {
+        const request = m.approvalId ? byId.get(m.approvalId) : undefined;
+        if (!request) continue;
+        const existing = this.approvalCards.get(m.id);
+        this.approvalCards.set(m.id, { ...approvalCardFrom(request), busy: existing?.busy, error: existing?.error });
+      }
+      if (this.activeSessionId === conversationId) this.broadcastActiveSession();
+    } catch (err) {
+      // Details are optional; the card still works with just the approval id.
+      this.hydratedApprovalConversations.delete(conversationId);
+      this.output.appendLine(`[chat.approvals] ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -626,13 +752,21 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     const messages: ChatMessage[] = cached
       .filter((m) => m.role === "user" || m.role === "assistant")
       .map((m) => {
+        const turnStatus = m.status ?? this.localTurnStatus.get(m.id);
+        const streaming = this.streams.get(conv.id);
         const base: ChatMessage = {
           id: m.id,
           role: m.role as "user" | "assistant",
           content: m.content,
           createdAt: new Date(m.createdAt).getTime() || Date.now(),
-          status: "complete",
+          status: streaming?.messageId === m.id ? "streaming" : turnStatus === "failed" ? "error" : "complete",
         };
+        if (streaming?.messageId === m.id) {
+          base.startedAt = streaming.startedAt;
+          base.tools = [...streaming.tools.values()];
+          base.editedFiles = [...streaming.edits.values()];
+        }
+        if (m.role === "assistant") this.decorateAssistantMessage(base, m, turnStatus);
         if (consumed?.has(m.id)) base.pipelineCardConsumed = true;
         return base;
       });
@@ -648,6 +782,37 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       updatedAt: new Date(conv.updatedAt).getTime() || Date.now(),
       kind,
     };
+  }
+
+  private decorateAssistantMessage(
+    view: ChatMessage,
+    m: ConversationMessage,
+    turnStatus: ConversationMessage["status"],
+  ): void {
+    if (turnStatus) view.turnStatus = turnStatus;
+    if (m.error) view.error = m.error;
+    const warnings = [...new Set([...(m.warnings ?? []), ...(this.turnWarnings.get(m.id) ?? [])])];
+    if (warnings.length) view.warnings = warnings;
+    const thinking = this.thinkingByMessage.get(m.id);
+    if (thinking) view.thinking = thinking;
+    const fallback = this.fallbacks.get(m.id);
+    if (fallback) view.fallback = fallback;
+
+    let approval = this.approvalCards.get(m.id);
+    if (!approval && m.approvalId && turnStatus === "awaiting_approval") {
+      approval = { id: m.approvalId, action: "Approval required", status: "pending" };
+    }
+    if (approval && turnStatus === "resolved" && approval.status === "pending" && !approval.busy) {
+      approval = { ...approval, status: m.resolution === "rejected" ? "rejected" : "approved" };
+    }
+    if (approval) view.approval = approval;
+
+    const graph = this.graphViews.get(m.id);
+    if (graph) {
+      view.graph = m.graphStatus && isTerminalGraphStatus(m.graphStatus) ? { ...graph, status: m.graphStatus, reconnecting: false } : graph;
+    } else if (m.executionGraphId) {
+      view.graph = { graphId: m.executionGraphId, status: m.graphStatus ?? "running", steps: [] };
+    }
   }
 
   private markPipelineCardConsumed(conversationId: string, messageId: string): void {
@@ -903,11 +1068,16 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     return buildIdeContextPayload(conversationId);
   }
 
-  private async sendChat(sessionId: string, content: string): Promise<void> {
+  private async sendChat(
+    sessionId: string,
+    content: string,
+    forced?: { provider: Provider; model: string },
+  ): Promise<void> {
     let session = this.findSession(sessionId);
     if (!session) return;
     if (this.streams.has(sessionId)) {
-      this.broadcast({ type: "log", message: "A response is already streaming for this chat." });
+      this.broadcast({ type: "restoreDraft", sessionId, content });
+      this.broadcast({ type: "log", message: BUSY_MESSAGE, severity: "warning" });
       return;
     }
     if (this.backendStatus !== "ok") {
@@ -918,7 +1088,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       this.broadcast({ type: "log", message: hint });
       return;
     }
-    const resolved = this.resolveProviderModel(session.overrides);
+    const resolved = forced ?? this.resolveProviderModel(session.overrides);
     if (!resolved) {
       this.broadcast({ type: "log", message: "No configured model. Add one in the LiberIDE app first." });
       return;
@@ -984,7 +1154,8 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       conversationId,
       provider: resolved.provider,
       model: resolved.model,
-      modelSelection: settings.modelSelection,
+      // An explicit retry with a chosen alternative is a pin, not a routing hint.
+      modelSelection: forced ? "manual" : settings.modelSelection,
       chatMode,
       content: rest || content,
       systemPrompt,
@@ -999,42 +1170,10 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       ideContext: this.buildIdeContext(conversationId),
     };
 
-    const abort = new AbortController();
-    const streamStartedAt = Date.now();
-    const streamState: ActiveStream = {
-      abort,
-      messageId: assistantMessage.id,
-      startedAt: streamStartedAt,
-      tools: new Map(),
-      edits: new Map(),
-    };
-    this.streams.set(conversationId, streamState);
-    this.broadcast({
-      type: "messageStart",
-      sessionId: conversationId,
-      messageId: assistantMessage.id,
-      startedAt: streamStartedAt,
-    });
-    let buffer = "";
+    const { abort, streamState } = this.beginTurn(conversationId, assistantMessage);
+    const turn = this.createTurnHandlers(conversationId, assistantMessage, streamState, content);
     try {
-      const handlers = {
-        onToken: (text: string) => {
-          buffer += text;
-          assistantMessage.content = buffer;
-          this.broadcast({ type: "messageAppend", sessionId: conversationId, messageId: assistantMessage.id, chunk: text });
-        },
-        onToolEvent: (event: ToolCallEvent) => {
-          const update = applyToolEvent(streamState, event);
-          if (!update) return;
-          this.broadcast({
-            type: "toolUpdate",
-            sessionId: conversationId,
-            messageId: assistantMessage.id,
-            entry: update.entry,
-            editedFiles: update.editedFiles,
-          });
-        },
-      };
+      const handlers = turn.handlers;
 
       const useLocalCopilot =
         body.provider === "copilot" &&
@@ -1046,7 +1185,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
             .map((id) => this.attachmentBytes.get(id))
             .filter((entry): entry is { data: Uint8Array; mimeType: string; name: string } => !!entry)
         : [];
-      const response = useLocalCopilot
+      const response: ChatResponse = useLocalCopilot
         ? await streamCopilotChat({
             modelId: body.model,
             history: (messages ?? [])
@@ -1055,8 +1194,8 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
             prompt: body.content,
             toolsEnabled: body.toolsEnabled,
             attachments: copilotAttachments,
-            onToken: handlers.onToken,
-            onToolEvent: handlers.onToolEvent,
+            onToken: handlers.onToken!,
+            onToolEvent: handlers.onToolEvent!,
             signal: abort.signal,
           }).then((r) => {
             if (r.skippedAttachments.length) {
@@ -1067,25 +1206,181 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
           })
         : await streamChat(body, handlers, abort.signal);
 
-      const finalConversation = "conversation" in response ? response.conversation as Conversation | undefined : undefined;
-      if (finalConversation) this.conversations.set(finalConversation.id, finalConversation);
-      if (response.assistantMessage?.id) assistantMessage.id = response.assistantMessage.id;
-      if (response.assistantMessage?.content) {
-        assistantMessage.content = response.assistantMessage.content;
-        buffer = assistantMessage.content;
-      }
-      if (command === "tasks" && buffer) {
+      const localId = assistantMessage.id;
+      this.applyTurnResponse(conversationId, assistantMessage, response);
+      if (command === "tasks" && assistantMessage.content) {
         try {
-          const written = await this.writeGeneratedTasks(buffer);
+          const written = await this.writeGeneratedTasks(assistantMessage.content);
           if (written > 0) {
             const note = `\n\n_Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active feature._`;
             assistantMessage.content += note;
-            this.broadcast({ type: "messageAppend", sessionId: conversationId, messageId: assistantMessage.id, chunk: note });
+            this.broadcast({ type: "messageAppend", sessionId: conversationId, messageId: localId, chunk: note });
           }
         } catch (err) {
           this.output.appendLine(`[chat.tasks] ${err instanceof Error ? err.message : String(err)}`);
         }
       }
+      this.completeTurn(conversationId, localId, assistantMessage.id);
+    } catch (err) {
+      this.failTurn(conversationId, assistantMessage, err, abort.signal.aborted, turn.buffer(), { userMessage, content });
+    } finally {
+      this.endTurn(conversationId, streamState);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Turn lifecycle shared by chat, pipeline generation and approval resume
+  // ---------------------------------------------------------------------------
+
+  private beginTurn(conversationId: string, assistantMessage: ConversationMessage): { abort: AbortController; streamState: ActiveStream } {
+    const abort = new AbortController();
+    const streamState: ActiveStream = {
+      abort,
+      messageId: assistantMessage.id,
+      startedAt: Date.now(),
+      tools: new Map(),
+      edits: new Map(),
+    };
+    this.streams.set(conversationId, streamState);
+    this.broadcast({
+      type: "messageStart",
+      sessionId: conversationId,
+      messageId: assistantMessage.id,
+      startedAt: streamState.startedAt,
+    });
+    return { abort, streamState };
+  }
+
+  private endTurn(conversationId: string, streamState: ActiveStream): void {
+    if (this.streams.get(conversationId) === streamState) this.streams.delete(conversationId);
+    if (this.pendingRefresh.delete(conversationId)) void this.refreshSingleConversation(conversationId);
+  }
+
+  /** Stream handlers that mirror every server event into the cached message and the webview. */
+  private createTurnHandlers(
+    conversationId: string,
+    assistantMessage: ConversationMessage,
+    streamState: ActiveStream,
+    prompt: string,
+  ): { handlers: ChatStreamHandlers; buffer: () => string } {
+    let buffer = "";
+    const handlers: ChatStreamHandlers = {
+      onToken: (text: string) => {
+        buffer += text;
+        assistantMessage.content = buffer;
+        this.broadcast({ type: "messageAppend", sessionId: conversationId, messageId: assistantMessage.id, chunk: text });
+      },
+      onMarkdown: (markdown: string) => {
+        // The final markdown supersedes the streamed tokens.
+        if (!markdown || markdown === buffer) return;
+        buffer = markdown;
+        assistantMessage.content = markdown;
+        this.postPatch(conversationId, assistantMessage.id, { content: markdown });
+      },
+      onThinking: (delta: string) => {
+        const next = `${this.thinkingByMessage.get(assistantMessage.id) ?? ""}${delta}`;
+        this.thinkingByMessage.set(assistantMessage.id, next);
+        this.postPatch(conversationId, assistantMessage.id, { thinking: next }, true);
+      },
+      onToolEvent: (event: ToolCallEvent) => {
+        const update = applyToolEvent(streamState, event);
+        if (!update) return;
+        this.broadcast({
+          type: "toolUpdate",
+          sessionId: conversationId,
+          messageId: assistantMessage.id,
+          entry: update.entry,
+          editedFiles: update.editedFiles,
+        });
+      },
+      onFallbackRequired: (resolution: FallbackRequiredResolution) => {
+        const proposal: FallbackProposalView = { prompt, reason: resolution.reason, alternatives: resolution.alternatives ?? [] };
+        this.fallbacks.set(assistantMessage.id, proposal);
+        this.postPatch(conversationId, assistantMessage.id, { fallback: proposal });
+      },
+    };
+    return { handlers, buffer: () => buffer };
+  }
+
+  /** Fold the `done` payload into the cached message: id, status, approvals, graph, warnings. */
+  private applyTurnResponse(conversationId: string, assistantMessage: ConversationMessage, response: ChatResponse): void {
+    const finalConversation = response.conversation as Conversation | undefined;
+    if (finalConversation?.id) this.conversations.set(finalConversation.id, finalConversation);
+    const localId = assistantMessage.id;
+    const server = response.assistantMessage;
+    if (server) {
+      if (server.content) assistantMessage.content = server.content;
+      for (const key of ["status", "approvalId", "pausedAgentRunId", "executionGraphId", "graphStatus", "error", "warnings", "resolution"] as const) {
+        if (server[key] !== undefined) (assistantMessage as unknown as Record<string, unknown>)[key] = server[key];
+      }
+      if (server.id && server.id !== localId) {
+        assistantMessage.id = server.id;
+        this.renameMessageState(localId, server.id);
+      }
+    }
+    const messageId = assistantMessage.id;
+
+    const warnings = response.context?.warnings?.filter(Boolean) ?? [];
+    if (warnings.length) this.turnWarnings.set(messageId, warnings);
+
+    const pending = (response.approvals ?? []).filter((a) => a.status === "pending");
+    const approval = (assistantMessage.approvalId && response.approvals?.find((a) => a.id === assistantMessage.approvalId)) || pending[0];
+    if (approval) {
+      this.approvalCards.set(messageId, approvalCardFrom(approval));
+      if (!assistantMessage.approvalId) assistantMessage.approvalId = approval.id;
+      if (!assistantMessage.status && approval.status === "pending") assistantMessage.status = "awaiting_approval";
+    }
+
+    const graphId = response.executionGraphId ?? assistantMessage.executionGraphId;
+    if (graphId) {
+      assistantMessage.executionGraphId = graphId;
+      if (!isTerminalGraphStatus(assistantMessage.graphStatus)) this.watchGraph(conversationId, messageId, graphId);
+    }
+  }
+
+  private completeTurn(conversationId: string, localId: string, serverId: string): void {
+    this.broadcast({
+      type: "messageComplete",
+      sessionId: conversationId,
+      messageId: localId,
+      serverMessageId: serverId !== localId ? serverId : undefined,
+      conversationId,
+      completedAt: Date.now(),
+    });
+    // Re-render with approval / graph / warnings merged in, then reconcile with the server.
+    if (this.activeSessionId === conversationId) this.broadcastActiveSession();
+    this.pendingRefresh.add(conversationId);
+  }
+
+  private failTurn(
+    conversationId: string,
+    assistantMessage: ConversationMessage,
+    err: unknown,
+    aborted: boolean,
+    buffer: string,
+    optimistic: OptimisticTurn = {},
+  ): void {
+    const streamError = err instanceof ChatStreamError ? err : undefined;
+    const msg = err instanceof Error ? err.message : String(err);
+    this.output.appendLine(`[chat] ${streamError ? `${streamError.kind}: ` : ""}${msg}`);
+
+    if (streamError?.kind === "busy") {
+      // Nothing was accepted: drop the optimistic turn and hand the text back.
+      const messages = this.messagesCache.get(conversationId);
+      if (messages) {
+        this.messagesCache.set(conversationId, messages.filter((m) => m !== assistantMessage && m !== optimistic.userMessage));
+      }
+      if (this.activeSessionId === conversationId) this.broadcastActiveSession();
+      if (optimistic.content) this.broadcast({ type: "restoreDraft", sessionId: conversationId, content: optimistic.content });
+      this.broadcast({ type: "log", message: BUSY_MESSAGE, severity: "warning" });
+      return;
+    }
+
+    if (aborted || streamError?.kind === "cancelled") {
+      const note = `${buffer ? "\n\n" : ""}_Cancelled._`;
+      assistantMessage.content = `${buffer}${note}`;
+      this.localTurnStatus.set(assistantMessage.id, "cancelled");
+      this.broadcast({ type: "messageAppend", sessionId: conversationId, messageId: assistantMessage.id, chunk: note });
       this.broadcast({
         type: "messageComplete",
         sessionId: conversationId,
@@ -1093,33 +1388,258 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
         conversationId,
         completedAt: Date.now(),
       });
-      void this.refreshSingleConversation(conversationId);
+      this.postPatch(conversationId, assistantMessage.id, { turnStatus: "cancelled" });
+      return;
+    }
+
+    if (streamError?.kind === "fallback_required" && streamError.details.fallback && !this.fallbacks.has(assistantMessage.id)) {
+      const resolution = streamError.details.fallback;
+      this.fallbacks.set(assistantMessage.id, {
+        prompt: optimistic.content ?? "",
+        reason: resolution.reason,
+        alternatives: resolution.alternatives ?? [],
+      });
+    }
+    assistantMessage.status = "failed";
+    assistantMessage.error = msg;
+    this.broadcast({
+      type: "messageError",
+      sessionId: conversationId,
+      messageId: assistantMessage.id,
+      error: msg,
+      completedAt: Date.now(),
+    });
+    const fallback = this.fallbacks.get(assistantMessage.id);
+    this.postPatch(conversationId, assistantMessage.id, { turnStatus: "failed", ...(fallback ? { fallback } : {}) });
+    if (streamError?.kind === "unauthorized") void this.refreshCatalog();
+  }
+
+  /** Move per-message UI state when the optimistic id is replaced by the server id. */
+  private renameMessageState(from: string, to: string): void {
+    const maps: Array<Map<string, unknown>> = [
+      this.approvalCards,
+      this.graphViews,
+      this.thinkingByMessage,
+      this.fallbacks,
+      this.turnWarnings,
+      this.localTurnStatus,
+    ];
+    for (const map of maps) {
+      if (!map.has(from)) continue;
+      map.set(to, map.get(from));
+      map.delete(from);
+    }
+    for (const watcher of this.graphWatchers.values()) {
+      if (watcher.messageId === from) watcher.messageId = to;
+    }
+  }
+
+  /** Send a partial message update; `coalesce` batches rapid updates (thinking deltas, graph steps). */
+  private postPatch(sessionId: string, messageId: string, patch: Partial<ChatMessage>, coalesce = false): void {
+    if (!coalesce) {
+      this.broadcast({ type: "messagePatch", sessionId, messageId, patch });
+      return;
+    }
+    const key = `${sessionId}:${messageId}:${Object.keys(patch).join(",")}`;
+    const existing = this.patchTimers.get(key);
+    if (existing) clearTimeout(existing);
+    this.patchTimers.set(key, setTimeout(() => {
+      this.patchTimers.delete(key);
+      this.broadcast({ type: "messagePatch", sessionId, messageId, patch });
+    }, 80));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Cancel, approvals, graphs, model fallback
+  // ---------------------------------------------------------------------------
+
+  /** Stop button: abort the stream and cancel any graph still running for this conversation. */
+  private async cancelTurn(conversationId: string): Promise<void> {
+    const stream = this.streams.get(conversationId);
+    if (stream) stream.abort.abort();
+    const running = [...this.graphWatchers.entries()].filter(([, w]) => w.conversationId === conversationId);
+    await Promise.all(running.map(([graphId, watcher]) => this.cancelGraph(graphId, watcher.messageId)));
+  }
+
+  private async cancelGraph(graphId: string, messageId: string): Promise<void> {
+    const conversationId = this.graphWatchers.get(graphId)?.conversationId ?? this.conversationIdForMessage(messageId);
+    const view = this.graphViews.get(messageId);
+    if (view) {
+      view.cancelling = true;
+      if (conversationId) this.postPatch(conversationId, messageId, { graph: { ...view } });
+    }
+    try {
+      await cancelExecutionGraph(graphId);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      this.output.appendLine(`[chat] ${msg}`);
-      if (abort.signal.aborted) {
-        const note = `${buffer ? "\n\n" : ""}_Cancelled._`;
-        assistantMessage.content = `${buffer}${note}`;
-        this.broadcast({ type: "messageAppend", sessionId: conversationId, messageId: assistantMessage.id, chunk: note });
-        this.broadcast({
-          type: "messageComplete",
-          sessionId: conversationId,
-          messageId: assistantMessage.id,
-          conversationId,
-          completedAt: Date.now(),
-        });
-      } else {
-        this.broadcast({
-          type: "messageError",
-          sessionId: conversationId,
-          messageId: assistantMessage.id,
-          error: msg,
-          completedAt: Date.now(),
-        });
+      if (view) {
+        view.cancelling = false;
+        view.error = `Cancel failed: ${msg}`;
+        if (conversationId) this.postPatch(conversationId, messageId, { graph: { ...view } });
       }
-    } finally {
-      this.streams.delete(conversationId);
+      this.broadcast({ type: "log", message: `Could not cancel the graph: ${msg}`, severity: "error" });
     }
+  }
+
+  private conversationIdForMessage(messageId: string): string | undefined {
+    for (const [conversationId, messages] of this.messagesCache) {
+      if (messages.some((m) => m.id === messageId)) return conversationId;
+    }
+    return undefined;
+  }
+
+  /** Follow a graph and render its steps on the message; reload the message once it finishes. */
+  private watchGraph(conversationId: string, messageId: string, graphId: string): void {
+    if (this.graphWatchers.has(graphId) || this.finishedGraphs.has(graphId)) return;
+    const view: GraphProgressView = this.graphViews.get(messageId) ?? { graphId, status: "running", steps: [] };
+    this.graphViews.set(messageId, view);
+    const watcher: GraphWatcher = { conversationId, messageId, dispose: () => undefined };
+    const publish = (coalesce = true) => this.postPatch(conversationId, watcher.messageId, { graph: { ...view, steps: [...view.steps] } }, coalesce);
+
+    watcher.dispose = subscribeExecutionGraphEvents(graphId, (event) => {
+      if (event.type === "init" || event.type === "graph_status") {
+        if (event.status) view.status = event.status;
+      } else if (event.type === "node_status" && event.nodeId) {
+        const step = view.steps.find((s) => s.nodeId === event.nodeId);
+        if (step) {
+          if (event.status) step.status = event.status;
+          if (event.title) step.title = event.title;
+        } else {
+          view.steps.push({ nodeId: event.nodeId, title: event.title, status: event.status ?? "queued" });
+        }
+      } else if (event.type === "done") {
+        view.status = event.status ?? view.status;
+        view.cancelling = false;
+        view.reconnecting = false;
+        this.finishedGraphs.add(graphId);
+        this.graphWatchers.delete(graphId);
+        publish(false);
+        // The server writes the delivered result into the message; fetch it.
+        void this.refreshSingleConversation(conversationId);
+        return;
+      } else {
+        return;
+      }
+      view.error = undefined;
+      view.reconnecting = false;
+      publish();
+    }, {
+      onConnected: () => {
+        if (!view.error && !view.reconnecting) return;
+        view.error = undefined;
+        view.reconnecting = false;
+        publish(false);
+      },
+      onError: (message, willRetry) => {
+        view.error = willRetry ? `Reconnecting to graph events\u2026 (${message})` : message;
+        view.reconnecting = willRetry;
+        if (!willRetry) this.graphWatchers.delete(graphId);
+        this.output.appendLine(`[chat.graph] ${graphId}: ${message}${willRetry ? " (retrying)" : ""}`);
+        publish(false);
+      },
+    });
+    this.graphWatchers.set(graphId, watcher);
+  }
+
+  private async resolveApprovalFromPanel(
+    conversationId: string,
+    messageId: string,
+    approvalId: string,
+    decision: "approved" | "rejected",
+    responseText?: string,
+  ): Promise<void> {
+    const card: ApprovalCardView = this.approvalCards.get(messageId) ?? { id: approvalId, action: "Approval required", status: "pending" };
+    this.approvalCards.set(messageId, card);
+    const publish = () => this.postPatch(conversationId, messageId, { approval: { ...card } });
+    if (this.streams.has(conversationId)) {
+      this.broadcast({ type: "log", message: BUSY_MESSAGE, severity: "warning" });
+      return;
+    }
+    card.busy = true;
+    card.error = undefined;
+    publish();
+    try {
+      await resolveApproval(approvalId, decision, responseText);
+    } catch (err) {
+      card.busy = false;
+      card.error = err instanceof Error ? err.message : String(err);
+      publish();
+      if (err instanceof ChatStreamError && err.details.status === 404) void this.refreshSingleConversation(conversationId);
+      return;
+    }
+    card.status = decision;
+    publish();
+    try {
+      await this.runApprovalResume(conversationId, messageId, approvalId);
+    } finally {
+      card.busy = false;
+      publish();
+    }
+  }
+
+  /** Stream the continuation of a paused turn into a new assistant bubble. */
+  private async runApprovalResume(conversationId: string, pausedMessageId: string, approvalId: string): Promise<void> {
+    const messages = this.messagesCache.get(conversationId) ?? [];
+    const assistantMessage: ConversationMessage = {
+      id: `local:asst:${randomId()}`,
+      conversationId,
+      role: "assistant",
+      content: "",
+      createdAt: new Date().toISOString(),
+    };
+    const pausedIndex = messages.findIndex((m) => m.id === pausedMessageId);
+    if (pausedIndex >= 0) messages.splice(pausedIndex + 1, 0, assistantMessage);
+    else messages.push(assistantMessage);
+    this.messagesCache.set(conversationId, messages);
+    if (this.activeSessionId === conversationId) this.broadcastActiveSession();
+
+    const { abort, streamState } = this.beginTurn(conversationId, assistantMessage);
+    const turn = this.createTurnHandlers(conversationId, assistantMessage, streamState, "");
+    try {
+      const response = await streamApprovalResume(approvalId, turn.handlers, abort.signal);
+      const localId = assistantMessage.id;
+      if (isAgentRunResumed(response)) {
+        // A paused sub-agent continues server-side; its result arrives later via message_updated.
+        const note = "_Agent resumed \u2014 its result will appear here._";
+        assistantMessage.content = `${turn.buffer()}${turn.buffer() ? "\n\n" : ""}${note}`;
+        this.agentResumeNotes.set(conversationId, assistantMessage);
+        this.postPatch(conversationId, localId, { content: assistantMessage.content });
+        this.broadcast({ type: "messageComplete", sessionId: conversationId, messageId: localId, conversationId, completedAt: Date.now() });
+        return;
+      }
+      // If the server continued the paused message in place, drop our placeholder.
+      if (response.assistantMessage?.id === pausedMessageId) {
+        this.messagesCache.set(conversationId, (this.messagesCache.get(conversationId) ?? []).filter((m) => m !== assistantMessage));
+        const paused = (this.messagesCache.get(conversationId) ?? []).find((m) => m.id === pausedMessageId);
+        if (paused) {
+          this.applyTurnResponse(conversationId, paused, response);
+          this.localTurnStatus.delete(pausedMessageId);
+        }
+        this.completeTurn(conversationId, localId, localId);
+        return;
+      }
+      this.applyTurnResponse(conversationId, assistantMessage, response);
+      this.completeTurn(conversationId, localId, assistantMessage.id);
+    } catch (err) {
+      this.failTurn(conversationId, assistantMessage, err, abort.signal.aborted, turn.buffer());
+    } finally {
+      this.endTurn(conversationId, streamState);
+    }
+  }
+
+  /** The user picked a compatible model after a fallback_required: pin it and resend. */
+  private async retryWithModel(
+    sessionId: string,
+    messageId: string,
+    provider: Provider,
+    model: string,
+    content: string,
+  ): Promise<void> {
+    if (!content.trim()) return;
+    this.fallbacks.delete(messageId);
+    this.postPatch(sessionId, messageId, { fallback: undefined });
+    await this.updateOverrides(sessionId, { provider: provider as ConfiguredProvider, model });
+    await this.sendChat(sessionId, content, { provider, model });
   }
 
   private findSession(id: string): ChatSession | null {
@@ -1180,12 +1700,25 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
   }
 
   private async refreshSingleConversation(id: string): Promise<void> {
+    if (this.streams.has(id)) {
+      // Replacing the cache now would drop the optimistic turn; do it when the stream ends.
+      this.pendingRefresh.add(id);
+      return;
+    }
     try {
       const list = await listConversations();
       const updated = list.find((c) => c.id === id);
       if (updated) this.conversations.set(id, updated);
       const fresh = await listConversationMessages(id);
+      if (this.streams.has(id)) {
+        this.pendingRefresh.add(id);
+        return;
+      }
+      const note = this.agentResumeNotes.get(id);
+      if (note && !fresh.some((m) => m.id === note.id)) fresh.push(note);
       this.messagesCache.set(id, fresh);
+      this.hydratedApprovalConversations.delete(id);
+      this.afterMessagesLoaded(id);
       this.broadcastSessions();
       if (this.activeSessionId === id) this.broadcastActiveSession();
     } catch (err) {
@@ -1288,7 +1821,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       return;
     }
     if (this.streams.has(session.conversationId)) {
-      this.broadcast({ type: "log", message: "A response is already streaming for this chat." });
+      this.broadcast({ type: "log", message: BUSY_MESSAGE, severity: "warning" });
       return;
     }
     const resolved = this.resolveProviderModel(session.overrides);
@@ -1360,48 +1893,11 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       maxAgentSpawns: this.catalog.maxAgentSpawns,
     };
 
-    const abort = new AbortController();
-    const streamStartedAt = Date.now();
-    const streamState: ActiveStream = {
-      abort,
-      messageId: assistantMessage.id,
-      startedAt: streamStartedAt,
-      tools: new Map(),
-      edits: new Map(),
-    };
-    this.streams.set(conversationId, streamState);
-    this.broadcast({
-      type: "messageStart",
-      sessionId: conversationId,
-      messageId: assistantMessage.id,
-      startedAt: streamStartedAt,
-    });
-
+    const { abort, streamState } = this.beginTurn(conversationId, assistantMessage);
+    const turn = this.createTurnHandlers(conversationId, assistantMessage, streamState, userPrompt);
     let buffer = "";
     try {
-      const handlers = {
-        onToken: (text: string) => {
-          buffer += text;
-          assistantMessage.content = buffer;
-          this.broadcast({
-            type: "messageAppend",
-            sessionId: conversationId,
-            messageId: assistantMessage.id,
-            chunk: text,
-          });
-        },
-        onToolEvent: (event: ToolCallEvent) => {
-          const update = applyToolEvent(streamState, event);
-          if (!update) return;
-          this.broadcast({
-            type: "toolUpdate",
-            sessionId: conversationId,
-            messageId: assistantMessage.id,
-            entry: update.entry,
-            editedFiles: update.editedFiles,
-          });
-        },
-      };
+      const handlers = turn.handlers;
 
       const useLocalCopilot =
         body.provider === "copilot" &&
@@ -1416,19 +1912,15 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
               .map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
             prompt: body.content,
             toolsEnabled: body.toolsEnabled,
-            onToken: handlers.onToken,
-            onToolEvent: handlers.onToolEvent,
+            onToken: handlers.onToken!,
+            onToolEvent: handlers.onToolEvent!,
             signal: abort.signal,
-          }).then((r) => ({ assistantMessage: { id: assistantMessage.id, content: r.content } }))
+          }).then((r): ChatResponse => ({ assistantMessage: { id: assistantMessage.id, content: r.content } }))
         : await streamChat(body, handlers, abort.signal);
 
-      const finalConversation = (response as { conversation?: Conversation }).conversation;
-      if (finalConversation) this.conversations.set(finalConversation.id, finalConversation);
-      if (response.assistantMessage?.id) assistantMessage.id = response.assistantMessage.id;
-      if (response.assistantMessage?.content) {
-        assistantMessage.content = response.assistantMessage.content;
-        buffer = assistantMessage.content;
-      }
+      const localId = assistantMessage.id;
+      this.applyTurnResponse(conversationId, assistantMessage, response);
+      buffer = assistantMessage.content || turn.buffer();
 
       let taskCount = 0;
       try {
@@ -1457,17 +1949,10 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
         this.broadcast({
           type: "messageAppend",
           sessionId: conversationId,
-          messageId: assistantMessage.id,
+          messageId: localId,
           chunk: note,
         });
-        this.broadcast({
-          type: "messageComplete",
-          sessionId: conversationId,
-          messageId: assistantMessage.id,
-          conversationId,
-          completedAt: Date.now(),
-        });
-        void this.refreshSingleConversation(conversationId);
+        this.completeTurn(conversationId, localId, assistantMessage.id);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         this.output.appendLine(`[chat.pipeline.write] ${msg}`);
@@ -1476,47 +1961,15 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
         this.broadcast({
           type: "messageAppend",
           sessionId: conversationId,
-          messageId: assistantMessage.id,
+          messageId: localId,
           chunk: note,
         });
-        this.broadcast({
-          type: "messageComplete",
-          sessionId: conversationId,
-          messageId: assistantMessage.id,
-          conversationId,
-          completedAt: Date.now(),
-        });
+        this.completeTurn(conversationId, localId, assistantMessage.id);
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.output.appendLine(`[chat.pipeline] ${msg}`);
-      if (abort.signal.aborted) {
-        const note = `${buffer ? "\n\n" : ""}_Cancelled._`;
-        assistantMessage.content = `${buffer}${note}`;
-        this.broadcast({
-          type: "messageAppend",
-          sessionId: conversationId,
-          messageId: assistantMessage.id,
-          chunk: note,
-        });
-        this.broadcast({
-          type: "messageComplete",
-          sessionId: conversationId,
-          messageId: assistantMessage.id,
-          conversationId,
-          completedAt: Date.now(),
-        });
-      } else {
-        this.broadcast({
-          type: "messageError",
-          sessionId: conversationId,
-          messageId: assistantMessage.id,
-          error: msg,
-          completedAt: Date.now(),
-        });
-      }
+      this.failTurn(conversationId, assistantMessage, err, abort.signal.aborted, turn.buffer(), { userMessage });
     } finally {
-      this.streams.delete(conversationId);
+      this.endTurn(conversationId, streamState);
     }
   }
 

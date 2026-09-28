@@ -1,5 +1,10 @@
-import type { ModelCapability, ModelProfileV1, Provider } from "@nexus/shared";
+import type { AgentApprovalRequest, ModelCapability, ModelProfileV1, ModelRoutingResolution, Provider } from "@nexus/shared";
 
+export type { AgentApprovalRequest } from "@nexus/shared";
+export type FallbackRequiredResolution = Extract<ModelRoutingResolution, { status: "approval_required" }>;
+export type RoutingUnsatisfiedResolution = Extract<ModelRoutingResolution, { status: "unsatisfied" }>;
+/** Server-side turn state persisted on assistant messages. */
+export type MessageTurnStatus = "failed" | "cancelled" | "awaiting_approval" | "resolved";
 export type { ModelCapability, ModelFeature, ModelOperation, ModelProfileV1, ModelSupport, Provider } from "@nexus/shared";
 export type ConfiguredProvider = Provider | "ollama-internal";
 export type Role = "system" | "user" | "assistant" | "tool";
@@ -101,6 +106,16 @@ export interface ConversationMessage {
   content: string;
   provider?: Provider;
   model?: string;
+  /** Set when an execution graph produces (or will produce) this message's content. */
+  executionGraphId?: string;
+  status?: MessageTurnStatus;
+  approvalId?: string;
+  pausedAgentRunId?: string;
+  /** Final graph status once the graph finished and delivered its result. */
+  graphStatus?: string;
+  error?: string;
+  warnings?: string[];
+  resolution?: string;
   createdAt: string;
 }
 
@@ -162,7 +177,9 @@ export interface ToolCallEvent {
 
 export interface ChatResponse {
   conversation?: { id: string; title?: string };
-  assistantMessage?: { id: string; content: string };
+  assistantMessage?: Partial<ConversationMessage> & { id: string; content: string };
   toolEvents?: ToolCallEvent[];
+  approvals?: AgentApprovalRequest[];
+  context?: { warnings?: string[] };
   executionGraphId?: string;
 }

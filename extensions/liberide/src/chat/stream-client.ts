@@ -1,80 +1,217 @@
 import { apiFetch } from "../api";
-import type { ChatRequest, ChatResponse, TerminalDelegateEvent, ToolCallEvent } from "./types";
+import { readSseStream } from "../sse";
+import type {
+  AgentApprovalRequest,
+  ChatRequest,
+  ChatResponse,
+  FallbackRequiredResolution,
+  RoutingUnsatisfiedResolution,
+  TerminalDelegateEvent,
+  ToolCallEvent,
+} from "./types";
 
-export async function streamChat(
-  body: ChatRequest,
-  handlers: {
-    onToken?: (token: string) => void;
-    onToolEvent?: (event: ToolCallEvent) => void;
-    onMarkdown?: (content: string) => void;
-    onDiff?: (payload: Record<string, unknown>) => void;
-    onPlan?: (payload: Record<string, unknown>) => void;
-    onTodo?: (payload: Record<string, unknown>) => void;
-    onFollowUp?: (payload: Record<string, unknown>) => void;
-    onTerminalDelegate?: (payload: TerminalDelegateEvent) => void | Promise<void>;
-  },
+export interface ChatStreamHandlers {
+  onToken?: (token: string) => void;
+  onToolEvent?: (event: ToolCallEvent) => void;
+  /** Full final markdown for the turn (replaces what was streamed as tokens). */
+  onMarkdown?: (content: string) => void;
+  /** Reasoning delta. */
+  onThinking?: (content: string) => void;
+  onDiff?: (payload: Record<string, unknown>) => void;
+  onPlan?: (payload: Record<string, unknown>) => void;
+  onTodo?: (payload: Record<string, unknown>) => void;
+  onFollowUp?: (payload: Record<string, unknown>) => void;
+  onReference?: (payload: Record<string, unknown>) => void;
+  onCitation?: (payload: Record<string, unknown>) => void;
+  onFallbackRequired?: (resolution: FallbackRequiredResolution) => void;
+  onRoutingUnsatisfied?: (resolution: RoutingUnsatisfiedResolution) => void;
+  onTerminalDelegate?: (payload: TerminalDelegateEvent) => void | Promise<void>;
+}
+
+export type ChatStreamErrorKind =
+  | "busy"
+  | "cancelled"
+  | "fallback_required"
+  | "routing_unsatisfied"
+  | "forbidden"
+  | "unauthorized"
+  | "server";
+
+/** A failed chat stream, typed so the panel can render the right notice. */
+export class ChatStreamError extends Error {
+  constructor(
+    message: string,
+    readonly kind: ChatStreamErrorKind,
+    readonly details: {
+      status?: number;
+      fallback?: FallbackRequiredResolution;
+      routing?: RoutingUnsatisfiedResolution;
+    } = {},
+  ) {
+    super(message);
+    this.name = "ChatStreamError";
+  }
+}
+
+export const BUSY_MESSAGE = "A reply is still being generated in this conversation. Wait for it to finish or stop it first.";
+
+/** Silence longer than this (the server heartbeats every 15s) means a dead stream. */
+const STREAM_IDLE_TIMEOUT_MS = 120_000;
+
+async function errorFromResponse(response: Response): Promise<ChatStreamError> {
+  const body = (await response.json().catch(() => ({}))) as { error?: string; busy?: boolean };
+  const message = body.error || response.statusText || `HTTP ${response.status}`;
+  if (response.status === 409 || body.busy) return new ChatStreamError(BUSY_MESSAGE, "busy", { status: response.status });
+  if (response.status === 401) {
+    return new ChatStreamError("Not signed in to LiberIDE (401). Reopen the project from the LiberIDE desktop app.", "unauthorized", { status: 401 });
+  }
+  if (response.status === 403) return new ChatStreamError(message === "forbidden" ? "You are not allowed to do that." : message, "forbidden", { status: 403 });
+  return new ChatStreamError(message, "server", { status: response.status });
+}
+
+/**
+ * POST to a chat-shaped SSE endpoint and dispatch every event. Resolves with
+ * the `done` payload; rejects with a {@link ChatStreamError}.
+ */
+async function streamChatEndpoint(
+  path: string,
+  body: unknown,
+  handlers: ChatStreamHandlers,
   signal?: AbortSignal,
+  headers?: Record<string, string>,
 ): Promise<ChatResponse> {
-  const response = await apiFetch("/api/chat/stream", {
+  const response = await apiFetch(path, {
     method: "POST",
-    headers: {
-      "X-Terminal-Executor": body.ideContext?.terminalExecutor === "client" ? "client" : "server",
-    },
+    headers: { Accept: "text/event-stream", ...(headers ?? {}) },
     body: JSON.stringify(body),
     signal,
   });
-  if (!response.ok || !response.body) {
-    const err = (await response.json().catch(() => ({ error: response.statusText }))) as { error?: string };
-    throw new Error(err.error ?? response.statusText);
-  }
+  if (!response.ok || !response.body) throw await errorFromResponse(response);
 
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
   let finalResponse: ChatResponse | undefined;
+  let fallback: FallbackRequiredResolution | undefined;
+  let routing: RoutingUnsatisfiedResolution | undefined;
 
-  const consume = (rawEvent: string) => {
-    const event = rawEvent.match(/^event: (.+)$/m)?.[1];
-    const dataLine = rawEvent.match(/^data: (.+)$/m)?.[1];
-    if (!event || !dataLine) return;
-    let data: unknown;
-    try {
-      data = JSON.parse(dataLine);
-    } catch {
-      // Malformed SSE chunk (debug log, partial flush, error page). Skip it
-      // rather than letting a SyntaxError unwind the whole stream loop.
-      console.warn("[stream-client] could not parse SSE chunk:", dataLine.slice(0, 200));
-      return;
+  await readSseStream(response.body, ({ event, data }) => {
+    switch (event) {
+      case "token":
+        handlers.onToken?.((data as { token: string }).token);
+        break;
+      case "tool":
+        handlers.onToolEvent?.(data as ToolCallEvent);
+        break;
+      case "terminal_delegate":
+        void handlers.onTerminalDelegate?.(data as TerminalDelegateEvent);
+        break;
+      case "markdown":
+        handlers.onMarkdown?.((data as { content: string }).content);
+        break;
+      case "thinking":
+        handlers.onThinking?.((data as { content: string }).content);
+        break;
+      case "diff":
+        handlers.onDiff?.(data as Record<string, unknown>);
+        break;
+      case "plan":
+        handlers.onPlan?.(data as Record<string, unknown>);
+        break;
+      case "todo":
+        handlers.onTodo?.(data as Record<string, unknown>);
+        break;
+      case "follow_up":
+        handlers.onFollowUp?.(data as Record<string, unknown>);
+        break;
+      case "reference":
+        handlers.onReference?.(data as Record<string, unknown>);
+        break;
+      case "citation":
+        handlers.onCitation?.(data as Record<string, unknown>);
+        break;
+      case "fallback_required":
+        fallback = data as FallbackRequiredResolution;
+        handlers.onFallbackRequired?.(fallback);
+        break;
+      case "routing_unsatisfied":
+        routing = data as RoutingUnsatisfiedResolution;
+        handlers.onRoutingUnsatisfied?.(routing);
+        break;
+      case "error": {
+        const payload = data as { error?: string; cancelled?: boolean; busy?: boolean };
+        if (payload.cancelled) throw new ChatStreamError("Cancelled.", "cancelled");
+        if (payload.busy) throw new ChatStreamError(BUSY_MESSAGE, "busy");
+        throw new ChatStreamError(payload.error || "The server reported an error.", "server");
+      }
+      case "done":
+        finalResponse = data as ChatResponse;
+        break;
     }
-    if (event === "token") handlers.onToken?.((data as { token: string }).token);
-    if (event === "tool") handlers.onToolEvent?.(data as ToolCallEvent);
-    if (event === "terminal_delegate") {
-      void handlers.onTerminalDelegate?.(data as TerminalDelegateEvent);
-    }
-    if (event === "markdown") handlers.onMarkdown?.((data as { content: string }).content);
-    if (event === "diff") handlers.onDiff?.(data as Record<string, unknown>);
-    if (event === "plan") handlers.onPlan?.(data as Record<string, unknown>);
-    if (event === "todo") handlers.onTodo?.(data as Record<string, unknown>);
-    if (event === "follow_up") handlers.onFollowUp?.(data as Record<string, unknown>);
-    if (event === "error") throw new Error((data as { error: string }).error);
-    if (event === "done") finalResponse = data as ChatResponse;
-  };
+  }, { idleTimeoutMs: STREAM_IDLE_TIMEOUT_MS });
 
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      buffer += decoder.decode(value, { stream: !done });
-      const parts = buffer.split("\n\n");
-      buffer = parts.pop() ?? "";
-      for (const part of parts) consume(part);
-      if (done) break;
-    }
-    if (buffer.trim()) consume(buffer);
-  } finally {
-    // Always release the reader so the underlying fetch connection is closed,
-    // even if the loop exits due to an exception.
-    reader.cancel().catch(() => undefined);
+  if (finalResponse) return finalResponse;
+  if (fallback) {
+    throw new ChatStreamError(fallback.reason || "The selected model cannot handle this request.", "fallback_required", { fallback });
   }
-  if (!finalResponse) throw new Error("Stream ended before the chat response completed.");
-  return finalResponse;
+  if (routing) {
+    throw new ChatStreamError(
+      routing.reason || "No configured model can handle this request. Check Settings → Providers.",
+      "routing_unsatisfied",
+      { routing },
+    );
+  }
+  throw new ChatStreamError("Stream ended before the chat response completed.", "server");
+}
+
+export function streamChat(body: ChatRequest, handlers: ChatStreamHandlers, signal?: AbortSignal): Promise<ChatResponse> {
+  return streamChatEndpoint("/api/chat/stream", body, handlers, signal, {
+    "X-Terminal-Executor": body.ideContext?.terminalExecutor === "client" ? "client" : "server",
+  });
+}
+
+/**
+ * `done` payload of resume/stream when the approval belonged to a paused
+ * sub-agent: the run continues server-side and its result is posted to the
+ * conversation later (signalled by a `message_updated` conversation event).
+ */
+export interface AgentRunResumed {
+  agentRunResumed: string;
+}
+
+export function isAgentRunResumed(value: ChatResponse | AgentRunResumed): value is AgentRunResumed {
+  return typeof (value as AgentRunResumed).agentRunResumed === "string";
+}
+
+/** Continue a turn that paused on an approval, after it was approved or rejected. */
+export function streamApprovalResume(
+  approvalId: string,
+  handlers: ChatStreamHandlers,
+  signal?: AbortSignal,
+): Promise<ChatResponse | AgentRunResumed> {
+  return streamChatEndpoint(`/api/approvals/${encodeURIComponent(approvalId)}/resume/stream`, {}, handlers, signal) as Promise<ChatResponse | AgentRunResumed>;
+}
+
+/** Approve or reject a pending approval (the caller then streams the continuation). */
+export async function resolveApproval(
+  approvalId: string,
+  status: "approved" | "rejected",
+  response?: string,
+): Promise<AgentApprovalRequest> {
+  const res = await apiFetch(`/api/approvals/${encodeURIComponent(approvalId)}`, {
+    method: "PATCH",
+    // "client": we stream the continuation ourselves via resume/stream, so the
+    // server must not also resume the paused turn in the background.
+    body: JSON.stringify({ status, ...(response ? { response } : {}), resumeMode: "client" }),
+  });
+  if (!res.ok) {
+    const err = await errorFromResponse(res);
+    if (res.status === 403) throw new ChatStreamError("You are not allowed to act on this approval.", "forbidden", { status: 403 });
+    if (res.status === 404) throw new ChatStreamError("This approval is no longer pending (it may have been resolved elsewhere).", "server", { status: 404 });
+    throw err;
+  }
+  return (await res.json()) as AgentApprovalRequest;
+}
+
+export async function listConversationApprovals(conversationId: string): Promise<AgentApprovalRequest[]> {
+  const res = await apiFetch(`/api/conversations/${encodeURIComponent(conversationId)}/approvals`);
+  if (!res.ok) throw await errorFromResponse(res);
+  return (await res.json()) as AgentApprovalRequest[];
 }

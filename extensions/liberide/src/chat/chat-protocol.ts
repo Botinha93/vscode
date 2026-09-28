@@ -6,6 +6,8 @@ import type {
   ConversationChatMode,
   DocumentRecord,
   McpServer,
+  MessageTurnStatus,
+  Provider,
   Skill,
 } from "./types";
 
@@ -36,6 +38,44 @@ export interface EditedFileSummary {
   deletions: number;
 }
 
+/** Approval card state for a turn paused on a tool/plan approval. */
+export interface ApprovalCardView {
+  id: string;
+  action: string;
+  reason?: string;
+  details?: string;
+  risk?: string;
+  kind?: string;
+  status: "pending" | "approved" | "rejected";
+  /** True while the PATCH / resume stream is in flight. */
+  busy?: boolean;
+  error?: string;
+}
+
+export interface GraphStepView {
+  nodeId: string;
+  title?: string;
+  status: string;
+}
+
+/** Live progress of the execution graph producing a message. */
+export interface GraphProgressView {
+  graphId: string;
+  status: string;
+  steps: GraphStepView[];
+  /** Connection problems while following the graph. */
+  error?: string;
+  reconnecting?: boolean;
+  cancelling?: boolean;
+}
+
+/** Offered when the pinned model cannot serve the request. */
+export interface FallbackProposalView {
+  prompt: string;
+  reason?: string;
+  alternatives: Array<{ provider: Provider; model: string }>;
+}
+
 export interface ChatMessage {
   id: string;
   role: Role;
@@ -49,6 +89,15 @@ export interface ChatMessage {
   editedFiles?: EditedFileSummary[];
   /** True when the inline pipeline-ready card on this message has already been acted on. */
   pipelineCardConsumed?: boolean;
+  /** Server-side turn state (failed / cancelled / awaiting approval / resolved). */
+  turnStatus?: MessageTurnStatus;
+  /** Degradations reported for this turn. */
+  warnings?: string[];
+  /** Streamed reasoning, if the model exposes it. */
+  thinking?: string;
+  approval?: ApprovalCardView;
+  graph?: GraphProgressView;
+  fallback?: FallbackProposalView;
 }
 
 export interface ChatOverrides {
@@ -135,7 +184,11 @@ export type ChatHostToWebview =
   | { type: "session"; session: ChatSession }
   | { type: "messageStart"; sessionId: string; messageId: string; startedAt: number }
   | { type: "messageAppend"; sessionId: string; messageId: string; chunk: string }
-  | { type: "messageComplete"; sessionId: string; messageId: string; conversationId?: string; completedAt: number }
+  | { type: "messageComplete"; sessionId: string; messageId: string; conversationId?: string; completedAt: number; serverMessageId?: string }
+  /** Merge fields into a message and re-render it (approval, graph, thinking, warnings, status). */
+  | { type: "messagePatch"; sessionId: string; messageId: string; patch: Partial<ChatMessage> }
+  /** Put text back in the composer (e.g. the send was refused because a turn is running). */
+  | { type: "restoreDraft"; sessionId: string; content: string }
   | { type: "messageError"; sessionId: string; messageId: string; error: string; completedAt: number }
   | { type: "toolUpdate"; sessionId: string; messageId: string; entry: ToolTimelineEntry; editedFiles: EditedFileSummary[] }
   | { type: "project"; project: ProjectInfo }
@@ -163,4 +216,7 @@ export type ChatWebviewToHost =
   | { type: "openSettings" }
   | { type: "openPipeline" }
   | { type: "revealFile"; path: string }
-  | { type: "undoEdit"; path: string };
+  | { type: "undoEdit"; path: string }
+  | { type: "resolveApproval"; sessionId: string; messageId: string; approvalId: string; decision: "approved" | "rejected"; response?: string }
+  | { type: "cancelGraph"; sessionId: string; messageId: string; graphId: string }
+  | { type: "retryWithModel"; sessionId: string; messageId: string; provider: Provider; model: string; content: string };

@@ -15,7 +15,7 @@ let pipeline: LiberidePipelineController;
 let chat: LiberideChatPanelController;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
-  initApiFromContext(context);
+  context.subscriptions.push(initApiFromContext(context));
   const output = vscode.window.createOutputChannel("LiberIDE");
   store = new SpecStore(output);
   await store.initialize(context);
