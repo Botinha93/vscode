@@ -6,6 +6,41 @@
       __defProp(target, name, { get: all[name], enumerable: true });
   };
 
+  // src/chat/models.ts
+  var PROVIDER_LABELS = {
+    openai: "OpenAI",
+    openrouter: "OpenRouter",
+    google: "Google",
+    anthropic: "Anthropic",
+    copilot: "GitHub Copilot",
+    moonshot: "Moonshot Kimi",
+    zai: "Z.AI",
+    qwen: "Qwen / DashScope",
+    deepseek: "DeepSeek",
+    minimax: "MiniMax",
+    xiaomi: "Xiaomi MiMo",
+    ollama: "Ollama",
+    "ollama-internal": "Ollama (Internal)",
+    llamacpp: "llama.cpp",
+    lmstudio: "LM Studio",
+    custom: "Custom"
+  };
+  function providerLabel(provider) {
+    return PROVIDER_LABELS[provider] ?? provider;
+  }
+  var PROFILE_FEATURE_BADGES = [
+    ["tool-calling", "tools"],
+    ["image-input", "vision"],
+    ["reasoning", "reasoning"]
+  ];
+  function modelCapabilityBadges(model) {
+    const features = model.profile?.features;
+    if (features) {
+      return PROFILE_FEATURE_BADGES.filter(([feature]) => features[feature]?.value === "supported").map(([, badge]) => badge);
+    }
+    return [...model.capabilities ?? []];
+  }
+
   // ../../../packages/shared/src/chat-commands.ts
   var CHAT_SLASH_COMMAND_DEFINITIONS = [
     {
@@ -15436,16 +15471,6 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     expandedEditCards: /* @__PURE__ */ new Set(),
     consumedPipelineCards: /* @__PURE__ */ new Set()
   };
-  var PROVIDER_LABELS = {
-    openai: "OpenAI",
-    openrouter: "OpenRouter",
-    google: "Google",
-    ollama: "Ollama",
-    "ollama-internal": "Ollama (internal)",
-    llamacpp: "llama.cpp",
-    lmstudio: "LM Studio",
-    custom: "Custom"
-  };
   var root = document.getElementById("root");
   function send(msg) {
     vscode.postMessage(msg);
@@ -16256,7 +16281,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
         <button class="icon-btn" id="picker-close">\u2715</button>
       </header>
       <div class="popover-empty">
-        No models configured in LiberIDE. Open the LiberIDE app and add a model under Settings \u2192 Models.
+        No chat models configured. Open the VoxChat app and add a model under Settings \u2192 Providers.
       </div>
     `;
     } else {
@@ -16272,7 +16297,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
             <ul>
               ${g.models.map((m) => {
         const selected = m.provider === eff.provider && m.modelId === eff.model;
-        const cap = (m.capabilities ?? []).slice(0, 3).join(", ");
+        const cap = modelCapabilityBadges(m).slice(0, 3).join(", ");
         return `<li class="popover-row${selected ? " selected" : ""}" data-provider="${escapeAttr(m.provider)}" data-model="${escapeAttr(m.modelId)}">
                   <div class="popover-row-title">${escapeHtml2(m.displayName)}</div>
                   <div class="popover-row-detail">${escapeHtml2(cap || m.modelId)}</div>
@@ -16422,7 +16447,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     }
     return Array.from(map2.entries()).map(([provider, group]) => ({
       provider,
-      label: PROVIDER_LABELS[provider] ?? provider,
+      label: providerLabel(provider),
       models: [...group].sort((a, b) => a.displayName.localeCompare(b.displayName))
     })).sort((a, b) => a.label.localeCompare(b.label));
   }
@@ -16431,7 +16456,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     for (const m of state.catalog.models) {
       if (m.provider === provider && m.modelId === modelId) return m.displayName;
     }
-    return `${PROVIDER_LABELS[provider] ?? provider} \xB7 ${modelId}`;
+    return `${providerLabel(provider)} \xB7 ${modelId}`;
   }
   function relativeTime(ts) {
     const diff = Date.now() - ts;

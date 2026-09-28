@@ -13,6 +13,7 @@ import type {
   ToolTimelineEntry,
 } from "../chat/chat-protocol";
 import type { ConfiguredProvider, DocumentRecord } from "../chat/types";
+import { modelCapabilityBadges, providerLabel } from "../chat/models";
 import { buildChatSlashCommands, parseSlashQuery } from "@nexus/shared";
 import { highlightCode } from "./highlight";
 
@@ -67,17 +68,6 @@ const state: AppState = {
   expandedTimelines: new Set(),
   expandedEditCards: new Set(),
   consumedPipelineCards: new Set(),
-};
-
-const PROVIDER_LABELS: Record<string, string> = {
-  openai: "OpenAI",
-  openrouter: "OpenRouter",
-  google: "Google",
-  ollama: "Ollama",
-  "ollama-internal": "Ollama (internal)",
-  llamacpp: "llama.cpp",
-  lmstudio: "LM Studio",
-  custom: "Custom",
 };
 
 const root = document.getElementById("root") as HTMLDivElement;
@@ -1013,7 +1003,7 @@ function renderModelPicker(): void {
         <button class="icon-btn" id="picker-close">\u2715</button>
       </header>
       <div class="popover-empty">
-        No models configured in LiberIDE. Open the LiberIDE app and add a model under Settings \u2192 Models.
+        No chat models configured. Open the VoxChat app and add a model under Settings \u2192 Providers.
       </div>
     `;
   } else {
@@ -1029,7 +1019,7 @@ function renderModelPicker(): void {
             <ul>
               ${g.models.map((m) => {
                 const selected = m.provider === eff.provider && m.modelId === eff.model;
-                const cap = (m.capabilities ?? []).slice(0, 3).join(", ");
+                const cap = modelCapabilityBadges(m).slice(0, 3).join(", ");
                 return `<li class="popover-row${selected ? " selected" : ""}" data-provider="${escapeAttr(m.provider)}" data-model="${escapeAttr(m.modelId)}">
                   <div class="popover-row-title">${escapeHtml(m.displayName)}</div>
                   <div class="popover-row-detail">${escapeHtml(cap || m.modelId)}</div>
@@ -1196,7 +1186,7 @@ function groupModels(models: BackendCatalog["models"]): ModelGroup[] {
   return Array.from(map.entries())
     .map(([provider, group]) => ({
       provider,
-      label: PROVIDER_LABELS[provider] ?? provider,
+      label: providerLabel(provider as ConfiguredProvider),
       models: [...group].sort((a, b) => a.displayName.localeCompare(b.displayName)),
     }))
     .sort((a, b) => a.label.localeCompare(b.label));
@@ -1207,7 +1197,7 @@ function describeModel(provider: ConfiguredProvider | undefined, modelId: string
   for (const m of state.catalog.models) {
     if (m.provider === provider && m.modelId === modelId) return m.displayName;
   }
-  return `${PROVIDER_LABELS[provider] ?? provider} \u00B7 ${modelId}`;
+  return `${providerLabel(provider)} \u00B7 ${modelId}`;
 }
 
 function relativeTime(ts: number): string {

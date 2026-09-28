@@ -1,21 +1,10 @@
-export type Provider = "openai" | "openrouter" | "google" | "copilot" | "ollama" | "llamacpp" | "lmstudio" | "custom";
+import type { ModelCapability, ModelProfileV1, Provider } from "@nexus/shared";
+
+export type { ModelCapability, ModelFeature, ModelOperation, ModelProfileV1, ModelSupport, Provider } from "@nexus/shared";
 export type ConfiguredProvider = Provider | "ollama-internal";
 export type Role = "system" | "user" | "assistant" | "tool";
 export type ChatModelSelectionMode = "auto" | "manual";
 export type ConversationChatMode = "normal" | "agent";
-
-export type ModelCapability =
-  | "chat"
-  | "tools"
-  | "agents"
-  | "vision"
-  | "audio"
-  | "embeddings"
-  | "image-generation"
-  | "code"
-  | "function-calling"
-  | "long-context"
-  | "local";
 
 export interface ConfiguredModel {
   id: string;
@@ -23,10 +12,15 @@ export interface ConfiguredModel {
   modelId: string;
   displayName: string;
   description?: string;
-  capabilities: ModelCapability[];
+  /** @deprecated Display-only legacy data; may be omitted by newer servers. Prefer `profile`. */
+  capabilities?: ModelCapability[];
   apiKeyConfigured: boolean;
   baseURL?: string;
   contextWindow?: number;
+  /** Resolved v1 profile; the source of truth for operations and features. */
+  profile?: ModelProfileV1;
+  /** Whether this enabled model may be considered by auto routing. */
+  routingEnabled?: boolean;
   enabled: boolean;
   createdAt: string;
   updatedAt: string;

@@ -1,12 +1,19 @@
-import type { ConfiguredModel, ConfiguredProvider, Provider } from "./types";
+import type { ConfiguredModel, ConfiguredProvider, ModelFeature, Provider } from "./types";
 
 export const PROVIDER_LABELS: Record<ConfiguredProvider, string> = {
   openai: "OpenAI",
   openrouter: "OpenRouter",
   google: "Google",
+  anthropic: "Anthropic",
   copilot: "GitHub Copilot",
+  moonshot: "Moonshot Kimi",
+  zai: "Z.AI",
+  qwen: "Qwen / DashScope",
+  deepseek: "DeepSeek",
+  minimax: "MiniMax",
+  xiaomi: "Xiaomi MiMo",
   ollama: "Ollama",
-  "ollama-internal": "Ollama (internal)",
+  "ollama-internal": "Ollama (Internal)",
   llamacpp: "llama.cpp",
   lmstudio: "LM Studio",
   custom: "Custom",
@@ -22,6 +29,31 @@ export function providerLabel(provider: ConfiguredProvider): string {
  */
 export function toWireProvider(provider: ConfiguredProvider): Provider {
   return provider === "ollama-internal" ? "ollama" : provider;
+}
+
+/**
+ * Whether a configured model can serve chat. The backend's resolved profile is
+ * authoritative; legacy `capabilities` are unreliable (every model claims
+ * "chat"). Models without a profile (older servers) are kept.
+ */
+export function supportsTextGeneration(model: ConfiguredModel): boolean {
+  const value = model.profile?.operations?.["text-generation"]?.value;
+  return value === undefined || value === "supported";
+}
+
+const PROFILE_FEATURE_BADGES: ReadonlyArray<[ModelFeature, string]> = [
+  ["tool-calling", "tools"],
+  ["image-input", "vision"],
+  ["reasoning", "reasoning"],
+];
+
+/** Short capability badges for pickers, from the profile when present, else legacy capabilities. */
+export function modelCapabilityBadges(model: ConfiguredModel): string[] {
+  const features = model.profile?.features;
+  if (features) {
+    return PROFILE_FEATURE_BADGES.filter(([feature]) => features[feature]?.value === "supported").map(([, badge]) => badge);
+  }
+  return [...(model.capabilities ?? [])];
 }
 
 export interface ModelGroup {

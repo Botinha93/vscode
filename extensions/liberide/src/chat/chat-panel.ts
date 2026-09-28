@@ -31,7 +31,7 @@ import {
   SPEC_SYSTEM_PROMPTS,
   extractTaskBlocks,
 } from "./commands";
-import { defaultEnabledModel, findConfiguredModel, toWireProvider } from "./models";
+import { defaultEnabledModel, findConfiguredModel, supportsTextGeneration, toWireProvider } from "./models";
 import { listCopilotLmModels, streamCopilotChat } from "./copilot-lm";
 import { streamChat } from "./stream-client";
 import type {
@@ -161,6 +161,8 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
   private projectFolder?: SharingFolder;
   private catalog: BackendCatalog = emptyCatalog();
   private backendStatus: BackendStatus = "unconfigured";
+  /** True when the backend itself exposes Copilot models; the local vscode.lm Copilot path is then suppressed. */
+  private backendHasCopilotModels = false;
 
   private conversations = new Map<string, Conversation>();
   private messagesCache = new Map<string, ConversationMessage[]>();
@@ -424,10 +426,15 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     try {
       const [config, documents] = await Promise.all([fetchConfig(), listDocuments().catch(() => [])]);
       this.catalog = catalogFromConfig(config, documents);
+      this.backendHasCopilotModels = (config.configuredModels ?? []).some(
+        (m) => m.provider === "copilot" && m.enabled !== false,
+      );
       // Merge locally-available Copilot LM models (VS Code vendor provider) into the catalog.
-      // This lets the model picker show Copilot models even if the backend hasn't synced them yet.
+      // Only used as a fallback when the backend exposes no Copilot models, so the picker
+      // doesn't show duplicates and backend-routed Copilot models aren't bypassed.
       try {
         if (!readSettings().copilotModelsEnabled) throw new Error("Copilot LM disabled");
+        if (this.backendHasCopilotModels) throw new Error("Copilot models provided by backend");
         const localCopilot = await listCopilotLmModels();
         const merged = new Map<string, (typeof this.catalog.models)[number]>();
         for (const m of this.catalog.models) merged.set(`${m.provider}:${m.modelId}`, m);
@@ -1031,6 +1038,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
 
       const useLocalCopilot =
         body.provider === "copilot" &&
+        !this.backendHasCopilotModels &&
         readSettings().copilotModelsEnabled &&
         (await listCopilotLmModels().then((m) => m.some((x) => x.modelId === body.model)).catch(() => false));
       const copilotAttachments = useLocalCopilot
@@ -1397,6 +1405,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
 
       const useLocalCopilot =
         body.provider === "copilot" &&
+        !this.backendHasCopilotModels &&
         readSettings().copilotModelsEnabled &&
         (await listCopilotLmModels().then((m) => m.some((x) => x.modelId === body.model)).catch(() => false));
       const response = useLocalCopilot
@@ -1566,7 +1575,7 @@ function emptyCatalog(): BackendCatalog {
 
 function catalogFromConfig(config: AppConfig, documents: BackendCatalog["documents"]): BackendCatalog {
   return {
-    models: (config.configuredModels ?? []).filter((m) => m.enabled !== false),
+    models: (config.configuredModels ?? []).filter((m) => m.enabled !== false && supportsTextGeneration(m)),
     agents: config.agents ?? [],
     skills: config.skills ?? [],
     mcpServers: config.mcpServers ?? [],

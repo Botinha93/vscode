@@ -392,7 +392,7 @@ var SECTION = "liberide";
 function readSettings() {
   const cfg = vscode2.workspace.getConfiguration(SECTION);
   return {
-    modelSelection: cfg.get("modelSelection") ?? "manual",
+    modelSelection: cfg.get("modelSelection") ?? "auto",
     chatMode: "agent",
     useRag: cfg.get("useRag") ?? false,
     toolsEnabled: true,
@@ -15683,15 +15683,26 @@ var PROVIDER_LABELS = {
   openai: "OpenAI",
   openrouter: "OpenRouter",
   google: "Google",
+  anthropic: "Anthropic",
   copilot: "GitHub Copilot",
+  moonshot: "Moonshot Kimi",
+  zai: "Z.AI",
+  qwen: "Qwen / DashScope",
+  deepseek: "DeepSeek",
+  minimax: "MiniMax",
+  xiaomi: "Xiaomi MiMo",
   ollama: "Ollama",
-  "ollama-internal": "Ollama (internal)",
+  "ollama-internal": "Ollama (Internal)",
   llamacpp: "llama.cpp",
   lmstudio: "LM Studio",
   custom: "Custom"
 };
 function toWireProvider(provider) {
   return provider === "ollama-internal" ? "ollama" : provider;
+}
+function supportsTextGeneration(model) {
+  const value = model.profile?.operations?.["text-generation"]?.value;
+  return value === void 0 || value === "supported";
 }
 function findConfiguredModel(models, provider, modelId) {
   if (!provider || !modelId) return void 0;
@@ -15970,6 +15981,8 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
   projectFolder;
   catalog = emptyCatalog();
   backendStatus = "unconfigured";
+  /** True when the backend itself exposes Copilot models; the local vscode.lm Copilot path is then suppressed. */
+  backendHasCopilotModels = false;
   conversations = /* @__PURE__ */ new Map();
   messagesCache = /* @__PURE__ */ new Map();
   static MAX_CACHED_CONVERSATIONS = 20;
@@ -16193,8 +16206,12 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     try {
       const [config2, documents] = await Promise.all([fetchConfig(), listDocuments().catch(() => [])]);
       this.catalog = catalogFromConfig(config2, documents);
+      this.backendHasCopilotModels = (config2.configuredModels ?? []).some(
+        (m) => m.provider === "copilot" && m.enabled !== false
+      );
       try {
         if (!readSettings().copilotModelsEnabled) throw new Error("Copilot LM disabled");
+        if (this.backendHasCopilotModels) throw new Error("Copilot models provided by backend");
         const localCopilot = await listCopilotLmModels();
         const merged = /* @__PURE__ */ new Map();
         for (const m of this.catalog.models) merged.set(`${m.provider}:${m.modelId}`, m);
@@ -16726,7 +16743,7 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
           });
         }
       };
-      const useLocalCopilot = body.provider === "copilot" && readSettings().copilotModelsEnabled && await listCopilotLmModels().then((m) => m.some((x) => x.modelId === body.model)).catch(() => false);
+      const useLocalCopilot = body.provider === "copilot" && !this.backendHasCopilotModels && readSettings().copilotModelsEnabled && await listCopilotLmModels().then((m) => m.some((x) => x.modelId === body.model)).catch(() => false);
       const copilotAttachments = useLocalCopilot ? body.documentIds.map((id) => this.attachmentBytes.get(id)).filter((entry) => !!entry) : [];
       const response = useLocalCopilot ? await streamCopilotChat({
         modelId: body.model,
@@ -17058,7 +17075,7 @@ ${block}
           });
         }
       };
-      const useLocalCopilot = body.provider === "copilot" && readSettings().copilotModelsEnabled && await listCopilotLmModels().then((m) => m.some((x) => x.modelId === body.model)).catch(() => false);
+      const useLocalCopilot = body.provider === "copilot" && !this.backendHasCopilotModels && readSettings().copilotModelsEnabled && await listCopilotLmModels().then((m) => m.some((x) => x.modelId === body.model)).catch(() => false);
       const response = useLocalCopilot ? await streamCopilotChat({
         modelId: body.model,
         history: (messages ?? []).filter((m) => m.role === "user" || m.role === "assistant").map((m) => ({ role: m.role, content: m.content })),
@@ -17231,7 +17248,7 @@ function emptyCatalog() {
 }
 function catalogFromConfig(config2, documents) {
   return {
-    models: (config2.configuredModels ?? []).filter((m) => m.enabled !== false),
+    models: (config2.configuredModels ?? []).filter((m) => m.enabled !== false && supportsTextGeneration(m)),
     agents: config2.agents ?? [],
     skills: config2.skills ?? [],
     mcpServers: config2.mcpServers ?? [],

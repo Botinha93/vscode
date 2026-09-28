@@ -21,7 +21,7 @@ const SECTION = "liberide";
 export function readSettings(): LiberideSettings {
   const cfg = vscode.workspace.getConfiguration(SECTION);
   return {
-    modelSelection: cfg.get<"auto" | "manual">("modelSelection") ?? "manual",
+    modelSelection: cfg.get<"auto" | "manual">("modelSelection") ?? "auto",
     chatMode: "agent",
     useRag: cfg.get<boolean>("useRag") ?? false,
     toolsEnabled: true,
