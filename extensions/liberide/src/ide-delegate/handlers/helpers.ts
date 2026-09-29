@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import * as path from "node:path";
+import { existsSync, realpathSync } from "node:fs";
 
 export function workspaceFolder(): vscode.WorkspaceFolder | undefined {
   return vscode.workspace.workspaceFolders?.[0];
@@ -11,10 +12,50 @@ export function relativePath(fsPath: string): string {
   return path.relative(root, fsPath).replace(/\\/g, "/") || fsPath;
 }
 
+/**
+ * Resolve a model-supplied path inside `root`. Rejects absolute paths, NUL
+ * bytes, `..` escapes and symlinks whose real target leaves the root (checked
+ * on the nearest existing ancestor so not-yet-created files are covered too).
+ */
+export function resolveInsideRootSync(root: string, relative: string): string {
+  if (relative.includes("\0")) throw new Error("Path contains invalid characters");
+  if (path.isAbsolute(relative) || /^[a-zA-Z]:[\\/]/.test(relative)) {
+    throw new Error("Path must be relative to the workspace folder");
+  }
+  const base = path.resolve(root);
+  const full = path.resolve(base, relative);
+  if (!isInside(base, full)) throw new Error("Path escapes the workspace folder");
+  let probe = full;
+  while (!existsSync(probe) && probe !== base) probe = path.dirname(probe);
+  if (existsSync(probe)) {
+    const realBase = realpathSync(base);
+    const realProbe = realpathSync(probe);
+    if (!isInside(realBase, realProbe)) throw new Error("Path escapes the workspace folder");
+  }
+  return full;
+}
+
+export async function resolveInsideRoot(root: string, relative: string): Promise<string> {
+  return resolveInsideRootSync(root, relative);
+}
+
+function isInside(root: string, candidate: string): boolean {
+  const rel = path.relative(root, candidate);
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
+}
+
 export function resolveFileUri(relative: string): vscode.Uri {
   const folder = workspaceFolder();
   if (!folder) throw new Error("No workspace folder open");
-  return vscode.Uri.joinPath(folder.uri, relative);
+  if (folder.uri.scheme !== "file") {
+    // Virtual workspaces: lexical containment only.
+    const normalized = path.posix.normalize(relative.replace(/\\/g, "/"));
+    if (normalized.startsWith("../") || normalized === ".." || path.posix.isAbsolute(normalized)) {
+      throw new Error("Path escapes the workspace folder");
+    }
+    return vscode.Uri.joinPath(folder.uri, normalized);
+  }
+  return vscode.Uri.file(resolveInsideRootSync(folder.uri.fsPath, relative));
 }
 
 export function rangeFromPayload(payload: Record<string, unknown>): vscode.Range {

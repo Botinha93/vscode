@@ -1999,7 +1999,8 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     const nonce = randomNonce();
     const csp = [
       `default-src 'none'`,
-      `img-src ${webview.cspSource} https: data:`,
+      // No remote images: model output could embed a URL that exfiltrates context.
+      `img-src ${webview.cspSource} data: blob:`,
       `style-src ${webview.cspSource} 'unsafe-inline'`,
       `font-src ${webview.cspSource}`,
       `script-src 'nonce-${nonce}' ${webview.cspSource}`,

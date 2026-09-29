@@ -20,7 +20,8 @@
   "capabilities": {
     "virtualWorkspaces": true,
     "untrustedWorkspaces": {
-      "supported": true
+      "supported": "limited",
+      "description": "In Restricted Mode the agent can read the workspace but cannot run commands, tasks, tests or debug sessions, or modify files."
     }
   },
   "contributes": {

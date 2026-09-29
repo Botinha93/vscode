@@ -1568,7 +1568,11 @@ function renderInline(text: string): string {
         if (hrefEnd > labelEnd) {
           const alt = text.slice(i + 2, labelEnd);
           const src = text.slice(labelEnd + 2, hrefEnd);
-          out += `<img src="${escapeAttr(src)}" alt="${escapeAttr(alt)}" class="md-image" loading="lazy" />`;
+          // Remote images would load without a click (and leak whatever the
+          // URL encodes); show them as links instead. The CSP blocks them too.
+          out += /^data:image\//i.test(src)
+            ? `<img src="${escapeAttr(src)}" alt="${escapeAttr(alt)}" class="md-image" loading="lazy" />`
+            : `<a href="${escapeAttr(src)}" class="md-image-link" title="${escapeAttr(src)}">${escapeHtml(alt || "image")}</a>`;
           i = hrefEnd + 1;
           continue;
         }

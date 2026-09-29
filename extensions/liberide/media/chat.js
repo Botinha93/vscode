@@ -16769,7 +16769,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
           if (hrefEnd > labelEnd) {
             const alt = text.slice(i + 2, labelEnd);
             const src = text.slice(labelEnd + 2, hrefEnd);
-            out += `<img src="${escapeAttr(src)}" alt="${escapeAttr(alt)}" class="md-image" loading="lazy" />`;
+            out += /^data:image\//i.test(src) ? `<img src="${escapeAttr(src)}" alt="${escapeAttr(alt)}" class="md-image" loading="lazy" />` : `<a href="${escapeAttr(src)}" class="md-image-link" title="${escapeAttr(src)}">${escapeHtml2(alt || "image")}</a>`;
             i = hrefEnd + 1;
             continue;
           }

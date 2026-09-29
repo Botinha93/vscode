@@ -38,7 +38,14 @@ export type IdeDelegateKind =
   | "vscode.config.write"
   | "vscode.extensions.list"
   | "vscode.problemsByOwner"
-  | "vscode.semanticTokens";
+  | "vscode.semanticTokens"
+  | "vscode.fs.stat"
+  | "vscode.fs.read"
+  | "vscode.fs.write"
+  | "vscode.fs.delete"
+  | "vscode.fs.rename"
+  | "vscode.fs.list"
+  | "vscode.fs.search";
 
 export interface IdeDelegatePayload {
   delegateId: string;
@@ -51,4 +58,6 @@ export interface IdeDelegatePayload {
     conversationId?: string;
   };
   timeoutMs: number;
+  /** Aborted when the server cancels the request (`$/cancelRequest`). */
+  signal?: AbortSignal;
 }

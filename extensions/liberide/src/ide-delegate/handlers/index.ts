@@ -28,12 +28,41 @@ import { handleConfigRead, handleConfigWrite } from "./config";
 import { handleExtensionsList } from "./extensions";
 import { handleProblemsByOwner } from "./problems";
 import { handleSemanticTokens } from "./semantic";
+import { handleFsDelete, handleFsList, handleFsRead, handleFsRename, handleFsSearch, handleFsStat, handleFsWrite } from "./fs";
+import * as vscode from "vscode";
+
+/**
+ * Kinds that execute code or change the workspace. Restricted Mode (an
+ * untrusted folder) only allows reads; everything here needs a trusted folder.
+ */
+const TRUST_REQUIRED_KINDS: ReadonlySet<IdeDelegateKind> = new Set<IdeDelegateKind>([
+  "terminal.run",
+  "vscode.terminalSession",
+  "vscode.tasks.run",
+  "vscode.tests.run",
+  "vscode.debug.start",
+  "vscode.notebook.execute",
+  "vscode.notebook.edit",
+  "vscode.codeActions.apply",
+  "vscode.rename",
+  "vscode.formatDocument",
+  "vscode.formatRange",
+  "vscode.applyWorkspaceEdit",
+  "vscode.config.write",
+  "vscode.fs.write",
+  "vscode.fs.delete",
+  "vscode.fs.rename",
+]);
 
 export async function dispatchIdeDelegate(request: IdeDelegatePayload): Promise<unknown> {
   const { kind, payload } = request;
+  const root = request.target.projectPath;
+  if (TRUST_REQUIRED_KINDS.has(kind) && !vscode.workspace.isTrusted) {
+    throw new Error(`'${kind}' is blocked: this workspace is not trusted (Restricted Mode). Trust the folder in VS Code to allow it.`);
+  }
   switch (kind as IdeDelegateKind) {
     case "terminal.run":
-      return handleTerminalRun({ ...payload, delegateId: request.delegateId, ...request.target });
+      return handleTerminalRun({ ...payload, delegateId: request.delegateId, ...request.target }, request.signal);
     case "vscode.openEditors":
       return handleOpenEditors();
     case "vscode.dirtyBuffers":
@@ -55,13 +84,27 @@ export async function dispatchIdeDelegate(request: IdeDelegatePayload): Promise<
     case "vscode.findFiles":
       return handleFindFiles(payload);
     case "vscode.git.status":
-      return handleGitStatus();
+      return handleGitStatus(root);
     case "vscode.git.log":
-      return handleGitLog(payload);
+      return handleGitLog(root, payload);
     case "vscode.git.diff":
-      return handleGitDiff(payload);
+      return handleGitDiff(root, payload);
     case "vscode.git.blame":
-      return handleGitBlame(payload);
+      return handleGitBlame(root, payload);
+    case "vscode.fs.stat":
+      return handleFsStat(root, payload);
+    case "vscode.fs.read":
+      return handleFsRead(root, payload);
+    case "vscode.fs.write":
+      return handleFsWrite(root, payload);
+    case "vscode.fs.delete":
+      return handleFsDelete(root, payload);
+    case "vscode.fs.rename":
+      return handleFsRename(root, payload);
+    case "vscode.fs.list":
+      return handleFsList(root, payload);
+    case "vscode.fs.search":
+      return handleFsSearch(root, payload);
     case "vscode.terminalSession":
       return handleTerminalSession(payload);
     case "vscode.codeActions":

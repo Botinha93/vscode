@@ -27,6 +27,8 @@ export class IdeDelegateStream implements vscode.Disposable {
   private ws: WebSocket | undefined;
   /** Set when the server rejected our token; reconnects wait for new credentials. */
   private authBlocked = false;
+  /** Requests being handled, by JSON-RPC id, so the server can cancel them. */
+  private readonly running = new Map<string, AbortController>();
   private readonly offAuth: () => void;
 
   constructor(
@@ -53,6 +55,8 @@ export class IdeDelegateStream implements vscode.Disposable {
   dispose(): void {
     this.closed = true;
     this.offAuth();
+    for (const controller of this.running.values()) controller.abort();
+    this.running.clear();
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     try {
       this.ws?.close();
@@ -160,8 +164,16 @@ export class IdeDelegateStream implements vscode.Disposable {
     }
 
     if (!isJsonRpcRequest(parsed)) {
-      if (typeof parsed === "object" && parsed && "method" in parsed && (parsed as { method?: string }).method === "connected") {
+      const method = typeof parsed === "object" && parsed && "method" in parsed ? (parsed as { method?: string }).method : undefined;
+      if (method === "connected") {
         this.log("IDE RPC handshake received");
+      } else if (method === "$/cancelRequest") {
+        const id = String((parsed as { params?: { id?: unknown } }).params?.id ?? "");
+        const controller = this.running.get(id);
+        if (controller) {
+          this.log(`cancelling request ${id}`);
+          controller.abort();
+        }
       }
       return;
     }
@@ -174,6 +186,10 @@ export class IdeDelegateStream implements vscode.Disposable {
       ? request.params as Record<string, unknown>
       : {};
     const timeoutMs = Number(params.timeoutMs ?? 30_000);
+    // A retransmitted id must not run the same command twice.
+    if (this.running.has(request.id)) return;
+    const controller = new AbortController();
+    this.running.set(request.id, controller);
     const delegateRequest: IdeDelegatePayload = {
       delegateId: request.id,
       kind: request.method as IdeDelegateKind,
@@ -183,6 +199,7 @@ export class IdeDelegateStream implements vscode.Disposable {
       },
       target: this.target,
       timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 30_000,
+      signal: controller.signal,
     };
 
     try {
@@ -195,6 +212,8 @@ export class IdeDelegateStream implements vscode.Disposable {
         id: request.id,
         error: { code: -32603, message },
       });
+    } finally {
+      this.running.delete(request.id);
     }
   }
 }
