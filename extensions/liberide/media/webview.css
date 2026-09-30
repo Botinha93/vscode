@@ -1745,3 +1745,18 @@ section.liberide-tab.active { display: flex; flex-direction: column; }
 .graph-warning { color: var(--vscode-editorWarning-foreground, #c4a000); font-size: 0.9em; }
 .fallback-options { display: flex; flex-wrap: wrap; gap: 6px; }
 .btn-secondary.small, .btn-primary.small { padding: 2px 8px; font-size: 0.9em; }
+
+/* Run plan (update_plan) checklist */
+.plan-block {
+  margin: 6px 0;
+  padding: 6px 10px;
+  border: 1px solid var(--chatllm-border);
+  border-radius: 6px;
+  font-size: 0.92em;
+}
+.plan-title { color: var(--chatllm-muted); margin-bottom: 4px; }
+.plan-block ul { list-style: none; margin: 0; padding: 0; }
+.plan-item { display: flex; gap: 6px; line-height: 1.5; }
+.plan-mark { width: 1em; text-align: center; flex-shrink: 0; }
+.plan-completed, .plan-cancelled { color: var(--chatllm-muted); text-decoration: line-through; }
+.plan-in_progress { font-weight: 600; }

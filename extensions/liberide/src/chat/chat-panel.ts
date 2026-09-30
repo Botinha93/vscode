@@ -1317,6 +1317,10 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
         assistantMessage.content = markdown;
         this.postPatch(conversationId, assistantMessage.id, { content: markdown });
       },
+      onTodo: (payload: Record<string, unknown>) => {
+        if (!Array.isArray(payload.todos)) return;
+        this.postPatch(conversationId, assistantMessage.id, { todos: payload.todos as ChatMessage["todos"] }, true);
+      },
       onThinking: (delta: string) => {
         const next = `${this.thinkingByMessage.get(assistantMessage.id) ?? ""}${delta}`;
         this.thinkingByMessage.set(assistantMessage.id, next);

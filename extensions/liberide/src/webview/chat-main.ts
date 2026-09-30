@@ -490,6 +490,7 @@ function renderMessage(message: ChatMessage): HTMLElement {
   turn.innerHTML = `
     ${renderStatusBadges(message)}
     ${renderThinking(message)}
+    ${renderPlan(message)}
     <div class="assistant-meta">
       ${timelineHtml}
       ${editCardHtml}
@@ -560,6 +561,17 @@ function renderThinking(message: ChatMessage): string {
     <summary>${message.status === "streaming" && !message.content ? "Thinking\u2026" : "Reasoning"}</summary>
     <div class="thinking-body">${escapeHtml(message.thinking)}</div>
   </details>`;
+}
+
+/** The run's plan (update_plan) as a checklist. */
+function renderPlan(message: ChatMessage): string {
+  if (!message.todos?.length) return "";
+  const items = message.todos.map((todo) => {
+    const status = todo.status ?? (todo.done ? "completed" : "pending");
+    const mark = status === "completed" ? "\u2713" : status === "in_progress" ? "\u25B8" : status === "cancelled" ? "\u2715" : "\u25CB";
+    return `<li class="plan-item plan-${escapeAttr(status)}"><span class="plan-mark" aria-hidden="true">${mark}</span>${escapeHtml(todo.label)}</li>`;
+  }).join("");
+  return `<div class="plan-block"><div class="plan-title">Plan</div><ul>${items}</ul></div>`;
 }
 
 function isTerminalGraph(status: string | undefined): boolean {

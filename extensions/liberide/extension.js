@@ -17657,6 +17657,10 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
         assistantMessage.content = markdown;
         this.postPatch(conversationId, assistantMessage.id, { content: markdown });
       },
+      onTodo: (payload) => {
+        if (!Array.isArray(payload.todos)) return;
+        this.postPatch(conversationId, assistantMessage.id, { todos: payload.todos }, true);
+      },
       onThinking: (delta) => {
         const next = `${this.thinkingByMessage.get(assistantMessage.id) ?? ""}${delta}`;
         this.thinkingByMessage.set(assistantMessage.id, next);

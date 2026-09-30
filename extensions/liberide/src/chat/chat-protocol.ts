@@ -95,6 +95,8 @@ export interface ChatMessage {
   warnings?: string[];
   /** Streamed reasoning, if the model exposes it. */
   thinking?: string;
+  /** The run's current plan (update_plan), shown as a checklist. */
+  todos?: Array<{ id?: string; label: string; status?: string; done?: boolean }>;
   approval?: ApprovalCardView;
   graph?: GraphProgressView;
   fallback?: FallbackProposalView;
