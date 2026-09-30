@@ -1,11 +1,5 @@
 import * as vscode from "vscode";
-import * as path from "node:path";
-
-function relativePath(fsPath: string): string {
-  const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  if (!root) return fsPath;
-  return path.relative(root, fsPath).replace(/\\/g, "/") || fsPath;
-}
+import { isInWorkspace, relativePath } from "./helpers";
 
 export async function handleDiagnostics(payload: Record<string, unknown>): Promise<unknown> {
   const filterPaths = Array.isArray(payload.filePaths)
@@ -18,7 +12,8 @@ export async function handleDiagnostics(payload: Record<string, unknown>): Promi
   }> = [];
 
   for (const [uri, diags] of all) {
-    if (uri.scheme !== "file") continue;
+    // This folder only (multi-root, and no problems from unrelated files).
+    if (uri.scheme !== "file" || !isInWorkspace(uri.fsPath)) continue;
     const rel = relativePath(uri.fsPath);
     if (filterPaths?.length && !filterPaths.some((p) => rel.includes(p) || p.includes(rel))) continue;
     entries.push({

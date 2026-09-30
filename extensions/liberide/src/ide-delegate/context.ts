@@ -1,12 +1,19 @@
 import * as vscode from "vscode";
 import type { IdeToolContextPayload } from "../chat/types";
 
+/** The folder the user is working in: the active editor's, else the first. */
+export function activeWorkspaceFolder(): vscode.WorkspaceFolder | undefined {
+  const active = vscode.window.activeTextEditor?.document.uri;
+  return (active && vscode.workspace.getWorkspaceFolder(active)) ?? vscode.workspace.workspaceFolders?.[0];
+}
+
 export function buildIdeContextPayload(conversationId?: string): IdeToolContextPayload | undefined {
-  const folder = vscode.workspace.workspaceFolders?.[0];
+  const folder = activeWorkspaceFolder();
   if (!folder) return undefined;
   return {
     sessionId: `vscode-${folder.name}`,
-    userId: "default",
+    // Ignored by the server (it uses the authenticated user); kept for the payload type.
+    userId: "",
     projectPath: folder.uri.fsPath,
     mode: "desktop",
     terminalExecutor: "client",

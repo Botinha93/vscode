@@ -56,7 +56,7 @@ function shellArgv(command: string): string[] {
 }
 
 /** Kill the whole tree: `proc.kill()` alone leaves the shell's children running. */
-function killTree(proc: ChildProcess): void {
+export function killTree(proc: ChildProcess): void {
   if (proc.pid === undefined || proc.exitCode !== null) return;
   if (process.platform === "win32") {
     spawn("taskkill", ["/pid", String(proc.pid), "/T", "/F"], { windowsHide: true }).on("error", () => undefined);
@@ -75,7 +75,11 @@ function killTree(proc: ChildProcess): void {
   }, KILL_GRACE_MS).unref();
 }
 
-export function runLocalTerminal(delegate: TerminalDelegateEvent, signal?: AbortSignal): Promise<LocalTerminalResult> {
+export function runLocalTerminal(
+  delegate: TerminalDelegateEvent,
+  signal?: AbortSignal,
+  hooks: { onData?: (text: string, stream: "stdout" | "stderr") => void } = {},
+): Promise<LocalTerminalResult> {
   const cwd = path.resolve(delegate.cwd || delegate.projectPath);
   const argv = shellArgv(delegate.command);
   const timeoutMs = delegate.timeoutMs > 0 ? delegate.timeoutMs : 120_000;
@@ -102,8 +106,14 @@ export function runLocalTerminal(delegate: TerminalDelegateEvent, signal?: Abort
     // setEncoding keeps multi-byte UTF-8 characters intact across chunks.
     proc.stdout?.setEncoding("utf8");
     proc.stderr?.setEncoding("utf8");
-    proc.stdout?.on("data", (chunk: string) => stdout.append(chunk));
-    proc.stderr?.on("data", (chunk: string) => stderr.append(chunk));
+    proc.stdout?.on("data", (chunk: string) => {
+      stdout.append(chunk);
+      hooks.onData?.(chunk, "stdout");
+    });
+    proc.stderr?.on("data", (chunk: string) => {
+      stderr.append(chunk);
+      hooks.onData?.(chunk, "stderr");
+    });
 
     const timer = setTimeout(() => {
       timedOut = true;

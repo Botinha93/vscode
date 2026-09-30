@@ -9,6 +9,7 @@ import { RunsTreeProvider } from "./views/runsTree";
 import { SpecsTreeProvider } from "./views/specsTree";
 import { TasksTreeProvider } from "./views/tasksTree";
 import { startIdeDelegateStream } from "./ide-delegate/stream";
+import { disposeAgentTerminals } from "./terminal/agent-terminals";
 
 let store: SpecStore;
 let pipeline: LiberidePipelineController;
@@ -143,4 +144,7 @@ function statusBar(): vscode.StatusBarItem {
   return item;
 }
 
-export function deactivate(): void {}
+export function deactivate(): void {
+  // Agent terminals own child processes; don't leave them running.
+  disposeAgentTerminals();
+}

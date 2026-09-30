@@ -11,6 +11,8 @@ import type {
 } from "./types";
 
 export interface ChatStreamHandlers {
+  /** The turn's server conversation id, sent early (drafts learn it before `done`). */
+  onConversation?: (conversationId: string) => void;
   onToken?: (token: string) => void;
   onToolEvent?: (event: ToolCallEvent) => void;
   /** Full final markdown for the turn (replaces what was streamed as tokens). */
@@ -94,6 +96,9 @@ async function streamChatEndpoint(
 
   await readSseStream(response.body, ({ event, data }) => {
     switch (event) {
+      case "conversation":
+        handlers.onConversation?.((data as { conversationId: string }).conversationId);
+        break;
       case "token":
         handlers.onToken?.((data as { token: string }).token);
         break;

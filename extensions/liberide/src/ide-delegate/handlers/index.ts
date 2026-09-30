@@ -10,7 +10,13 @@ import {
 } from "./lsp";
 import { handleFindFiles } from "./files";
 import { handleGitStatus, handleGitLog, handleGitDiff, handleGitBlame } from "./git";
-import { handleTerminalSession } from "./terminal-session";
+import {
+  handleTerminalSession,
+  handleTerminalSessionClose,
+  handleTerminalSessionOpen,
+  handleTerminalSessionRead,
+  handleTerminalSessionSend,
+} from "./terminal-session";
 import { handleTerminalRun } from "./terminal-run";
 import {
   handleCodeActions,
@@ -20,7 +26,7 @@ import {
   handleFormatRange,
 } from "./refactor";
 import { handleApplyWorkspaceEdit } from "./workspace-edit";
-import { handleTasksList, handleTasksRun, handleTasksCancel } from "./tasks";
+import { handleTasksList, handleTasksRun, handleTasksCancel, handleTasksStatus } from "./tasks";
 import { handleTestsList, handleTestsRun, handleTestsStatus } from "./tests";
 import { handleDebugStart, handleDebugStop, handleDebugList, handleDebugStackTrace } from "./debug";
 import { handleNotebookRead, handleNotebookEdit, handleNotebookExecute } from "./notebook";
@@ -30,6 +36,7 @@ import { handleProblemsByOwner } from "./problems";
 import { handleSemanticTokens } from "./semantic";
 import { handleFsDelete, handleFsList, handleFsRead, handleFsRename, handleFsSearch, handleFsStat, handleFsWrite } from "./fs";
 import * as vscode from "vscode";
+import { withRequestRoot } from "./helpers";
 
 /**
  * Kinds that execute code or change the workspace. Restricted Mode (an
@@ -38,6 +45,8 @@ import * as vscode from "vscode";
 const TRUST_REQUIRED_KINDS: ReadonlySet<IdeDelegateKind> = new Set<IdeDelegateKind>([
   "terminal.run",
   "vscode.terminalSession",
+  "vscode.terminalSession.open",
+  "vscode.terminalSession.send",
   "vscode.tasks.run",
   "vscode.tests.run",
   "vscode.debug.start",
@@ -55,6 +64,11 @@ const TRUST_REQUIRED_KINDS: ReadonlySet<IdeDelegateKind> = new Set<IdeDelegateKi
 ]);
 
 export async function dispatchIdeDelegate(request: IdeDelegatePayload): Promise<unknown> {
+  // Each socket serves one workspace folder; bind handlers to it.
+  return withRequestRoot(request.target.projectPath, () => dispatchInFolder(request));
+}
+
+async function dispatchInFolder(request: IdeDelegatePayload): Promise<unknown> {
   const { kind, payload } = request;
   const root = request.target.projectPath;
   if (TRUST_REQUIRED_KINDS.has(kind) && !vscode.workspace.isTrusted) {
@@ -106,7 +120,15 @@ export async function dispatchIdeDelegate(request: IdeDelegatePayload): Promise<
     case "vscode.fs.search":
       return handleFsSearch(root, payload);
     case "vscode.terminalSession":
-      return handleTerminalSession(payload);
+      return handleTerminalSession(root, payload, request.signal);
+    case "vscode.terminalSession.open":
+      return handleTerminalSessionOpen(root, payload);
+    case "vscode.terminalSession.send":
+      return handleTerminalSessionSend(payload, request.signal);
+    case "vscode.terminalSession.read":
+      return handleTerminalSessionRead(payload);
+    case "vscode.terminalSession.close":
+      return handleTerminalSessionClose(payload);
     case "vscode.codeActions":
       return handleCodeActions(payload);
     case "vscode.codeActions.apply":
@@ -125,10 +147,12 @@ export async function dispatchIdeDelegate(request: IdeDelegatePayload): Promise<
       return handleTasksRun(payload);
     case "vscode.tasks.cancel":
       return handleTasksCancel(payload);
+    case "vscode.tasks.status":
+      return handleTasksStatus(payload);
     case "vscode.tests.list":
       return handleTestsList();
     case "vscode.tests.run":
-      return handleTestsRun(payload);
+      return handleTestsRun(payload, request.signal);
     case "vscode.tests.status":
       return handleTestsStatus(payload);
     case "vscode.debug.start":

@@ -1,4 +1,6 @@
 import * as vscode from "vscode";
+import { resetPreEditSnapshots, restorePreEditSnapshot } from "../ide-delegate/handlers/fs";
+import { resolveInsideRootSync } from "../ide-delegate/handlers/helpers";
 import {
   addConversationToFolder,
   apiFetch,
@@ -98,8 +100,17 @@ interface OverridesCache {
   [conversationId: string]: ChatOverrides;
 }
 
+/** Cancel a running server turn; a missing turn (already finished) is fine. */
+async function requestTurnCancel(serverConversationId: string): Promise<void> {
+  await apiFetch(`/api/conversations/${encodeURIComponent(serverConversationId)}/turn/cancel`, { method: "POST" }).catch(() => undefined);
+}
+
 interface ActiveStream {
   abort: AbortController;
+  /** Server conversation id of the turn (drafts learn it from the stream). */
+  serverConversationId?: string;
+  /** Stop pressed before the server id arrived: cancel when it does. */
+  stopRequested?: boolean;
   messageId: string;
   startedAt: number;
   tools: Map<string, ToolTimelineEntry>;
@@ -1068,7 +1079,30 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     return buildIdeContextPayload(conversationId);
   }
 
+  /** Sessions with a send in progress (before its stream is registered). */
+  private readonly sendingSessions = new Set<string>();
+
   private async sendChat(
+    sessionId: string,
+    content: string,
+    forced?: { provider: Provider; model: string },
+  ): Promise<void> {
+    // A draft creates its conversation before the stream exists, so the
+    // stream map alone lets a double send start two conversations.
+    if (this.sendingSessions.has(sessionId)) {
+      this.broadcast({ type: "restoreDraft", sessionId, content });
+      this.broadcast({ type: "log", message: BUSY_MESSAGE, severity: "warning" });
+      return;
+    }
+    this.sendingSessions.add(sessionId);
+    try {
+      await this.sendChatInSession(sessionId, content, forced);
+    } finally {
+      this.sendingSessions.delete(sessionId);
+    }
+  }
+
+  private async sendChatInSession(
     sessionId: string,
     content: string,
     forced?: { provider: Provider; model: string },
@@ -1233,6 +1267,8 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
   // ---------------------------------------------------------------------------
 
   private beginTurn(conversationId: string, assistantMessage: ConversationMessage): { abort: AbortController; streamState: ActiveStream } {
+    // Undo snapshots cover the edits of the turn that is starting.
+    resetPreEditSnapshots();
     const abort = new AbortController();
     const streamState: ActiveStream = {
       abort,
@@ -1265,6 +1301,10 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
   ): { handlers: ChatStreamHandlers; buffer: () => string } {
     let buffer = "";
     const handlers: ChatStreamHandlers = {
+      onConversation: (serverConversationId) => {
+        streamState.serverConversationId = serverConversationId;
+        if (streamState.stopRequested) void requestTurnCancel(serverConversationId);
+      },
       onToken: (text: string) => {
         buffer += text;
         assistantMessage.content = buffer;
@@ -1453,10 +1493,21 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
   // Cancel, approvals, graphs, model fallback
   // ---------------------------------------------------------------------------
 
-  /** Stop button: abort the stream and cancel any graph still running for this conversation. */
+  /**
+   * Stop button: ask the server to cancel the turn (closing the stream no
+   * longer stops it; the stream then ends as cancelled), and cancel any graph
+   * still running for this conversation.
+   */
   private async cancelTurn(conversationId: string): Promise<void> {
     const stream = this.streams.get(conversationId);
-    if (stream) stream.abort.abort();
+    if (stream) {
+      if (stream.serverConversationId) void requestTurnCancel(stream.serverConversationId);
+      else stream.stopRequested = true;
+      // Safety net: stop listening if the cancel never ends the stream.
+      setTimeout(() => {
+        if (this.streams.get(conversationId) === stream) stream.abort.abort();
+      }, 5_000);
+    }
     const running = [...this.graphWatchers.entries()].filter(([, w]) => w.conversationId === conversationId);
     await Promise.all(running.map(([graphId, watcher]) => this.cancelGraph(graphId, watcher.messageId)));
   }
@@ -1748,6 +1799,27 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       return;
     }
     const clean = relativePath.replace(/^\/+/, "");
+    let full: string;
+    try {
+      full = resolveInsideRootSync(root, clean);
+    } catch (err) {
+      this.broadcast({ type: "log", message: `Undo failed for ${clean}: ${err instanceof Error ? err.message : err}` });
+      return;
+    }
+    // Exact undo: the content from before the agent's edits this turn.
+    if (await restorePreEditSnapshot(full)) {
+      await this.revealFile(clean).catch(() => undefined);
+      this.broadcast({ type: "log", message: `Restored ${clean} to its content before the agent's edits.`, severity: "info" });
+      return;
+    }
+    // No snapshot (the server wrote the file directly): git is the only
+    // baseline, and it also discards the user's own uncommitted changes.
+    const choice = await vscode.window.showWarningMessage(
+      `Revert ${clean} to the last git commit? This also discards your own uncommitted changes to it.`,
+      { modal: true },
+      "Revert",
+    );
+    if (choice !== "Revert") return;
     await new Promise<void>((resolve, reject) => {
       execFile("git", ["checkout", "--", clean], { cwd: root, timeout: 15_000, windowsHide: true }, (err, _stdout, stderr) => {
         if (err) reject(new Error(stderr || err.message));

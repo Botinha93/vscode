@@ -1,14 +1,8 @@
 import * as vscode from "vscode";
-import * as path from "node:path";
-
-function relativePath(fsPath: string): string {
-  const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  if (!root) return fsPath;
-  return path.relative(root, fsPath).replace(/\\/g, "/") || fsPath;
-}
+import { relativePath, workspaceFolder } from "./helpers";
 
 export async function handleFindFiles(payload: Record<string, unknown>): Promise<unknown> {
-  const folder = vscode.workspace.workspaceFolders?.[0];
+  const folder = workspaceFolder();
   if (!folder) throw new Error("No workspace folder open");
   const pattern = String(payload.pattern ?? "**/*");
   const maxResults = Number(payload.maxResults ?? 200);

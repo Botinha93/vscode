@@ -23,6 +23,44 @@ const BINARY_EXTS = new Set([
 ]);
 const MAX_SEARCH_FILE_BYTES = 2_000_000;
 
+/**
+ * Content of each file before the agent first changed it in the current turn
+ * (`null` = the file did not exist), so Undo restores exactly that instead of
+ * discarding the user's own uncommitted work with a git checkout.
+ */
+const preEditSnapshots = new Map<string, string | null>();
+const MAX_SNAPSHOTS = 200;
+const MAX_SNAPSHOT_BYTES = 5_000_000;
+
+async function snapshotBeforeChange(fullPath: string): Promise<void> {
+  if (preEditSnapshots.has(fullPath)) return;
+  const info = await stat(fullPath).catch(() => undefined);
+  if (info && (!info.isFile() || info.size > MAX_SNAPSHOT_BYTES)) return;
+  preEditSnapshots.set(fullPath, info ? await readFile(fullPath, "utf8").catch(() => null) : null);
+  while (preEditSnapshots.size > MAX_SNAPSHOTS) preEditSnapshots.delete(preEditSnapshots.keys().next().value!);
+}
+
+/** Start of a new turn: earlier edits are the baseline now. */
+export function resetPreEditSnapshots(): void {
+  preEditSnapshots.clear();
+}
+
+/**
+ * Restore a file to its content before the agent's edits this turn.
+ * Returns false when no snapshot exists (the edit did not go through here).
+ */
+export async function restorePreEditSnapshot(fullPath: string): Promise<boolean> {
+  if (!preEditSnapshots.has(fullPath)) return false;
+  const before = preEditSnapshots.get(fullPath)!;
+  if (before === null) await rm(fullPath, { force: true });
+  else {
+    await mkdir(path.dirname(fullPath), { recursive: true });
+    await writeFile(fullPath, before, "utf8");
+  }
+  preEditSnapshots.delete(fullPath);
+  return true;
+}
+
 function relPath(payload: Record<string, unknown>, key = "path"): string {
   const value = payload[key];
   if (typeof value !== "string") throw new Error(`${key} is required`);
@@ -53,6 +91,7 @@ export async function handleFsRead(root: string, payload: Record<string, unknown
 export async function handleFsWrite(root: string, payload: Record<string, unknown>): Promise<unknown> {
   const full = await resolveInsideRoot(root, relPath(payload));
   const content = typeof payload.content === "string" ? payload.content : "";
+  await snapshotBeforeChange(full);
   await mkdir(path.dirname(full), { recursive: true });
   await writeFile(full, content, "utf8");
   if (typeof payload.mode === "number") await chmod(full, payload.mode);
@@ -62,6 +101,7 @@ export async function handleFsWrite(root: string, payload: Record<string, unknow
 export async function handleFsDelete(root: string, payload: Record<string, unknown>): Promise<unknown> {
   const full = await resolveInsideRoot(root, relPath(payload));
   if (full === path.resolve(root)) throw new Error("Refusing to delete the workspace root");
+  await snapshotBeforeChange(full);
   await rm(full, { force: true, recursive: payload.recursive === true });
   return { deleted: true };
 }
@@ -70,6 +110,8 @@ export async function handleFsRename(root: string, payload: Record<string, unkno
   const from = await resolveInsideRoot(root, relPath(payload, "from"));
   const to = await resolveInsideRoot(root, relPath(payload, "to"));
   if (payload.overwrite !== true && existsSync(to)) throw new Error(`Target already exists: ${String(payload.to)}`);
+  await snapshotBeforeChange(from);
+  await snapshotBeforeChange(to);
   await mkdir(path.dirname(to), { recursive: true });
   await rename(from, to);
   return { renamed: true };

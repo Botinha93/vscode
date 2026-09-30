@@ -1,21 +1,5 @@
 import * as vscode from "vscode";
-import * as path from "node:path";
-
-function workspaceFolder(): vscode.WorkspaceFolder | undefined {
-  return vscode.workspace.workspaceFolders?.[0];
-}
-
-function relativePath(fsPath: string): string {
-  const root = workspaceFolder()?.uri.fsPath;
-  if (!root) return fsPath;
-  return path.relative(root, fsPath).replace(/\\/g, "/") || fsPath;
-}
-
-function resolveFileUri(relative: string): vscode.Uri {
-  const folder = workspaceFolder();
-  if (!folder) throw new Error("No workspace folder open");
-  return vscode.Uri.joinPath(folder.uri, relative);
-}
+import { relativePath, resolveFileUri } from "./helpers";
 
 function locationToJson(loc: vscode.Location | vscode.LocationLink): Record<string, unknown> {
   if ("uri" in loc && loc.uri) {

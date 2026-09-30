@@ -1,8 +1,9 @@
 import * as vscode from "vscode";
+import { workspaceFolder } from "./helpers";
 
 export async function handleDebugStart(payload: Record<string, unknown>): Promise<unknown> {
   const configName = String(payload.name ?? payload.configName ?? "");
-  const folder = vscode.workspace.workspaceFolders?.[0];
+  const folder = workspaceFolder();
   if (!folder) throw new Error("No workspace folder open");
   const launch = vscode.workspace.getConfiguration("launch", folder.uri);
   const configurations = launch.get<Array<Record<string, unknown>>>("configurations") ?? [];
@@ -20,7 +21,7 @@ export async function handleDebugStop(): Promise<unknown> {
 }
 
 export async function handleDebugList(): Promise<unknown> {
-  const folder = vscode.workspace.workspaceFolders?.[0];
+  const folder = workspaceFolder();
   const launch = folder ? vscode.workspace.getConfiguration("launch", folder.uri) : vscode.workspace.getConfiguration("launch");
   const configurations = launch.get<Array<Record<string, unknown>>>("configurations") ?? [];
   const active = vscode.debug.activeDebugSession;

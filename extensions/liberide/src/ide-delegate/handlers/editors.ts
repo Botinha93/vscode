@@ -1,11 +1,5 @@
 import * as vscode from "vscode";
-import * as path from "node:path";
-
-function relativePath(fsPath: string): string {
-  const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  if (!root) return fsPath;
-  return path.relative(root, fsPath).replace(/\\/g, "/") || fsPath;
-}
+import { isInWorkspace, relativePath } from "./helpers";
 
 export async function handleOpenEditors(): Promise<unknown> {
   const groups = vscode.window.tabGroups.all.map((group) => ({
@@ -55,7 +49,9 @@ export async function handleDirtyBuffers(payload: Record<string, unknown>): Prom
   const buffers: Array<{ path: string; languageId: string; content: string; truncated: boolean }> = [];
   for (const doc of vscode.workspace.textDocuments) {
     if (!doc.isDirty) continue;
-    if (doc.uri.scheme !== "file") continue;
+    // Only this workspace's files: an unsaved ~/.env or another project's
+    // buffer is not the model's business.
+    if (doc.uri.scheme !== "file" || !isInWorkspace(doc.uri.fsPath)) continue;
     let content = doc.getText();
     let truncated = false;
     if (content.length > maxChars) {

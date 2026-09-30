@@ -1,62 +1,74 @@
-import * as vscode from "vscode";
+import * as path from "node:path";
+import { runLocalTerminal } from "../../terminal/local-runner";
+import {
+  agentOutputView,
+  closeAgentTerminal,
+  openAgentTerminal,
+  readAgentTerminal,
+  sendToAgentTerminal,
+} from "../../terminal/agent-terminals";
 
-const MAX_OUTPUT = 100_000;
-
-function truncate(text: string): string {
-  if (text.length <= MAX_OUTPUT) return text;
-  return `${text.slice(0, MAX_OUTPUT)}\n... [output truncated]`;
+/** `cwd` from the server, resolved against (and kept inside) the socket's folder. */
+function cwdInside(root: string, requested: unknown): string {
+  const base = path.resolve(root);
+  const cwd = path.resolve(base, typeof requested === "string" && requested ? requested : ".");
+  const rel = path.relative(base, cwd);
+  if (rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
+    throw new Error("Terminal cwd is outside the workspace folder");
+  }
+  return cwd;
 }
 
-export async function handleTerminalSession(payload: Record<string, unknown>): Promise<unknown> {
+function requireSessionId(payload: Record<string, unknown>): string {
+  const id = String(payload.sessionId ?? "");
+  if (!id) throw new Error("sessionId is required");
+  return id;
+}
+
+/**
+ * One command in a visible agent terminal tab, with its real exit code and
+ * separate stdout/stderr. The tab is reused per name instead of opening a new
+ * terminal for every call.
+ */
+export async function handleTerminalSession(root: string, payload: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
   const command = String(payload.command ?? "");
-  const cwd = String(payload.cwd ?? "");
+  if (!command) throw new Error("command is required");
+  const cwd = cwdInside(root, payload.cwd);
   const name = String(payload.name ?? "LiberIDE Agent");
   const timeoutMs = Number(payload.timeoutMs ?? 120_000);
-  if (!command) throw new Error("command is required");
+  const view = agentOutputView(name);
+  view.write(`\x1b[36m$ ${command}\x1b[0m\n`);
+  const result = await runLocalTerminal(
+    { delegateId: String(payload.delegateId ?? ""), command, cwd, timeoutMs, projectPath: root },
+    signal,
+    { onData: (text, stream) => view.write(stream === "stderr" ? `\x1b[31m${text}\x1b[0m` : text) },
+  );
+  const status = result.timedOut ? "timed out" : result.cancelled ? "cancelled" : `exit code ${result.exitCode}`;
+  view.write(`\x1b[2m[${status}]\x1b[0m\n\n`);
+  return { ...result, visibleTerminal: true };
+}
 
-  const terminal = vscode.window.createTerminal({ name, cwd, hideFromUser: false });
-  terminal.show(true);
-
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const finish = (result: unknown) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      disposable.dispose();
-      resolve(result);
-    };
-    const fail = (err: Error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      disposable.dispose();
-      reject(err);
-    };
-
-    const disposable = vscode.window.onDidStartTerminalShellExecution(async (event) => {
-      if (event.terminal !== terminal) return;
-      try {
-        const stream = event.execution.read();
-        let stdout = "";
-        for await (const chunk of stream) {
-          stdout += chunk;
-        }
-        finish({
-          exitCode: event.execution.exitCode ?? 0,
-          stdout: truncate(stdout),
-          stderr: "",
-          timedOut: false,
-        });
-      } catch (err) {
-        fail(err instanceof Error ? err : new Error(String(err)));
-      }
-    });
-
-    const timer = setTimeout(() => {
-      finish({ exitCode: null, stdout: "", stderr: "timed out", timedOut: true });
-    }, timeoutMs);
-
-    terminal.sendText(command, true);
+export async function handleTerminalSessionOpen(root: string, payload: Record<string, unknown>): Promise<unknown> {
+  return openAgentTerminal({
+    name: String(payload.name ?? "LiberIDE Session"),
+    cwd: cwdInside(root, payload.cwd),
   });
+}
+
+export async function handleTerminalSessionSend(payload: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
+  const input = String(payload.input ?? "");
+  const waitMs = payload.waitMs === undefined ? undefined : Number(payload.waitMs);
+  return sendToAgentTerminal(requireSessionId(payload), input, {
+    addNewline: payload.addNewline !== false,
+    waitMs: Number.isFinite(waitMs) ? waitMs : undefined,
+    signal,
+  });
+}
+
+export async function handleTerminalSessionRead(payload: Record<string, unknown>): Promise<unknown> {
+  return readAgentTerminal(requireSessionId(payload), payload.fromStart === true);
+}
+
+export async function handleTerminalSessionClose(payload: Record<string, unknown>): Promise<unknown> {
+  return closeAgentTerminal(requireSessionId(payload));
 }

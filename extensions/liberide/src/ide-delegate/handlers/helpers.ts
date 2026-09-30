@@ -1,9 +1,37 @@
 import * as vscode from "vscode";
 import * as path from "node:path";
 import { existsSync, realpathSync } from "node:fs";
+import { AsyncLocalStorage } from "node:async_hooks";
 
+/** The folder the current RPC request is for (each socket serves one folder). */
+const requestRoot = new AsyncLocalStorage<string>();
+
+/** Run a handler with `workspaceFolder()` bound to the request's folder. */
+export function withRequestRoot<T>(root: string, run: () => Promise<T>): Promise<T> {
+  return requestRoot.run(root, run);
+}
+
+/**
+ * The workspace folder a request targets: the one its socket serves in a
+ * multi-root workspace, otherwise the first folder.
+ */
 export function workspaceFolder(): vscode.WorkspaceFolder | undefined {
-  return vscode.workspace.workspaceFolders?.[0];
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  const root = requestRoot.getStore();
+  if (root) {
+    const target = path.resolve(root);
+    const match = folders.find((folder) => path.resolve(folder.uri.fsPath) === target);
+    if (match) return match;
+  }
+  return folders[0];
+}
+
+/** Whether an absolute path is inside the request's folder. */
+export function isInWorkspace(fsPath: string): boolean {
+  const root = workspaceFolder()?.uri.fsPath;
+  if (!root) return false;
+  const rel = path.relative(root, fsPath);
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
 }
 
 export function relativePath(fsPath: string): string {

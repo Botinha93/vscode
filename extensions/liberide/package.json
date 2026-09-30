@@ -14,8 +14,12 @@
     "onStartupFinished"
   ],
   "main": "./extension.js",
+  "enabledApiProposals": [
+    "testObserver"
+  ],
   "scripts": {
-    "build": "node esbuild.mjs"
+    "build": "node esbuild.mjs",
+    "test": "bun test test"
   },
   "capabilities": {
     "virtualWorkspaces": true,

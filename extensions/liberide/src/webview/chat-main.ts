@@ -1791,7 +1791,8 @@ function handleMessage(msg: ChatHostToWebview): void {
       state.catalog = msg.catalog;
       state.backendStatus = msg.backendStatus;
       state.apiOrigin = msg.apiOrigin;
-      state.streaming = false;
+      // A recreated view must keep Stop while the host is still streaming.
+      state.streaming = Boolean(msg.activeSession?.messages.some((message) => message.status === "streaming"));
       render();
       break;
     case "settings":

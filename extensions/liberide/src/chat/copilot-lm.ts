@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import type { ConfiguredModel, ModelCapability, ToolCallEvent } from "./types";
 import { PROVIDER_LABELS } from "./models";
 import { apiFetch } from "../api";
+import { activeWorkspaceFolder } from "../ide-delegate/context";
 
 export async function listCopilotLmModels(): Promise<ConfiguredModel[]> {
   const models = await vscode.lm.selectChatModels({ vendor: "copilot" });
@@ -63,6 +64,44 @@ function buildUserMessage(prompt: string, attachments: CopilotAttachment[]): vsc
   return vscode.LanguageModelChatMessage.User(parts);
 }
 
+/** Tool rounds per turn; the last round is sent without tools to force an answer. */
+const MAX_TOOL_ROUNDS = 12;
+/** Tools that only make sense inside the server's own loop (spawning, plans, questions). */
+const SERVER_LOOP_ONLY_TOOLS = new Set(["delegate", "discover_tools", "extend_graph", "update_plan", "ask_user"]);
+const CATALOG_TTL_MS = 60_000;
+
+interface CatalogEntry {
+  name: string;
+  description?: string;
+  inputSchema?: Record<string, unknown>;
+  parameters?: Record<string, unknown>;
+  execution?: { sideEffect?: string };
+}
+
+let catalogCache: { at: number; tools: vscode.LanguageModelChatTool[] } | undefined;
+
+/**
+ * The server's V2 tool catalog, rendered for vscode.lm. Names and schemas are
+ * the public contract `/api/tools/invoke` accepts, so the model sees real
+ * parameters and every call it makes can be executed.
+ */
+async function loadCatalogTools(): Promise<vscode.LanguageModelChatTool[]> {
+  if (catalogCache && Date.now() - catalogCache.at < CATALOG_TTL_MS) return catalogCache.tools;
+  const response = await apiFetch("/api/tools/catalog?ide=true");
+  if (!response.ok) throw new Error(`Could not load the tool catalog (${response.status})`);
+  const data = (await response.json()) as { entries?: CatalogEntry[] };
+  const tools = (data.entries ?? [])
+    .filter((entry) => /^[\w-]{1,64}$/.test(entry.name))
+    .filter((entry) => !SERVER_LOOP_ONLY_TOOLS.has(entry.name) && entry.execution?.sideEffect !== "control")
+    .map((entry) => ({
+      name: entry.name,
+      description: entry.description ?? entry.name,
+      inputSchema: entry.inputSchema ?? entry.parameters ?? { type: "object", properties: {} },
+    }));
+  catalogCache = { at: Date.now(), tools };
+  return tools;
+}
+
 export async function streamCopilotChat(input: {
   modelId: string;
   history: Array<{ role: "user" | "assistant"; content: string }>;
@@ -80,10 +119,9 @@ export async function streamCopilotChat(input: {
   let content = "";
 
   const cancellation = new vscode.CancellationTokenSource();
-  if (input.signal) {
-    if (input.signal.aborted) cancellation.cancel();
-    else input.signal.addEventListener("abort", () => cancellation.cancel(), { once: true });
-  }
+  const onAbort = () => cancellation.cancel();
+  if (input.signal?.aborted) cancellation.cancel();
+  else input.signal?.addEventListener("abort", onAbort, { once: true });
 
   const modelCaps = capabilitiesFromLm(model);
   const usable: CopilotAttachment[] = [];
@@ -96,106 +134,102 @@ export async function streamCopilotChat(input: {
     }
   }
 
-  const tools = input.toolsEnabled ? await buildToolStubs() : [];
+  const tools = input.toolsEnabled ? await loadCatalogTools() : [];
   const messages = [
     ...toLmMessages(input.history),
     buildUserMessage(input.prompt, usable),
   ];
 
-  const runOnce = async (): Promise<vscode.LanguageModelChatResponse> => {
-    return model.sendRequest(messages, { tools, toolMode: vscode.LanguageModelChatToolMode.Auto }, cancellation.token);
-  };
+  try {
+    for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
+      const lastRound = round === MAX_TOOL_ROUNDS - 1;
+      const roundTools = lastRound ? [] : tools;
+      const response = await model.sendRequest(
+        messages,
+        roundTools.length ? { tools: roundTools, toolMode: vscode.LanguageModelChatToolMode.Auto } : {},
+        cancellation.token,
+      );
 
-  let response = await runOnce();
-  for await (const part of response.stream) {
-    if (typeof part === "string") continue;
-    if ((part as any).type === "text") {
-      const text = (part as vscode.LanguageModelTextPart).value;
-      content += text;
-      input.onToken(text);
-      continue;
+      let roundText = "";
+      const calls: vscode.LanguageModelToolCallPart[] = [];
+      for await (const part of response.stream) {
+        if (part instanceof vscode.LanguageModelTextPart) {
+          roundText += part.value;
+          content += part.value;
+          input.onToken(part.value);
+        } else if (part instanceof vscode.LanguageModelToolCallPart) {
+          calls.push(part);
+        }
+      }
+      if (!calls.length) break;
+      if (lastRound) {
+        // No tools were offered this round; never execute calls the model emits anyway.
+        content += "\n\n_[Stopped after the maximum number of tool rounds.]_";
+        break;
+      }
+
+      // The assistant turn carries its text and every call; the next user
+      // turn carries one result per call, matched by callId.
+      messages.push(vscode.LanguageModelChatMessage.Assistant([
+        ...(roundText ? [new vscode.LanguageModelTextPart(roundText)] : []),
+        ...calls,
+      ]));
+      const results: vscode.LanguageModelToolResultPart[] = [];
+      for (const call of calls) {
+        if (input.signal?.aborted) throw new Error("Cancelled");
+        const args = (call.input ?? {}) as Record<string, unknown>;
+        const event: ToolCallEvent = { id: call.callId, name: call.name, arguments: args, createdAt: new Date().toISOString() };
+        toolEvents.push(event);
+        input.onToolEvent(event);
+        const result = await invokeBackendTool({ name: call.name, arguments: args }, input.signal);
+        const done: ToolCallEvent = { ...event, result };
+        toolEvents.push(done);
+        input.onToolEvent(done);
+        results.push(new vscode.LanguageModelToolResultPart(call.callId, [new vscode.LanguageModelTextPart(result || "(empty result)")]));
+      }
+      messages.push(vscode.LanguageModelChatMessage.User(results));
     }
-    if ((part as any).type === "tool_call") {
-      const call = part as vscode.LanguageModelToolCallPart;
-      const event: ToolCallEvent = {
-        id: call.callId,
-        name: call.name,
-        arguments: call.input as Record<string, unknown>,
-        createdAt: new Date().toISOString(),
-      };
-      toolEvents.push(event);
-      input.onToolEvent(event);
-
-      const result = await invokeBackendTool({
-        name: call.name,
-        arguments: call.input as Record<string, unknown>,
-      });
-
-      const done: ToolCallEvent = { ...event, result: result.result ?? JSON.stringify(result), createdAt: event.createdAt };
-      toolEvents.push(done);
-      input.onToolEvent(done);
-
-      messages.push(vscode.LanguageModelChatMessage.Assistant([call]));
-      messages.push(vscode.LanguageModelChatMessage.User([new vscode.LanguageModelToolResultPart(call.callId, [result.result ?? ""])]));
-      response = await runOnce();
-    }
-  }
-
-  // If any tool calls happened, the visible text is in the final response too.
-  if (!content) {
-    for await (const token of response.text) {
-      content += token;
-      input.onToken(token);
-    }
+  } finally {
+    input.signal?.removeEventListener("abort", onAbort);
+    cancellation.dispose();
   }
 
   return { content, toolEvents, skippedAttachments };
 }
 
-async function buildToolStubs(): Promise<vscode.LanguageModelChatTool[]> {
-  // We intentionally don't mirror all server-side schemas here.
-  // The backend is the source of truth; tools are executed via /api/tools/invoke.
-  // Provide a minimal tool list so models can request them by name.
-  const names = [
-    "ide_read_file",
-    "ide_edit_file",
-    "ide_write_file",
-    "ide_list_directory",
-    "ide_search_code",
-    "terminal_run",
-    "ide_run_command",
-  ];
-  return names.map((name) => ({
-    name,
-    description: `Invoke ${name} via ChatLLM backend`,
-    inputSchema: { type: "object" },
-  }));
-}
-
 function buildIdeContextForInvoke(): Record<string, unknown> | undefined {
-  const folder = vscode.workspace.workspaceFolders?.[0];
+  const folder = activeWorkspaceFolder();
   if (!folder) return undefined;
+  // The server rebuilds and verifies this context from the caller's connected
+  // IDE socket; only the session and folder identify it.
   return {
     sessionId: `vscode-${folder.name}`,
-    userId: "default",
     projectPath: folder.uri.fsPath,
     mode: "desktop",
     terminalExecutor: "client",
   };
 }
 
-async function invokeBackendTool(body: { name: string; arguments: Record<string, unknown> }): Promise<{ result?: string }> {
-  const ideContext = buildIdeContextForInvoke();
-  const response = await apiFetch("/api/tools/invoke", {
-    method: "POST",
-    headers: ideContext ? { "X-Terminal-Executor": "client" } : undefined,
-    body: JSON.stringify({ ...body, ideContext }),
-  });
-  if (!response.ok) {
-    const err = await response.text().catch(() => response.statusText);
-    throw new Error(err || response.statusText);
+/**
+ * Run one tool through the backend. Failures are returned as the tool result
+ * so the model can recover (fix arguments, try another tool) instead of the
+ * whole turn aborting.
+ */
+async function invokeBackendTool(body: { name: string; arguments: Record<string, unknown> }, signal?: AbortSignal): Promise<string> {
+  try {
+    const response = await apiFetch("/api/tools/invoke", {
+      method: "POST",
+      body: JSON.stringify({ ...body, ideContext: buildIdeContextForInvoke() }),
+      signal,
+    });
+    if (!response.ok) {
+      const text = await response.text().catch(() => response.statusText);
+      return JSON.stringify({ error: true, status: response.status, message: text || response.statusText });
+    }
+    const event = (await response.json()) as ToolCallEvent;
+    return typeof event.result === "string" ? event.result : JSON.stringify(event.result ?? null);
+  } catch (err) {
+    if (signal?.aborted) throw err;
+    return JSON.stringify({ error: true, message: err instanceof Error ? err.message : String(err) });
   }
-  const event = (await response.json()) as ToolCallEvent;
-  return { result: event.result };
 }
-

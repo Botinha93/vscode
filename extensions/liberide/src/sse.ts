@@ -55,11 +55,12 @@ function parseFrame(raw: string): SseEvent | null {
 export async function readSseStream(
   body: ReadableStream<Uint8Array>,
   onEvent: (event: SseEvent) => void,
-  options: { idleTimeoutMs?: number } = {},
+  options: { idleTimeoutMs?: number; onOversizedFrame?: () => void } = {},
 ): Promise<void> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let skippingOversized = false;
   const idleMs = options.idleTimeoutMs;
   try {
     while (true) {
@@ -75,16 +76,26 @@ export async function readSseStream(
           })
         : await reader.read();
       buffer += decoder.decode(chunk.value, { stream: !chunk.done });
-      if (buffer.length > MAX_BUFFER_CHARS) throw new Error("SSE frame exceeded the buffer limit.");
       const parts = buffer.split(/\r?\n\r?\n/);
       buffer = parts.pop() ?? "";
-      for (const part of parts) {
+      for (const [index, part] of parts.entries()) {
+        // The tail of an oversized frame we already dropped.
+        if (index === 0 && skippingOversized) {
+          skippingOversized = false;
+          continue;
+        }
         const frame = parseFrame(part);
         if (frame) onEvent(frame);
       }
+      // One oversized frame is dropped (and reported), not fatal to the stream.
+      if (buffer.length > MAX_BUFFER_CHARS) {
+        buffer = "";
+        skippingOversized = true;
+        options.onOversizedFrame?.();
+      }
       if (chunk.done) break;
     }
-    if (buffer.trim()) {
+    if (buffer.trim() && !skippingOversized) {
       const frame = parseFrame(buffer);
       if (frame) onEvent(frame);
     }

@@ -16,14 +16,18 @@ function cacheAction(action: vscode.CodeAction): string {
 export async function handleCodeActions(payload: Record<string, unknown>): Promise<unknown> {
   const uri = resolveFileUri(String(payload.path ?? ""));
   const range = rangeFromPayload(payload);
-  const only = payload.only ? (String(payload.only).split(",") as vscode.CodeActionKind[]) : undefined;
-  const actions =
+  // The command takes one kind string; several kinds are filtered after.
+  const kinds = payload.only ? String(payload.only).split(",").map((kind) => kind.trim()).filter(Boolean) : [];
+  const provided =
     (await vscode.commands.executeCommand<vscode.CodeAction[]>(
       "vscode.executeCodeActionProvider",
       uri,
       range,
-      only ? { only } : undefined
+      kinds.length === 1 ? kinds[0] : undefined
     )) ?? [];
+  const actions = kinds.length > 1
+    ? provided.filter((action) => kinds.some((kind) => action.kind?.value === kind || action.kind?.value.startsWith(`${kind}.`)))
+    : provided;
   return {
     actions: actions.map((action) => ({
       id: cacheAction(action),

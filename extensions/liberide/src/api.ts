@@ -5,7 +5,7 @@ import type {
   DocumentRecord,
   SharingFolder,
 } from "./chat/types";
-import { existsSync, readFileSync, unwatchFile, watchFile, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, unwatchFile, watchFile, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { backoffDelay, readSseStream } from "./sse";
 
@@ -177,6 +177,8 @@ export function refreshAuthToken(): Promise<boolean> {
         try {
           const next = { ...snapshot, authToken: body.token, expiresAt: body.expiresAt, updatedAt: new Date().toISOString() };
           writeFileSync(cachedIntegrationSource, JSON.stringify(next), { mode: 0o600 });
+          // `mode` only applies when the file is created; tighten an existing one too.
+          chmodSync(cachedIntegrationSource, 0o600);
           cachedIntegration = next;
         } catch {
           // read-only location: the in-memory token still works for this window

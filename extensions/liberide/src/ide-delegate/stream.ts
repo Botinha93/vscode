@@ -7,6 +7,7 @@ import { dispatchIdeDelegate } from "./handlers";
 
 const RECONNECT_BASE_MS = 2_000;
 const RECONNECT_MAX_MS = 30_000;
+const OUTBOX_LIMIT = 100;
 /** Must match IDE_RPC_SUBPROTOCOL on the server; echoed back on a bearer handshake. */
 const IDE_RPC_SUBPROTOCOL = "liberide.v1";
 
@@ -29,7 +30,15 @@ export class IdeDelegateStream implements vscode.Disposable {
   private authBlocked = false;
   /** Requests being handled, by JSON-RPC id, so the server can cancel them. */
   private readonly running = new Map<string, AbortController>();
+  /**
+   * Responses finished while the socket was down. The server keeps the calls
+   * open across a short reconnect, so they are delivered on the next socket.
+   */
+  private outbox: string[] = [];
+  /** API origin of the current socket; a different origin needs a new one. */
+  private connectedOrigin: string | undefined;
   private readonly offAuth: () => void;
+  private readonly focusSub: vscode.Disposable;
 
   constructor(
     private readonly target: { userId: string; projectPath: string; sessionId: string },
@@ -37,6 +46,12 @@ export class IdeDelegateStream implements vscode.Disposable {
   ) {
     this.offAuth = onAuthChanged(() => {
       if (this.closed) return;
+      // A refreshed token does not invalidate an open socket (the server
+      // re-checks it on its own); reconnecting would drop in-flight calls.
+      if (!this.authBlocked && this.ws?.readyState === WebSocket.OPEN && this.connectedOrigin === getApiOrigin()) {
+        this.log("credentials changed; keeping the open connection");
+        return;
+      }
       const wasBlocked = this.authBlocked;
       this.authBlocked = false;
       this.reconnectAttempt = 0;
@@ -45,6 +60,15 @@ export class IdeDelegateStream implements vscode.Disposable {
       this.log(wasBlocked ? "credentials changed; reconnecting" : "credentials changed; reconnecting with the new token");
       void this.connect();
     });
+    this.focusSub = vscode.window.onDidChangeWindowState((state) => {
+      if (state.focused) this.announceFocus();
+    });
+  }
+
+  /** Tell the server this window is in use, so its calls come here. */
+  private announceFocus(): void {
+    if (!vscode.window.state.focused) return;
+    this.sendJson({ jsonrpc: "2.0", method: "window.focus", params: { windowId: vscode.env.sessionId } }, false);
   }
 
   start(): void {
@@ -55,8 +79,10 @@ export class IdeDelegateStream implements vscode.Disposable {
   dispose(): void {
     this.closed = true;
     this.offAuth();
+    this.focusSub.dispose();
     for (const controller of this.running.values()) controller.abort();
     this.running.clear();
+    this.outbox = [];
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     try {
       this.ws?.close();
@@ -86,6 +112,8 @@ export class IdeDelegateStream implements vscode.Disposable {
     const url = new URL(`${wsOrigin(origin)}/api/ide/rpc`);
     url.searchParams.set("projectPath", this.target.projectPath);
     url.searchParams.set("sessionId", this.target.sessionId);
+    // Several windows can serve the same folder; the server routes per window.
+    url.searchParams.set("windowId", vscode.env.sessionId);
     return { url: url.toString(), protocols: [IDE_RPC_SUBPROTOCOL, `bearer.${base64url(token)}`] };
   }
 
@@ -115,7 +143,12 @@ export class IdeDelegateStream implements vscode.Disposable {
     ws.onopen = () => {
       opened = true;
       this.reconnectAttempt = 0;
+      this.connectedOrigin = getApiOrigin();
       this.log(`IDE RPC connected (${this.target.projectPath})`);
+      this.announceFocus();
+      const pending = this.outbox;
+      this.outbox = [];
+      for (const message of pending) ws.send(message);
     };
 
     ws.onmessage = (event) => {
@@ -150,9 +183,16 @@ export class IdeDelegateStream implements vscode.Disposable {
     };
   }
 
-  private sendJson(payload: unknown): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-    this.ws.send(JSON.stringify(payload));
+  private sendJson(payload: unknown, queueWhileDisconnected = true): void {
+    const message = JSON.stringify(payload);
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(message);
+      return;
+    }
+    if (!queueWhileDisconnected) return;
+    this.outbox.push(message);
+    // Bounded: the server stops waiting for these after its reconnect grace.
+    if (this.outbox.length > OUTBOX_LIMIT) this.outbox.shift();
   }
 
   private async handleMessage(raw: string): Promise<void> {

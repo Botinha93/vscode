@@ -1,15 +1,23 @@
 import * as vscode from "vscode";
+import { workspaceFolder } from "./helpers";
 
+/**
+ * Workspace-scoped targets only: user (global) settings apply to every
+ * project and include security switches such as workspace trust.
+ */
 const TARGET_MAP: Record<string, vscode.ConfigurationTarget> = {
-  global: vscode.ConfigurationTarget.Global,
   workspace: vscode.ConfigurationTarget.Workspace,
   workspaceFolder: vscode.ConfigurationTarget.WorkspaceFolder,
 };
 
+/** Settings the agent may never change, even in the workspace. */
+const PROTECTED_SECTIONS = /^(security|liberide|extensions|http|terminal\.integrated\.(env|shell|profiles|automationProfile))/;
+
 export async function handleConfigRead(payload: Record<string, unknown>): Promise<unknown> {
   const section = String(payload.section ?? "");
   const key = payload.key ? String(payload.key) : undefined;
-  const folder = vscode.workspace.workspaceFolders?.[0];
+  if (!section && !key) throw new Error("section or key is required; reading every setting is not supported");
+  const folder = workspaceFolder();
   const config = folder
     ? vscode.workspace.getConfiguration(section || undefined, folder.uri)
     : vscode.workspace.getConfiguration(section || undefined);
@@ -33,8 +41,11 @@ export async function handleConfigWrite(payload: Record<string, unknown>): Promi
   const key = String(payload.key ?? "");
   const value = payload.value;
   const targetName = String(payload.target ?? "workspace");
-  const target = TARGET_MAP[targetName] ?? vscode.ConfigurationTarget.Workspace;
-  const folder = vscode.workspace.workspaceFolders?.[0];
+  const target = TARGET_MAP[targetName];
+  if (target === undefined) throw new Error(`Setting target '${targetName}' is not allowed; use 'workspace' or 'workspaceFolder'`);
+  const fullKey = section ? `${section}.${key}` : key;
+  if (!key || PROTECTED_SECTIONS.test(fullKey)) throw new Error(`Setting '${fullKey}' cannot be changed by the agent`);
+  const folder = workspaceFolder();
   const config = folder
     ? vscode.workspace.getConfiguration(section || undefined, folder.uri)
     : vscode.workspace.getConfiguration(section || undefined);

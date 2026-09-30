@@ -16978,7 +16978,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
         state.catalog = msg.catalog;
         state.backendStatus = msg.backendStatus;
         state.apiOrigin = msg.apiOrigin;
-        state.streaming = false;
+        state.streaming = Boolean(msg.activeSession?.messages.some((message) => message.status === "streaming"));
         render();
         break;
       case "settings":
