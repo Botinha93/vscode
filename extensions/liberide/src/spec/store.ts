@@ -2,8 +2,14 @@ import * as vscode from "vscode";
 import { extractSectionIds, parseBlockerItems, parseDocumentationItems, parseFeatureStatus, parseTaskContract, type BlockerItem, type DocumentationItem, type FeatureSpec, type TaskContract } from "./schema";
 import { readTextFile } from "./writer";
 
-/** Spec files in any workspace folder. */
-export const SPEC_WATCH_GLOB = "**/.liberide/specs/**/*.md";
+/**
+ * Everything under `.liberide/specs` in any workspace folder. Directories are
+ * matched too: when a whole feature folder is created or deleted at once
+ * (git checkout, `rm -r`, an external agent), the file watcher may report only
+ * the folder event and drop the child `.md` events, so a `*.md`-only glob would
+ * leave the Specs tree stale.
+ */
+export const SPEC_WATCH_GLOB = "**/.liberide/specs/**";
 
 export class SpecStore implements vscode.Disposable {
   private readonly changeEmitter = new vscode.EventEmitter<void>();

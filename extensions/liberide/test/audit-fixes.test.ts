@@ -170,6 +170,13 @@ describe("spec watcher glob", () => {
     expect(glob.match("/work/app/.liberide/specs/f/tasks/T1.md")).toBe(true);
     expect(glob.match("/work/app/src/readme.md")).toBe(false);
   });
+
+  test("matches feature folders so folder-level create/delete refreshes", () => {
+    const glob = new Bun.Glob(SPEC_WATCH_GLOB);
+    expect(glob.match("/work/app/.liberide/specs/feature")).toBe(true);
+    expect(glob.match("/work/app/.liberide/specs/feature/tasks")).toBe(true);
+    expect(glob.match("/work/app/.liberide/other/feature")).toBe(false);
+  });
 });
 
 describe("workspace symbol paging", () => {

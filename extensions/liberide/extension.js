@@ -1750,7 +1750,7 @@ function conversationHasProjectTag(identity, tags) {
 function isJsonRpcRequest(value) {
   if (!value || typeof value !== "object") return false;
   const record2 = value;
-  return record2.jsonrpc === "2.0" && typeof record2.id === "string" && typeof record2.method === "string";
+  return record2["jsonrpc"] === "2.0" && typeof record2["id"] === "string" && typeof record2["method"] === "string";
 }
 
 // ../../../packages/shared/src/chat-commands.ts
@@ -16289,11 +16289,11 @@ var handoffPayloadKindSchema = external_exports.enum([
   "TestReport",
   "ResearchFinding"
 ]);
-var baseHandoff = external_exports.object({
+var baseHandoffSchema = external_exports.object({
   kind: handoffPayloadKindSchema,
   summary: external_exports.string().optional()
 });
-var planSpecHandoffSchema = baseHandoff.extend({
+var planSpecHandoffSchema = baseHandoffSchema.extend({
   kind: external_exports.literal("PlanSpec"),
   steps: external_exports.array(external_exports.object({
     id: external_exports.string(),
@@ -16307,7 +16307,7 @@ var planSpecHandoffSchema = baseHandoff.extend({
   })).optional(),
   // Structured planning lists (optional for back-compat with older planners).
   // `dependsOn` + `blocking` make non-blocking features explicit: a feature with
-  // no unmet dependency and `blocking !== true` is eligible for parallel execution.
+  // no unmet dependency and `blocking !== true` is eligible for parallel (swarm) execution.
   features: external_exports.array(external_exports.object({
     id: external_exports.string(),
     title: external_exports.string(),
@@ -16316,12 +16316,14 @@ var planSpecHandoffSchema = baseHandoff.extend({
     blocking: external_exports.boolean().optional(),
     docsRequired: external_exports.boolean().optional()
   })).optional(),
+  // Documentation tasks, optionally tied to a feature via `featureId`.
   documentation: external_exports.array(external_exports.object({
     id: external_exports.string(),
     title: external_exports.string(),
     target: external_exports.string().optional(),
     featureId: external_exports.string().optional()
   })).optional(),
+  // Blockers / risks. `hard` severity gates execution (routes to approval).
   blockers: external_exports.array(external_exports.object({
     id: external_exports.string(),
     title: external_exports.string(),
@@ -16330,7 +16332,7 @@ var planSpecHandoffSchema = baseHandoff.extend({
     blocksFeatureIds: external_exports.array(external_exports.string()).optional()
   })).optional()
 });
-var findingsHandoffSchema = baseHandoff.extend({
+var findingsHandoffSchema = baseHandoffSchema.extend({
   kind: external_exports.literal("Findings"),
   findings: external_exports.array(external_exports.object({
     title: external_exports.string(),
@@ -16338,7 +16340,7 @@ var findingsHandoffSchema = baseHandoff.extend({
     source: external_exports.string().optional()
   }))
 });
-var patchHandoffSchema = baseHandoff.extend({
+var patchHandoffSchema = baseHandoffSchema.extend({
   kind: external_exports.literal("Patch"),
   files: external_exports.array(external_exports.object({
     path: external_exports.string(),
@@ -16346,7 +16348,7 @@ var patchHandoffSchema = baseHandoff.extend({
     sizeBytes: external_exports.number().optional()
   }))
 });
-var verificationReportHandoffSchema = baseHandoff.extend({
+var verificationReportHandoffSchema = baseHandoffSchema.extend({
   kind: external_exports.literal("VerificationReport"),
   passed: external_exports.boolean(),
   stages: external_exports.array(external_exports.object({
@@ -16355,15 +16357,15 @@ var verificationReportHandoffSchema = baseHandoff.extend({
     details: external_exports.string().optional()
   }))
 });
-var summaryHandoffSchema = baseHandoff.extend({
+var summaryHandoffSchema = baseHandoffSchema.extend({
   kind: external_exports.literal("Summary"),
   body: external_exports.string()
 });
-var genericHandoffSchema = baseHandoff.extend({
+var genericHandoffSchema = baseHandoffSchema.extend({
   kind: external_exports.literal("Generic"),
   data: external_exports.record(external_exports.string(), external_exports.unknown())
 });
-var testReportHandoffSchema = baseHandoff.extend({
+var testReportHandoffSchema = baseHandoffSchema.extend({
   kind: external_exports.literal("TestReport"),
   passed: external_exports.boolean(),
   failures: external_exports.array(external_exports.object({
@@ -16371,7 +16373,7 @@ var testReportHandoffSchema = baseHandoff.extend({
     message: external_exports.string().optional()
   })).default([])
 });
-var researchFindingHandoffSchema = baseHandoff.extend({
+var researchFindingHandoffSchema = baseHandoffSchema.extend({
   kind: external_exports.literal("ResearchFinding"),
   tracks: external_exports.array(external_exports.object({
     title: external_exports.string(),
@@ -18769,7 +18771,7 @@ function randomNonce2() {
 
 // src/spec/store.ts
 var vscode10 = __toESM(require("vscode"));
-var SPEC_WATCH_GLOB = "**/.liberide/specs/**/*.md";
+var SPEC_WATCH_GLOB = "**/.liberide/specs/**";
 var SpecStore = class {
   constructor(output) {
     this.output = output;

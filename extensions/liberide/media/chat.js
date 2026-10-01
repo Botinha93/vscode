@@ -14654,11 +14654,11 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     "TestReport",
     "ResearchFinding"
   ]);
-  var baseHandoff = external_exports.object({
+  var baseHandoffSchema = external_exports.object({
     kind: handoffPayloadKindSchema,
     summary: external_exports.string().optional()
   });
-  var planSpecHandoffSchema = baseHandoff.extend({
+  var planSpecHandoffSchema = baseHandoffSchema.extend({
     kind: external_exports.literal("PlanSpec"),
     steps: external_exports.array(external_exports.object({
       id: external_exports.string(),
@@ -14672,7 +14672,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     })).optional(),
     // Structured planning lists (optional for back-compat with older planners).
     // `dependsOn` + `blocking` make non-blocking features explicit: a feature with
-    // no unmet dependency and `blocking !== true` is eligible for parallel execution.
+    // no unmet dependency and `blocking !== true` is eligible for parallel (swarm) execution.
     features: external_exports.array(external_exports.object({
       id: external_exports.string(),
       title: external_exports.string(),
@@ -14681,12 +14681,14 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
       blocking: external_exports.boolean().optional(),
       docsRequired: external_exports.boolean().optional()
     })).optional(),
+    // Documentation tasks, optionally tied to a feature via `featureId`.
     documentation: external_exports.array(external_exports.object({
       id: external_exports.string(),
       title: external_exports.string(),
       target: external_exports.string().optional(),
       featureId: external_exports.string().optional()
     })).optional(),
+    // Blockers / risks. `hard` severity gates execution (routes to approval).
     blockers: external_exports.array(external_exports.object({
       id: external_exports.string(),
       title: external_exports.string(),
@@ -14695,7 +14697,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
       blocksFeatureIds: external_exports.array(external_exports.string()).optional()
     })).optional()
   });
-  var findingsHandoffSchema = baseHandoff.extend({
+  var findingsHandoffSchema = baseHandoffSchema.extend({
     kind: external_exports.literal("Findings"),
     findings: external_exports.array(external_exports.object({
       title: external_exports.string(),
@@ -14703,7 +14705,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
       source: external_exports.string().optional()
     }))
   });
-  var patchHandoffSchema = baseHandoff.extend({
+  var patchHandoffSchema = baseHandoffSchema.extend({
     kind: external_exports.literal("Patch"),
     files: external_exports.array(external_exports.object({
       path: external_exports.string(),
@@ -14711,7 +14713,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
       sizeBytes: external_exports.number().optional()
     }))
   });
-  var verificationReportHandoffSchema = baseHandoff.extend({
+  var verificationReportHandoffSchema = baseHandoffSchema.extend({
     kind: external_exports.literal("VerificationReport"),
     passed: external_exports.boolean(),
     stages: external_exports.array(external_exports.object({
@@ -14720,15 +14722,15 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
       details: external_exports.string().optional()
     }))
   });
-  var summaryHandoffSchema = baseHandoff.extend({
+  var summaryHandoffSchema = baseHandoffSchema.extend({
     kind: external_exports.literal("Summary"),
     body: external_exports.string()
   });
-  var genericHandoffSchema = baseHandoff.extend({
+  var genericHandoffSchema = baseHandoffSchema.extend({
     kind: external_exports.literal("Generic"),
     data: external_exports.record(external_exports.string(), external_exports.unknown())
   });
-  var testReportHandoffSchema = baseHandoff.extend({
+  var testReportHandoffSchema = baseHandoffSchema.extend({
     kind: external_exports.literal("TestReport"),
     passed: external_exports.boolean(),
     failures: external_exports.array(external_exports.object({
@@ -14736,7 +14738,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
       message: external_exports.string().optional()
     })).default([])
   });
-  var researchFindingHandoffSchema = baseHandoff.extend({
+  var researchFindingHandoffSchema = baseHandoffSchema.extend({
     kind: external_exports.literal("ResearchFinding"),
     tracks: external_exports.array(external_exports.object({
       title: external_exports.string(),
