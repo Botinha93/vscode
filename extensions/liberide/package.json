@@ -158,6 +158,11 @@
         "category": "LiberIDE"
       },
       {
+        "command": "liberide.runWorkflow",
+        "title": "Run Workflow\u2026",
+        "category": "LiberIDE"
+      },
+      {
         "command": "liberide.refreshSpecs",
         "title": "Refresh Specs",
         "category": "LiberIDE"

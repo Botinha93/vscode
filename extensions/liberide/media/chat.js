@@ -15711,7 +15711,6 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
       });
       row.querySelector(".session-delete")?.addEventListener("click", (event) => {
         event.stopPropagation();
-        if (!window.confirm(`Delete "${s.title}"? This cannot be undone.`)) return;
         send({ type: "deleteSession", sessionId: s.id });
       });
       list.appendChild(row);
@@ -16249,17 +16248,18 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     turn.querySelectorAll(".edit-file-row").forEach((btn) => {
       btn.addEventListener("click", () => {
         const path = btn.dataset.path;
-        if (path) send({ type: "revealFile", path });
+        const file2 = message.editedFiles?.find((f) => f.path === path);
+        if (path) send({ type: "revealFile", path, root: file2?.root });
       });
     });
     turn.querySelector('[data-act="undo-all"]')?.addEventListener("click", () => {
       const files = message.editedFiles ?? [];
-      if (!files.length || !window.confirm(`Revert ${files.length} edited file${files.length === 1 ? "" : "s"} to the last git state?`)) return;
-      for (const f of files) send({ type: "undoEdit", path: f.path });
+      const sessionId = state.activeSession?.id;
+      if (files.length && sessionId) send({ type: "undoEdits", sessionId, files: files.map((f) => ({ path: f.path, root: f.root })) });
     });
     turn.querySelector('[data-act="review-all"]')?.addEventListener("click", () => {
       const first = message.editedFiles?.[0];
-      if (first) send({ type: "revealFile", path: first.path });
+      if (first) send({ type: "revealFile", path: first.path, root: first.root });
     });
   }
   function updateAssistantMetaInDom(messageId) {
@@ -16760,6 +16760,10 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     <pre class="md-pre"><code class="${cls.trim()}">${highlighted}</code></pre>
   </div>`;
   }
+  function isSafeLinkHref(href) {
+    const trimmed = href.trim();
+    return /^(https?:\/\/|mailto:)/i.test(trimmed);
+  }
   function renderInline(text) {
     let out = "";
     let i = 0;
@@ -16779,7 +16783,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
           if (hrefEnd > labelEnd) {
             const alt = text.slice(i + 2, labelEnd);
             const src = text.slice(labelEnd + 2, hrefEnd);
-            out += /^data:image\//i.test(src) ? `<img src="${escapeAttr(src)}" alt="${escapeAttr(alt)}" class="md-image" loading="lazy" />` : `<a href="${escapeAttr(src)}" class="md-image-link" title="${escapeAttr(src)}">${escapeHtml2(alt || "image")}</a>`;
+            out += /^data:image\//i.test(src) ? `<img src="${escapeAttr(src)}" alt="${escapeAttr(alt)}" class="md-image" loading="lazy" />` : isSafeLinkHref(src) ? `<a href="${escapeAttr(src)}" class="md-image-link" title="${escapeAttr(src)}">${escapeHtml2(alt || "image")}</a>` : escapeHtml2(alt || "image");
             i = hrefEnd + 1;
             continue;
           }
@@ -16792,7 +16796,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
           if (hrefEnd > labelEnd) {
             const label = text.slice(i + 1, labelEnd);
             const href = text.slice(labelEnd + 2, hrefEnd);
-            out += `<a class="md-link" href="${escapeAttr(href)}" target="_blank" rel="noopener">${renderInline(label)}</a>`;
+            out += isSafeLinkHref(href) ? `<a class="md-link" href="${escapeAttr(href)}" target="_blank" rel="noopener">${renderInline(label)}</a>` : `<span class="md-link-blocked" title="${escapeAttr(href)}">${renderInline(label)}</span>`;
             i = hrefEnd + 1;
             continue;
           }

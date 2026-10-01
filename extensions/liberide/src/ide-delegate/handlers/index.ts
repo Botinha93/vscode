@@ -65,7 +65,7 @@ const TRUST_REQUIRED_KINDS: ReadonlySet<IdeDelegateKind> = new Set<IdeDelegateKi
 
 export async function dispatchIdeDelegate(request: IdeDelegatePayload): Promise<unknown> {
   // Each socket serves one workspace folder; bind handlers to it.
-  return withRequestRoot(request.target.projectPath, () => dispatchInFolder(request));
+  return withRequestRoot(request.target.projectPath, () => dispatchInFolder(request), request.target.conversationId);
 }
 
 async function dispatchInFolder(request: IdeDelegatePayload): Promise<unknown> {

@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "child_process";
 import * as path from "path";
 import type { TerminalDelegateEvent } from "../chat/types";
+import { childProcessEnv } from "../api";
 
 export interface LocalTerminalResult {
   exitCode: number | null;
@@ -55,6 +56,48 @@ function shellArgv(command: string): string[] {
   return [shell, "-c", command];
 }
 
+/**
+ * Every process group this extension started and that is still running.
+ * They are spawned detached (own group, so Stop can kill descendants), which
+ * also means they outlive the extension host unless we kill them on the way out.
+ */
+const liveProcesses = new Set<ChildProcess>();
+
+/** Track a spawned process until it exits, so shutdown can kill its group. */
+export function trackProcess(proc: ChildProcess): void {
+  liveProcesses.add(proc);
+  proc.once("exit", () => liveProcesses.delete(proc));
+  proc.once("error", () => liveProcesses.delete(proc));
+}
+
+/** Kill every tracked process group immediately (deactivate / host exit). */
+export function killAllProcesses(): void {
+  for (const proc of liveProcesses) {
+    if (proc.pid === undefined || proc.exitCode !== null) continue;
+    try {
+      if (process.platform === "win32") proc.kill();
+      else process.kill(-proc.pid, "SIGKILL");
+    } catch {
+      try { proc.kill("SIGKILL"); } catch { /* already gone */ }
+    }
+  }
+  liveProcesses.clear();
+}
+
+// Synchronous last chance when the host exits without calling deactivate.
+process.once("exit", killAllProcesses);
+
+/** Signal a process's whole group (POSIX); falls back to the process itself. */
+export function signalGroup(proc: ChildProcess, signal: NodeJS.Signals): void {
+  if (proc.pid === undefined) return;
+  try {
+    if (process.platform === "win32") throw new Error("no process groups");
+    process.kill(-proc.pid, signal);
+  } catch {
+    try { proc.kill(signal); } catch { /* already gone */ }
+  }
+}
+
 /** Kill the whole tree: `proc.kill()` alone leaves the shell's children running. */
 export function killTree(proc: ChildProcess): void {
   if (proc.pid === undefined || proc.exitCode !== null) return;
@@ -62,16 +105,9 @@ export function killTree(proc: ChildProcess): void {
     spawn("taskkill", ["/pid", String(proc.pid), "/T", "/F"], { windowsHide: true }).on("error", () => undefined);
     return;
   }
-  const signalGroup = (signal: NodeJS.Signals) => {
-    try {
-      process.kill(-proc.pid!, signal);
-    } catch {
-      try { proc.kill(signal); } catch { /* already gone */ }
-    }
-  };
-  signalGroup("SIGTERM");
+  signalGroup(proc, "SIGTERM");
   setTimeout(() => {
-    if (proc.exitCode === null && proc.signalCode === null) signalGroup("SIGKILL");
+    if (proc.exitCode === null && proc.signalCode === null) signalGroup(proc, "SIGKILL");
   }, KILL_GRACE_MS).unref();
 }
 
@@ -92,12 +128,13 @@ export function runLocalTerminal(
     const proc = spawn(argv[0]!, argv.slice(1), {
       cwd,
       // The user's own environment (HOME, git/ssh config, caches) is what a
-      // command in their workspace expects.
-      env: process.env,
+      // command in their workspace expects, minus LiberIDE credentials.
+      env: childProcessEnv(),
       windowsHide: true,
       // Own process group so a timeout or Stop can kill every descendant.
       detached: process.platform !== "win32",
     });
+    trackProcess(proc);
 
     const stdout = new OutputBuffer();
     const stderr = new OutputBuffer();

@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import * as path from "node:path";
 import { resolveInsideRootSync } from "./helpers";
+import { redactUnifiedDiff } from "./redaction";
 
 /** Subset of the vscode.git v1 API (see extensions/git/src/api/git.d.ts). */
 type GitRepository = {
@@ -92,7 +93,8 @@ export async function handleGitDiff(root: string, payload: Record<string, unknow
   } else {
     text = await repo.diff(staged);
   }
-  return { path: relPath ?? ".", staged, diff: truncate(text ?? "", maxBytes) };
+  // Secret files' hunks are redacted like a read of the file would be.
+  return { path: relPath ?? ".", staged, diff: truncate(redactUnifiedDiff(text ?? "", relPath), maxBytes) };
 }
 
 export async function handleGitBlame(root: string, payload: Record<string, unknown>): Promise<unknown> {

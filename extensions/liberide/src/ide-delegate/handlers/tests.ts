@@ -37,10 +37,13 @@ function rangeJson(range: vscode.Range | undefined): Record<string, number> | un
 }
 
 export async function handleTestsList(): Promise<unknown> {
-  const all = flatten(testObserver().tests);
+  const controllerOf = new Map<vscode.TestItem, string>();
+  for (const root of testObserver().tests) for (const item of flatten([root])) controllerOf.set(item, root.id);
+  const all = [...controllerOf.keys()];
   return {
     tests: all.slice(0, MAX_LISTED_TESTS).map((item) => ({
       id: item.id,
+      controllerId: controllerOf.get(item),
       label: item.label,
       path: item.uri ? relativePath(item.uri.fsPath) : undefined,
       range: rangeJson(item.range),
@@ -111,9 +114,16 @@ function summarize(result: vscode.TestRunResult, summary: TestRunSummary): void 
  */
 export async function handleTestsRun(payload: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
   const ids = new Set(Array.isArray(payload.testIds) ? payload.testIds.map(String) : []);
-  const all = flatten(testObserver().tests);
-  const include = ids.size ? all.filter((item) => ids.has(item.id)) : undefined;
-  if (ids.size && !include?.length) throw new Error(`No tests found for ids: ${[...ids].join(", ")}. Use the test list tool to get ids.`);
+  const controllerId = typeof payload.controllerId === "string" && payload.controllerId ? payload.controllerId : undefined;
+  // The observer's top-level items are the controllers' roots (their id is the controller id).
+  const roots = testObserver().tests;
+  const scoped = controllerId ? roots.filter((item) => item.id === controllerId) : [...roots];
+  if (controllerId && !scoped.length) {
+    throw new Error(`No test controller '${controllerId}'. Known: ${roots.map((item) => item.id).join(", ") || "(none)"}`);
+  }
+  const all = flatten(scoped);
+  const include = ids.size ? all.filter((item) => ids.has(item.id)) : controllerId ? scoped : undefined;
+  if (ids.size && !include?.length) throw new Error(`No tests found for ids: ${[...ids].join(", ")}${controllerId ? ` in controller '${controllerId}'` : ""}. Use the test list tool to get ids.`);
 
   const runId = `test-${Date.now()}`;
   const summary: TestRunSummary = { runId, status: "running", startedAt: new Date().toISOString() };

@@ -355,7 +355,7 @@ function renderSidebar(): void {
     });
     row.querySelector<HTMLButtonElement>(".session-delete")?.addEventListener("click", (event) => {
       event.stopPropagation();
-      if (!window.confirm(`Delete "${s.title}"? This cannot be undone.`)) return;
+      // The host asks for confirmation (webviews cannot show modal dialogs).
       send({ type: "deleteSession", sessionId: s.id });
     });
     list.appendChild(row);
@@ -964,17 +964,19 @@ function bindAssistantMeta(turn: HTMLElement, message: ChatMessage): void {
   turn.querySelectorAll<HTMLButtonElement>(".edit-file-row").forEach((btn) => {
     btn.addEventListener("click", () => {
       const path = btn.dataset.path;
-      if (path) send({ type: "revealFile", path });
+      const file = message.editedFiles?.find((f) => f.path === path);
+      if (path) send({ type: "revealFile", path, root: file?.root });
     });
   });
   turn.querySelector<HTMLButtonElement>('[data-act="undo-all"]')?.addEventListener("click", () => {
     const files = message.editedFiles ?? [];
-    if (!files.length || !window.confirm(`Revert ${files.length} edited file${files.length === 1 ? "" : "s"} to the last git state?`)) return;
-    for (const f of files) send({ type: "undoEdit", path: f.path });
+    const sessionId = state.activeSession?.id;
+    // The host confirms with a modal dialog and undoes from this chat's snapshots.
+    if (files.length && sessionId) send({ type: "undoEdits", sessionId, files: files.map((f) => ({ path: f.path, root: f.root })) });
   });
   turn.querySelector<HTMLButtonElement>('[data-act="review-all"]')?.addEventListener("click", () => {
     const first = message.editedFiles?.[0];
-    if (first) send({ type: "revealFile", path: first.path });
+    if (first) send({ type: "revealFile", path: first.path, root: first.root });
   });
 }
 
@@ -1560,6 +1562,12 @@ function renderFenced(lang: string, code: string): string {
   </div>`;
 }
 
+/** Links from model output: only web and mail links (no javascript:, command:, vscode:, file: ...). */
+function isSafeLinkHref(href: string): boolean {
+  const trimmed = href.trim();
+  return /^(https?:\/\/|mailto:)/i.test(trimmed);
+}
+
 function renderInline(text: string): string {
   // Tokenise: code spans first, then images/links, then bold/italic, then autolinks.
   let out = "";
@@ -1584,7 +1592,9 @@ function renderInline(text: string): string {
           // URL encodes); show them as links instead. The CSP blocks them too.
           out += /^data:image\//i.test(src)
             ? `<img src="${escapeAttr(src)}" alt="${escapeAttr(alt)}" class="md-image" loading="lazy" />`
-            : `<a href="${escapeAttr(src)}" class="md-image-link" title="${escapeAttr(src)}">${escapeHtml(alt || "image")}</a>`;
+            : isSafeLinkHref(src)
+              ? `<a href="${escapeAttr(src)}" class="md-image-link" title="${escapeAttr(src)}">${escapeHtml(alt || "image")}</a>`
+              : escapeHtml(alt || "image");
           i = hrefEnd + 1;
           continue;
         }
@@ -1597,7 +1607,9 @@ function renderInline(text: string): string {
         if (hrefEnd > labelEnd) {
           const label = text.slice(i + 1, labelEnd);
           const href = text.slice(labelEnd + 2, hrefEnd);
-          out += `<a class="md-link" href="${escapeAttr(href)}" target="_blank" rel="noopener">${renderInline(label)}</a>`;
+          out += isSafeLinkHref(href)
+            ? `<a class="md-link" href="${escapeAttr(href)}" target="_blank" rel="noopener">${renderInline(label)}</a>`
+            : `<span class="md-link-blocked" title="${escapeAttr(href)}">${renderInline(label)}</span>`;
           i = hrefEnd + 1;
           continue;
         }

@@ -1,24 +1,35 @@
 import * as vscode from "vscode";
 import { isInWorkspace, relativePath } from "./helpers";
+import { redactIfSecret } from "./redaction";
+
+/** A document of this request's workspace folder (not another project, not ~/.env). */
+function inWorkspace(uri: vscode.Uri): boolean {
+  return uri.scheme === "file" && isInWorkspace(uri.fsPath);
+}
+
+/** A tab's path when it belongs to the workspace; other tabs are listed by label only. */
+function tabPath(uri: vscode.Uri | undefined, label: string): string {
+  return uri && inWorkspace(uri) ? relativePath(uri.fsPath) : label;
+}
 
 export async function handleOpenEditors(): Promise<unknown> {
   const groups = vscode.window.tabGroups.all.map((group) => ({
     activeTab: group.activeTab
       ? {
           label: group.activeTab.label,
-          input: group.activeTab.input instanceof vscode.TabInputText
-            ? relativePath(group.activeTab.input.uri.fsPath)
-            : group.activeTab.label,
+          input: tabPath(group.activeTab.input instanceof vscode.TabInputText ? group.activeTab.input.uri : undefined, group.activeTab.label),
         }
       : null,
     tabs: group.tabs.map((tab) => {
       const input = tab.input;
-      const filePath =
+      const filePath = tabPath(
         input instanceof vscode.TabInputText
-          ? relativePath(input.uri.fsPath)
+          ? input.uri
           : input instanceof vscode.TabInputTextDiff
-            ? relativePath(input.modified.fsPath)
-            : tab.label;
+            ? input.modified
+            : undefined,
+        tab.label,
+      );
       return {
         label: tab.label,
         path: filePath,
@@ -31,7 +42,7 @@ export async function handleOpenEditors(): Promise<unknown> {
   const active = vscode.window.activeTextEditor;
   return {
     tabGroups: groups,
-    activeEditor: active
+    activeEditor: active && inWorkspace(active.document.uri)
       ? {
           path: relativePath(active.document.uri.fsPath),
           languageId: active.document.languageId,
@@ -46,13 +57,14 @@ export async function handleOpenEditors(): Promise<unknown> {
 
 export async function handleDirtyBuffers(payload: Record<string, unknown>): Promise<unknown> {
   const maxChars = Number(payload.maxChars ?? 500_000);
-  const buffers: Array<{ path: string; languageId: string; content: string; truncated: boolean }> = [];
+  const buffers: Array<{ path: string; languageId: string; content: string; truncated: boolean; redacted?: boolean }> = [];
   for (const doc of vscode.workspace.textDocuments) {
     if (!doc.isDirty) continue;
     // Only this workspace's files: an unsaved ~/.env or another project's
     // buffer is not the model's business.
-    if (doc.uri.scheme !== "file" || !isInWorkspace(doc.uri.fsPath)) continue;
-    let content = doc.getText();
+    if (!inWorkspace(doc.uri)) continue;
+    const { text, redacted } = redactIfSecret(doc.uri.fsPath, doc.getText());
+    let content = text;
     let truncated = false;
     if (content.length > maxChars) {
       content = content.slice(0, maxChars);
@@ -63,6 +75,7 @@ export async function handleDirtyBuffers(payload: Record<string, unknown>): Prom
       languageId: doc.languageId,
       content,
       truncated,
+      ...(redacted ? { redacted } : {}),
     });
   }
   return { buffers, count: buffers.length };
@@ -71,11 +84,14 @@ export async function handleDirtyBuffers(payload: Record<string, unknown>): Prom
 export async function handleActiveSelection(): Promise<unknown> {
   const editor = vscode.window.activeTextEditor;
   if (!editor) return { available: false };
+  // Same scope as dirty buffers: a selection in another project is not shared.
+  if (!inWorkspace(editor.document.uri)) return { available: false, reason: "The active editor is outside this workspace folder" };
   const sel = editor.selection;
-  const text = editor.document.getText(sel);
+  const { text, redacted } = redactIfSecret(editor.document.uri.fsPath, editor.document.getText(sel));
   return {
     path: relativePath(editor.document.uri.fsPath),
     text,
+    ...(redacted ? { redacted } : {}),
     startLine: sel.start.line + 1,
     startCharacter: sel.start.character,
     endLine: sel.end.line + 1,

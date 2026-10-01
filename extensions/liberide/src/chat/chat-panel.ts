@@ -1,6 +1,8 @@
 import * as vscode from "vscode";
 import { resetPreEditSnapshots, restorePreEditSnapshot } from "../ide-delegate/handlers/fs";
-import { resolveInsideRootSync } from "../ide-delegate/handlers/helpers";
+import { isPathInside, resolveInsideRootSync } from "../ide-delegate/handlers/helpers";
+import { randomBytes } from "node:crypto";
+import * as nodePath from "node:path";
 import {
   addConversationToFolder,
   apiFetch,
@@ -85,7 +87,7 @@ import { basename } from "node:path";
 import { parseTaskContract } from "../spec/schema";
 import type { SpecStore } from "../spec/store";
 import { regenerateTasksIndex, scaffoldFeature, writeTaskContract, writeTextFile } from "../spec/writer";
-import { buildIdeContextPayload } from "../ide-delegate/context";
+import { activeWorkspaceFolder, buildIdeContextPayload } from "../ide-delegate/context";
 
 const OVERRIDES_STORAGE_KEY = "liberide.chat.overrides";
 const ACTIVE_SESSION_STORAGE_KEY = "liberide.chat.activeSession";
@@ -115,6 +117,8 @@ interface ActiveStream {
   startedAt: number;
   tools: Map<string, ToolTimelineEntry>;
   edits: Map<string, EditedFileSummary>;
+  /** Workspace folder the turn's tools work in; edit cards carry it for Undo/Review. */
+  root?: string;
 }
 
 interface GraphWatcher {
@@ -403,9 +407,13 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
         case "openSession":
           await this.openSession(message.sessionId);
           break;
-        case "deleteSession":
-          await this.removeSession(message.sessionId);
+        case "deleteSession": {
+          // The webview sandbox has no modals (window.confirm is a no-op): confirm here.
+          const title = this.findSession(message.sessionId)?.title ?? "this chat";
+          const choice = await vscode.window.showWarningMessage(`Delete "${title}"? This cannot be undone.`, { modal: true }, "Delete");
+          if (choice === "Delete") await this.removeSession(message.sessionId);
           break;
+        }
         case "renameSession":
           await this.renameSession(message.sessionId, message.title);
           break;
@@ -461,10 +469,10 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
           await this.copilotGithubLogin();
           break;
         case "revealFile":
-          await this.revealFile(message.path);
+          await this.revealFile(message.path, message.root);
           break;
-        case "undoEdit":
-          await this.undoEdit(message.path);
+        case "undoEdits":
+          await this.undoEdits(message.sessionId, message.files);
           break;
       }
     } catch (err) {
@@ -1204,7 +1212,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       ideContext: this.buildIdeContext(conversationId),
     };
 
-    const { abort, streamState } = this.beginTurn(conversationId, assistantMessage);
+    const { abort, streamState } = this.beginTurn(conversationId, assistantMessage, body.ideContext?.projectPath);
     const turn = this.createTurnHandlers(conversationId, assistantMessage, streamState, content);
     try {
       const handlers = turn.handlers;
@@ -1266,9 +1274,10 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
   // Turn lifecycle shared by chat, pipeline generation and approval resume
   // ---------------------------------------------------------------------------
 
-  private beginTurn(conversationId: string, assistantMessage: ConversationMessage): { abort: AbortController; streamState: ActiveStream } {
-    // Undo snapshots cover the edits of the turn that is starting.
-    resetPreEditSnapshots();
+  private beginTurn(conversationId: string, assistantMessage: ConversationMessage, root?: string): { abort: AbortController; streamState: ActiveStream } {
+    // Undo snapshots cover the edits of the turn that is starting, in this
+    // conversation only: another chat's turn keeps its own baseline.
+    resetPreEditSnapshots(conversationId);
     const abort = new AbortController();
     const streamState: ActiveStream = {
       abort,
@@ -1276,6 +1285,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       startedAt: Date.now(),
       tools: new Map(),
       edits: new Map(),
+      root: root ?? activeWorkspaceFolder()?.uri.fsPath,
     };
     this.streams.set(conversationId, streamState);
     this.broadcast({
@@ -1781,13 +1791,37 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     }
   }
 
-  private async revealFile(relativePath: string): Promise<void> {
-    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
-    if (!root) {
-      this.broadcast({ type: "log", message: "No workspace folder open." });
+  /**
+   * The workspace folder an edit card refers to: the root it recorded (only
+   * if still open), else the only folder. With several folders and no
+   * recorded root there is no safe guess.
+   */
+  private editRoot(root: string | undefined): vscode.WorkspaceFolder | undefined {
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    if (root) return folders.find((folder) => nodePath.resolve(folder.uri.fsPath) === nodePath.resolve(root));
+    return folders.length === 1 ? folders[0] : undefined;
+  }
+
+  private async revealFile(relativePath: string, root?: string): Promise<void> {
+    const folder = this.editRoot(root);
+    if (!folder) {
+      this.broadcast({ type: "log", message: root ? `The folder ${root} is no longer open.` : "No workspace folder for this file." });
       return;
     }
-    const target = vscode.Uri.joinPath(root, relativePath.replace(/^\/+/, ""));
+    const clean = relativePath.replace(/^\/+/, "");
+    let target: vscode.Uri;
+    try {
+      if (folder.uri.scheme === "file") {
+        target = vscode.Uri.file(resolveInsideRootSync(folder.uri.fsPath, clean));
+      } else {
+        const normalized = nodePath.posix.normalize(clean.replace(/\\/g, "/"));
+        if (normalized === ".." || normalized.startsWith("../") || nodePath.posix.isAbsolute(normalized)) throw new Error("Path escapes the workspace folder");
+        target = vscode.Uri.joinPath(folder.uri, normalized);
+      }
+    } catch (err) {
+      this.broadcast({ type: "log", message: `Could not open ${relativePath}: ${err instanceof Error ? err.message : err}` });
+      return;
+    }
     try {
       const doc = await vscode.workspace.openTextDocument(target);
       await vscode.window.showTextDocument(doc, { preview: false });
@@ -1796,45 +1830,68 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     }
   }
 
-  private async undoEdit(relativePath: string): Promise<void> {
-    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    if (!root) {
-      this.broadcast({ type: "log", message: "No workspace folder open." });
-      return;
+  /**
+   * Undo the agent's edits to `files` from this conversation's latest turn:
+   * exact pre-edit snapshots where they exist, otherwise (after a second
+   * confirmation) git checkout in the edit's own folder only.
+   */
+  private async undoEdits(sessionId: string, files: Array<{ path: string; root?: string }>): Promise<void> {
+    if (!files.length) return;
+    const choice = await vscode.window.showWarningMessage(
+      `Undo the agent's edits to ${files.length} file${files.length === 1 ? "" : "s"}?`,
+      { modal: true },
+      "Undo",
+    );
+    if (choice !== "Undo") return;
+    const needGit: Array<{ clean: string; root: string }> = [];
+    for (const file of files) {
+      const folder = this.editRoot(file.root);
+      const clean = file.path.replace(/^\/+/, "");
+      if (!folder || folder.uri.scheme !== "file") {
+        this.broadcast({ type: "log", message: `Undo failed for ${clean}: its workspace folder is not open.` });
+        continue;
+      }
+      const root = folder.uri.fsPath;
+      let full: string;
+      try {
+        full = resolveInsideRootSync(root, clean);
+      } catch (err) {
+        this.broadcast({ type: "log", message: `Undo failed for ${clean}: ${err instanceof Error ? err.message : err}` });
+        continue;
+      }
+      // Exact undo: the content from before the agent's edits this turn.
+      if (await restorePreEditSnapshot(full, sessionId)) {
+        this.broadcast({ type: "log", message: `Restored ${clean} to its content before the agent's edits.`, severity: "info" });
+        continue;
+      }
+      needGit.push({ clean, root });
     }
-    const clean = relativePath.replace(/^\/+/, "");
-    let full: string;
-    try {
-      full = resolveInsideRootSync(root, clean);
-    } catch (err) {
-      this.broadcast({ type: "log", message: `Undo failed for ${clean}: ${err instanceof Error ? err.message : err}` });
-      return;
-    }
-    // Exact undo: the content from before the agent's edits this turn.
-    if (await restorePreEditSnapshot(full)) {
-      await this.revealFile(clean).catch(() => undefined);
-      this.broadcast({ type: "log", message: `Restored ${clean} to its content before the agent's edits.`, severity: "info" });
+    if (!needGit.length) {
+      if (files[0]) await this.revealFile(files[0].path, files[0].root).catch(() => undefined);
       return;
     }
     // No snapshot (the server wrote the file directly): git is the only
     // baseline, and it also discards the user's own uncommitted changes.
-    const choice = await vscode.window.showWarningMessage(
-      `Revert ${clean} to the last git commit? This also discards your own uncommitted changes to it.`,
+    const names = needGit.map((file) => file.clean).join(", ");
+    const gitChoice = await vscode.window.showWarningMessage(
+      `No exact snapshot for ${names}. Revert ${needGit.length === 1 ? "it" : "them"} to the last git commit? This also discards your own uncommitted changes.`,
       { modal: true },
       "Revert",
     );
-    if (choice !== "Revert") return;
-    await new Promise<void>((resolve, reject) => {
-      execFile("git", ["checkout", "--", clean], { cwd: root, timeout: 15_000, windowsHide: true }, (err, _stdout, stderr) => {
-        if (err) reject(new Error(stderr || err.message));
-        else resolve();
+    if (gitChoice !== "Revert") return;
+    for (const { clean, root } of needGit) {
+      if (!isPathInside(root, nodePath.resolve(root, clean))) continue;
+      await new Promise<void>((resolve, reject) => {
+        execFile("git", ["checkout", "--", clean], { cwd: root, timeout: 15_000, windowsHide: true }, (err, _stdout, stderr) => {
+          if (err) reject(new Error(stderr || err.message));
+          else resolve();
+        });
+      }).then(() => {
+        this.broadcast({ type: "log", message: `Reverted ${clean} to last git state.`, severity: "info" });
+      }).catch((err) => {
+        this.broadcast({ type: "log", message: `Undo failed for ${clean}: ${err instanceof Error ? err.message : err}` });
       });
-    }).then(async () => {
-      await this.revealFile(clean);
-      this.broadcast({ type: "log", message: `Reverted ${clean} to last git state.`, severity: "info" });
-    }).catch((err) => {
-      this.broadcast({ type: "log", message: `Undo failed for ${clean}: ${err instanceof Error ? err.message : err}` });
-    });
+    }
   }
 
   private async writeGeneratedTasks(text: string): Promise<number> {
@@ -2178,7 +2235,7 @@ function applyToolEvent(
       status: "running",
     };
     stream.tools.set(event.id, entry);
-    recordFileEdit(stream.edits, event.name, event.arguments ?? {}, event.result);
+    recordFileEdit(stream.edits, event.name, event.arguments ?? {}, event.result, stream.root);
     return { entry, editedFiles: [...stream.edits.values()] };
   }
 
@@ -2188,7 +2245,7 @@ function applyToolEvent(
     existing.result = event.result;
     existing.status = looksLikeToolError(event.result) ? "error" : "complete";
     if (existing.status === "error") existing.error = event.result.slice(0, 300);
-    recordFileEdit(stream.edits, event.name, event.arguments ?? {}, event.result);
+    recordFileEdit(stream.edits, event.name, event.arguments ?? {}, event.result, stream.root);
   }
   return { entry: existing, editedFiles: [...stream.edits.values()] };
 }
@@ -2241,12 +2298,13 @@ function recordFileEdit(
   name: string,
   args: Record<string, unknown>,
   result?: string,
+  root?: string,
 ): void {
   if (name !== "ide_write_file" && name !== "ide_edit_file") return;
   const path = typeof args.path === "string" ? args.path : undefined;
   if (!path) return;
 
-  const current = edits.get(path) ?? { path, writes: 0, edits: 0, additions: 0, deletions: 0 };
+  const current = edits.get(path) ?? { path, root, writes: 0, edits: 0, additions: 0, deletions: 0 };
   if (name === "ide_write_file") {
     current.writes += 1;
     const content = typeof args.content === "string" ? args.content : "";
@@ -2286,7 +2344,5 @@ function randomId(): string {
 }
 
 function randomNonce(): string {
-  const bytes = new Uint8Array(16);
-  for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  return randomBytes(16).toString("hex");
 }

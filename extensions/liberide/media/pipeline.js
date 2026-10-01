@@ -38513,8 +38513,7 @@
       wrapper.addEventListener("click", () => focusGraph(run.graphId));
       wrapper.querySelector(".run-cancel")?.addEventListener("click", (event3) => {
         event3.stopPropagation();
-        if (!window.confirm(`Cancel ${run.label}?`)) return;
-        send({ type: "cancelGraph", graphId: run.graphId });
+        send({ type: "cancelGraph", graphId: run.graphId, label: run.label });
       });
       container2.appendChild(wrapper);
     }

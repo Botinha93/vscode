@@ -30,6 +30,8 @@ export interface ToolTimelineEntry {
 
 export interface EditedFileSummary {
   path: string;
+  /** Workspace folder `path` is relative to (multi-root: Undo/Review use it). */
+  root?: string;
   /** Number of full overwrites via ide_write_file. */
   writes: number;
   /** Number of search-and-replace edits via ide_edit_file. */
@@ -217,8 +219,8 @@ export type ChatWebviewToHost =
   | { type: "copilotGithubLogin" }
   | { type: "openSettings" }
   | { type: "openPipeline" }
-  | { type: "revealFile"; path: string }
-  | { type: "undoEdit"; path: string }
+  | { type: "revealFile"; path: string; root?: string }
+  | { type: "undoEdits"; sessionId: string; files: Array<{ path: string; root?: string }> }
   | { type: "resolveApproval"; sessionId: string; messageId: string; approvalId: string; decision: "approved" | "rejected"; response?: string }
   | { type: "cancelGraph"; sessionId: string; messageId: string; graphId: string }
   | { type: "retryWithModel"; sessionId: string; messageId: string; provider: Provider; model: string; content: string };

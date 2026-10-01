@@ -128,7 +128,47 @@ export function getAuthToken(): string {
   if (refreshedAuth?.token) return refreshedAuth.token;
   const fromFile = loadIntegrationFile()?.authToken;
   if (fromFile) return fromFile;
-  return process.env.LIBERIDE_AUTH_TOKEN ?? process.env.CHATLLM_AUTH_TOKEN ?? "";
+  return launchEnvToken;
+}
+
+/**
+ * Auth variables a launcher may still inject. They are read once here and
+ * removed from the extension host's environment so agent commands, terminals
+ * and other extensions' child processes never inherit the user's token.
+ */
+const AUTH_ENV_KEYS = ["LIBERIDE_AUTH_TOKEN", "CHATLLM_AUTH_TOKEN"] as const;
+const launchEnvToken = AUTH_ENV_KEYS.map((key) => process.env[key]).find(Boolean) ?? "";
+for (const key of AUTH_ENV_KEYS) delete process.env[key];
+
+/** Matches LIBERIDE_* / CHATLLM_* variables that carry credentials. */
+const AUTH_ENV_NAME = /^(LIBERIDE|CHATLLM)_.*(TOKEN|SECRET|PASSWORD|AUTH|KEY|COOKIE)/i;
+
+/** `env` (default: the host's) without LiberIDE/ChatLLM credentials, for spawned commands. */
+export function childProcessEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(env)) if (!AUTH_ENV_NAME.test(key)) out[key] = value;
+  return out;
+}
+
+/** Must match IDE_RPC_SUBPROTOCOL on the server; echoed back on a bearer handshake. */
+export const IDE_RPC_SUBPROTOCOL = "liberide.v1";
+
+function base64url(value: string): string {
+  return Buffer.from(value, "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/**
+ * WebSocket subprotocols carrying the bearer token (`bearer.<base64url>`).
+ * Tokens never go in the URL: the server only accepts them here.
+ */
+export function bearerSubprotocols(token = getAuthToken()): string[] | undefined {
+  return token ? [IDE_RPC_SUBPROTOCOL, `bearer.${base64url(token)}`] : undefined;
+}
+
+export function wsOrigin(httpOrigin: string): string {
+  if (httpOrigin.startsWith("https://")) return `wss://${httpOrigin.slice("https://".length)}`;
+  if (httpOrigin.startsWith("http://")) return `ws://${httpOrigin.slice("http://".length)}`;
+  return httpOrigin;
 }
 
 function currentExpiresAt(): number | undefined {

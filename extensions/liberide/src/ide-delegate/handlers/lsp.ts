@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { relativePath, resolveFileUri } from "./helpers";
+import { isInWorkspace, relativePath, resolveFileUri } from "./helpers";
 
 function locationToJson(loc: vscode.Location | vscode.LocationLink): Record<string, unknown> {
   if ("uri" in loc && loc.uri) {
@@ -17,15 +17,29 @@ function locationToJson(loc: vscode.Location | vscode.LocationLink): Record<stri
   };
 }
 
+/** One page of `items`: `offset`/`cursor` (0-based) and `maxResults`, with `nextCursor` when more remain. */
+export function pageOf<T>(items: T[], payload: Record<string, unknown>, defaultSize = 50): { page: T[]; offset: number; total: number; nextCursor?: number } {
+  const size = Math.max(1, Math.min(Math.floor(Number(payload.maxResults ?? defaultSize)) || defaultSize, 500));
+  const offset = Math.max(0, Math.floor(Number(payload.offset ?? payload.cursor ?? 0)) || 0);
+  const page = items.slice(offset, offset + size);
+  const end = offset + page.length;
+  return { page, offset, total: items.length, ...(end < items.length ? { nextCursor: end } : {}) };
+}
+
 export async function handleWorkspaceSymbols(payload: Record<string, unknown>): Promise<unknown> {
   const query = String(payload.query ?? "");
-  const maxResults = Number(payload.maxResults ?? 50);
-  const symbols = (await vscode.commands.executeCommand<vscode.SymbolInformation[]>(
+  const all = (await vscode.commands.executeCommand<vscode.SymbolInformation[]>(
     "vscode.executeWorkspaceSymbolProvider",
     query
   )) ?? [];
+  // Only this folder's symbols (providers may return library/other-root ones).
+  const symbols = all.filter((s) => s.location.uri.scheme !== "file" || isInWorkspace(s.location.uri.fsPath));
+  const { page, offset, total, nextCursor } = pageOf(symbols, payload);
   return {
-    symbols: symbols.slice(0, maxResults).map((s) => ({
+    offset,
+    total,
+    ...(nextCursor !== undefined ? { nextCursor, hasMore: true } : { hasMore: false }),
+    symbols: page.map((s) => ({
       name: s.name,
       kind: vscode.SymbolKind[s.kind],
       path: relativePath(s.location.uri.fsPath),

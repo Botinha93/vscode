@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { apiFetch, getApiOrigin } from "./api";
+import { apiFetch, bearerSubprotocols, getApiOrigin, wsOrigin } from "./api";
 
 const NEXUS_TO_VSCODE: Record<string, string> = {
   "default:light": "Light Modern",
@@ -127,7 +127,14 @@ export function createThemeBridge(output: vscode.OutputChannel): vscode.Disposab
 
   function connect() {
     if (disposed) return;
-    ws = new WebSocket(`${apiOrigin.replace(/^http/, "ws")}/api/theme/stream`);
+    // Authenticated like /api/ide/rpc: the token rides in the bearer subprotocol.
+    const protocols = bearerSubprotocols();
+    if (!protocols) {
+      setTimeout(connect, retryDelay);
+      retryDelay = Math.min(retryDelay * 2, MAX_RETRY_DELAY);
+      return;
+    }
+    ws = new WebSocket(`${wsOrigin(apiOrigin)}/api/theme/stream`, protocols);
     ws.addEventListener("open", () => {
       retryDelay = 1000; // reset on successful connection
     });

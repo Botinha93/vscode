@@ -51,6 +51,6 @@ export type PipelineWebviewToHost =
   | { type: "setActiveFeature"; featureId: string }
   | { type: "scaffoldFeature"; name: string }
   | { type: "dispatchFeature"; featureId: string; taskIds?: string[] }
-  | { type: "cancelGraph"; graphId: string }
+  | { type: "cancelGraph"; graphId: string; label?: string }
   | { type: "openTask"; featureId: string; taskId: string }
   | { type: "openChat" };

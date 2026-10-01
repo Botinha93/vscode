@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import * as vscode from "vscode";
 import { cancelExecutionGraph, dispatchFeature, subscribeExecutionGraphEvents } from "../dispatch/client";
 import { buildIdeContextPayload } from "../ide-delegate/context";
@@ -131,9 +132,11 @@ export class LiberidePipelineController implements vscode.WebviewViewProvider, v
         case "dispatchFeature":
           await this.dispatch(message.featureId, message.taskIds);
           break;
-        case "cancelGraph":
-          await this.cancel(message.graphId);
+        case "cancelGraph": {
+          const choice = await vscode.window.showWarningMessage(`Cancel ${message.label ?? message.graphId}?`, { modal: true }, "Cancel Run");
+          if (choice === "Cancel Run") await this.cancel(message.graphId);
           break;
+        }
         case "openTask": {
           const task = this.store.getTask(message.featureId, message.taskId);
           if (task) await vscode.window.showTextDocument(task.filePath);
@@ -278,7 +281,5 @@ function mapStatus(status: string): "running" | "completed" | "failed" | "blocke
 }
 
 function randomNonce(): string {
-  const bytes = new Uint8Array(16);
-  for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  return randomBytes(16).toString("hex");
 }

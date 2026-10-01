@@ -2,12 +2,14 @@ import * as vscode from "vscode";
 import { extractSectionIds, parseBlockerItems, parseDocumentationItems, parseFeatureStatus, parseTaskContract, type BlockerItem, type DocumentationItem, type FeatureSpec, type TaskContract } from "./schema";
 import { readTextFile } from "./writer";
 
+/** Spec files in any workspace folder. */
+export const SPEC_WATCH_GLOB = "**/.liberide/specs/**/*.md";
+
 export class SpecStore implements vscode.Disposable {
   private readonly changeEmitter = new vscode.EventEmitter<void>();
   readonly onDidChange = this.changeEmitter.event;
   private features = new Map<string, FeatureSpec>();
   private watcher?: vscode.FileSystemWatcher;
-  private promptWatcher?: vscode.FileSystemWatcher;
   private activeFeatureId?: string;
   private refreshTimer?: ReturnType<typeof setTimeout>;
   private refreshInProgress = false;
@@ -25,25 +27,14 @@ export class SpecStore implements vscode.Disposable {
 
   async initialize(context: vscode.ExtensionContext): Promise<void> {
     this.activeFeatureId = context.workspaceState.get("liberide.activeFeatureId");
-    this.watcher = vscode.workspace.createFileSystemWatcher("**//.liberide/specs/**/*.md");
+    this.watcher = vscode.workspace.createFileSystemWatcher(SPEC_WATCH_GLOB);
     this.watcher.onDidCreate(() => this.scheduleRefresh());
     this.watcher.onDidChange(() => this.scheduleRefresh());
     this.watcher.onDidDelete(() => this.scheduleRefresh());
     context.subscriptions.push(this.watcher);
-    this.promptWatcher = vscode.workspace.createFileSystemWatcher("**/.chatllm/**/*.md");
-    const syncPrompts = () => {
-      const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-      if (!root) return;
-      void fetch(`${process.env.CHATLLM_API_ORIGIN ?? "http://127.0.0.1:3000"}/api/skills/import-from-workspace`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rootPath: root }),
-      }).catch(() => undefined);
-    };
-    this.promptWatcher.onDidCreate(syncPrompts);
-    this.promptWatcher.onDidChange(syncPrompts);
-    this.promptWatcher.onDidDelete(syncPrompts);
-    context.subscriptions.push(this.promptWatcher);
+    // Workspace prompt files are not auto-imported into the server's skill
+    // registry: that import is a manager action and must never register
+    // repository content as a trusted source behind the user's back.
     await this.refresh();
   }
 
@@ -137,7 +128,6 @@ export class SpecStore implements vscode.Disposable {
   dispose(): void {
     if (this.refreshTimer) clearTimeout(this.refreshTimer);
     this.watcher?.dispose();
-    this.promptWatcher?.dispose();
     this.changeEmitter.dispose();
   }
 }

@@ -1,7 +1,8 @@
 import * as vscode from "vscode";
 import { spawn, type ChildProcess } from "child_process";
 import { randomUUID } from "crypto";
-import { killTree } from "./local-runner";
+import { killAllProcesses, killTree, signalGroup, trackProcess } from "./local-runner";
+import { childProcessEnv } from "../api";
 
 /**
  * Terminals the agent drives.
@@ -22,6 +23,8 @@ const SESSION_IDLE_TTL_MS = 30 * 60_000;
 /** After a send, wait for output to go quiet this long before returning it. */
 const SETTLE_QUIET_MS = 400;
 const DEFAULT_SEND_WAIT_MS = 2_000;
+/** An ended session stays readable (final output, exit code) this long. */
+const EXITED_SESSION_TTL_MS = 2 * 60_000;
 const MAX_SEND_WAIT_MS = 30_000;
 
 /** Terminals render CRLF; child output uses bare LF. */
@@ -60,7 +63,8 @@ class TerminalView implements vscode.Disposable {
   }
 
   dispose(): void {
-    this.terminal.dispose();
+    // A tab the user closed is already gone; only the emitter is left.
+    if (!this.closedByUser) this.terminal.dispose();
     this.writeEmitter.dispose();
   }
 }
@@ -113,6 +117,8 @@ class AgentTerminalSession {
   readonly id = randomUUID();
   readonly createdAt = Date.now();
   lastUsedAt = Date.now();
+  exitedAt: number | undefined;
+  private closed = false;
   private readonly proc: ChildProcess;
   private readonly view: TerminalView;
   private readonly buffer = new RollingBuffer();
@@ -130,22 +136,28 @@ class AgentTerminalSession {
     const shell = shellCommand();
     this.proc = spawn(shell.command, shell.args, {
       cwd,
-      env: process.env,
+      env: childProcessEnv(),
       windowsHide: true,
       detached: process.platform !== "win32",
     });
+    trackProcess(this.proc);
+    // Ctrl+C signals the whole process group; a trapped (not ignored) INT
+    // keeps the shell alive while its children get the default action.
+    if (process.platform !== "win32") this.proc.stdin?.write("trap : INT\n");
     this.proc.stdout?.setEncoding("utf8");
     this.proc.stderr?.setEncoding("utf8");
     this.proc.stdout?.on("data", (chunk: string) => this.output(chunk));
     this.proc.stderr?.on("data", (chunk: string) => this.output(chunk));
     this.proc.on("close", (code) => {
       this.exited = true;
+      this.exitedAt = Date.now();
       this.exitCode = code;
       this.view.write(`\n\x1b[2m[session ended${code === null ? "" : ` with exit code ${code}`}]\x1b[0m\n`);
       this.notify();
     });
     this.proc.on("error", (err) => {
       this.exited = true;
+      this.exitedAt = Date.now();
       this.exitCode = null;
       this.output(`${err.message}\n`);
     });
@@ -189,11 +201,11 @@ class AgentTerminalSession {
     }
   }
 
-  /** Ctrl+C: interrupt the shell's children (the shell itself keeps running). */
+  /** Ctrl+C: SIGINT to the process group (grandchildren too); the shell traps it and keeps running. */
   interrupt(): void {
     if (this.exited || this.proc.pid === undefined) return;
     if (process.platform === "win32") return;
-    spawn("pkill", ["-INT", "-P", String(this.proc.pid)]).on("error", () => undefined);
+    signalGroup(this.proc, "SIGINT");
   }
 
   private writeStdin(text: string): void {
@@ -249,9 +261,12 @@ class AgentTerminalSession {
   }
 
   close(): void {
+    if (this.closed) return;
+    this.closed = true;
     killTree(this.proc);
+    this.notify();
     this.outputListeners.clear();
-    if (!this.view.closedByUser) this.view.dispose();
+    this.view.dispose();
     this.onDisposed(this.id);
   }
 }
@@ -260,10 +275,11 @@ const sessions = new Map<string, AgentTerminalSession>();
 
 const sweeper = setInterval(() => {
   const now = Date.now();
-  for (const session of sessions.values()) {
+  for (const session of [...sessions.values()]) {
     if (now - session.lastUsedAt > SESSION_IDLE_TTL_MS) session.close();
+    else if (session.exitedAt !== undefined && now - session.exitedAt > EXITED_SESSION_TTL_MS) session.close();
   }
-}, 60_000);
+}, 30_000);
 sweeper.unref?.();
 
 function sessionFor(id: string): AgentTerminalSession {
@@ -273,8 +289,9 @@ function sessionFor(id: string): AgentTerminalSession {
 }
 
 export function openAgentTerminal(input: { name: string; cwd: string }): { sessionId: string; name: string; cwd: string } {
+  // Ended sessions go first, then the least recently used one, rather than refusing.
+  for (const session of [...sessions.values()]) if (!session.running) session.close();
   if (sessions.size >= MAX_SESSIONS) {
-    // Reclaim the least recently used session rather than refusing.
     const oldest = [...sessions.values()].sort((a, b) => a.lastUsedAt - b.lastUsedAt)[0];
     oldest?.close();
   }
@@ -298,6 +315,7 @@ export function closeAgentTerminal(id: string): { sessionId: string; closed: boo
 
 export function disposeAgentTerminals(): void {
   clearInterval(sweeper);
+  killAllProcesses();
   for (const session of [...sessions.values()]) session.close();
   for (const view of outputViews.values()) view.dispose();
   outputViews.clear();
@@ -310,7 +328,14 @@ const outputViews = new Map<string, TerminalView>();
 export function agentOutputView(name: string): { write: (text: string) => void } {
   let view = outputViews.get(name);
   if (!view || view.closedByUser) {
-    view = new TerminalView(name, { onClose: () => outputViews.delete(name) });
+    view?.dispose();
+    const created = new TerminalView(name, {
+      onClose: () => {
+        outputViews.delete(name);
+        created.dispose();
+      },
+    });
+    view = created;
     outputViews.set(name, view);
   }
   view.terminal.show(true);

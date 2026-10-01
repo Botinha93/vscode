@@ -224,8 +224,8 @@ function renderRuns(): void {
     wrapper.addEventListener("click", () => focusGraph(run.graphId));
     wrapper.querySelector<HTMLButtonElement>(".run-cancel")?.addEventListener("click", (event) => {
       event.stopPropagation();
-      if (!window.confirm(`Cancel ${run.label}?`)) return;
-      send({ type: "cancelGraph", graphId: run.graphId });
+      // The host confirms with a modal dialog (webviews cannot show one).
+      send({ type: "cancelGraph", graphId: run.graphId, label: run.label });
     });
     container.appendChild(wrapper);
   }

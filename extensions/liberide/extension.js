@@ -34,7 +34,7 @@ __export(extension_exports, {
   deactivate: () => deactivate
 });
 module.exports = __toCommonJS(extension_exports);
-var vscode33 = __toESM(require("vscode"));
+var vscode35 = __toESM(require("vscode"));
 
 // src/api.ts
 var import_node_fs = require("node:fs");
@@ -141,8 +141,8 @@ function initApiFromContext(context) {
   integrationPath = (0, import_node_path.join)(context.globalStorageUri.fsPath, "../../../libervox-integration.json");
   cachedIntegration = void 0;
   const watched = [...new Set(integrationCandidates())];
-  for (const path7 of watched) {
-    (0, import_node_fs.watchFile)(path7, { interval: WATCH_INTERVAL_MS, persistent: false }, (curr, prev) => {
+  for (const path10 of watched) {
+    (0, import_node_fs.watchFile)(path10, { interval: WATCH_INTERVAL_MS, persistent: false }, (curr, prev) => {
       if (curr.mtimeMs === prev.mtimeMs && curr.size === prev.size) return;
       reloadAuth();
     });
@@ -150,7 +150,7 @@ function initApiFromContext(context) {
   scheduleTokenRefresh();
   return {
     dispose: () => {
-      for (const path7 of watched) (0, import_node_fs.unwatchFile)(path7);
+      for (const path10 of watched) (0, import_node_fs.unwatchFile)(path10);
       if (refreshTimer) clearTimeout(refreshTimer);
       refreshTimer = void 0;
       authListeners.clear();
@@ -182,11 +182,11 @@ function reloadAuth() {
 }
 function loadIntegrationFile() {
   if (cachedIntegration !== void 0) return cachedIntegration;
-  for (const path7 of integrationCandidates()) {
+  for (const path10 of integrationCandidates()) {
     try {
-      if ((0, import_node_fs.existsSync)(path7)) {
-        cachedIntegration = JSON.parse((0, import_node_fs.readFileSync)(path7, "utf8"));
-        cachedIntegrationSource = path7;
+      if ((0, import_node_fs.existsSync)(path10)) {
+        cachedIntegration = JSON.parse((0, import_node_fs.readFileSync)(path10, "utf8"));
+        cachedIntegrationSource = path10;
         return cachedIntegration;
       }
     } catch {
@@ -205,7 +205,28 @@ function getAuthToken() {
   if (refreshedAuth?.token) return refreshedAuth.token;
   const fromFile = loadIntegrationFile()?.authToken;
   if (fromFile) return fromFile;
-  return process.env.LIBERIDE_AUTH_TOKEN ?? process.env.CHATLLM_AUTH_TOKEN ?? "";
+  return launchEnvToken;
+}
+var AUTH_ENV_KEYS = ["LIBERIDE_AUTH_TOKEN", "CHATLLM_AUTH_TOKEN"];
+var launchEnvToken = AUTH_ENV_KEYS.map((key) => process.env[key]).find(Boolean) ?? "";
+for (const key of AUTH_ENV_KEYS) delete process.env[key];
+var AUTH_ENV_NAME = /^(LIBERIDE|CHATLLM)_.*(TOKEN|SECRET|PASSWORD|AUTH|KEY|COOKIE)/i;
+function childProcessEnv(env3 = process.env) {
+  const out = {};
+  for (const [key, value] of Object.entries(env3)) if (!AUTH_ENV_NAME.test(key)) out[key] = value;
+  return out;
+}
+var IDE_RPC_SUBPROTOCOL = "liberide.v1";
+function base64url(value) {
+  return Buffer.from(value, "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function bearerSubprotocols(token = getAuthToken()) {
+  return token ? [IDE_RPC_SUBPROTOCOL, `bearer.${base64url(token)}`] : void 0;
+}
+function wsOrigin(httpOrigin) {
+  if (httpOrigin.startsWith("https://")) return `wss://${httpOrigin.slice("https://".length)}`;
+  if (httpOrigin.startsWith("http://")) return `ws://${httpOrigin.slice("http://".length)}`;
+  return httpOrigin;
 }
 function currentExpiresAt() {
   const raw = refreshedAuth ? refreshedAuth.expiresAt : loadIntegrationFile()?.expiresAt;
@@ -271,10 +292,10 @@ function authHeaders(extra) {
   if (token) headers.Authorization = `Bearer ${token}`;
   return headers;
 }
-async function apiFetch(path7, init) {
+async function apiFetch(path10, init) {
   const origin = getApiOrigin();
   if (!origin) throw new Error("LIBERIDE_API_ORIGIN is not set.");
-  const url2 = path7.startsWith("http") ? path7 : `${origin}${path7}`;
+  const url2 = path10.startsWith("http") ? path10 : `${origin}${path10}`;
   const isForm = typeof FormData !== "undefined" && init?.body instanceof FormData;
   const send = () => {
     const headers = { ...authHeaders(), ...init?.headers };
@@ -455,6 +476,7 @@ function subscribeConversationListSync(onChange) {
 }
 
 // src/panel/panel.ts
+var import_node_crypto = require("node:crypto");
 var vscode4 = __toESM(require("vscode"));
 
 // src/spec/dag.ts
@@ -1021,9 +1043,11 @@ var LiberidePipelineController = class _LiberidePipelineController {
         case "dispatchFeature":
           await this.dispatch(message.featureId, message.taskIds);
           break;
-        case "cancelGraph":
-          await this.cancel(message.graphId);
+        case "cancelGraph": {
+          const choice = await vscode4.window.showWarningMessage(`Cancel ${message.label ?? message.graphId}?`, { modal: true }, "Cancel Run");
+          if (choice === "Cancel Run") await this.cancel(message.graphId);
           break;
+        }
         case "openTask": {
           const task = this.store.getTask(message.featureId, message.taskId);
           if (task) await vscode4.window.showTextDocument(task.filePath);
@@ -1162,9 +1186,7 @@ function mapStatus(status) {
   return void 0;
 }
 function randomNonce() {
-  const bytes = new Uint8Array(16);
-  for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  return (0, import_node_crypto.randomBytes)(16).toString("hex");
 }
 
 // src/chat/chat-panel.ts
@@ -1172,7 +1194,7 @@ var vscode9 = __toESM(require("vscode"));
 
 // src/ide-delegate/handlers/fs.ts
 var vscode6 = __toESM(require("vscode"));
-var path2 = __toESM(require("node:path"));
+var path3 = __toESM(require("node:path"));
 var import_node_fs3 = require("node:fs");
 var import_promises = require("node:fs/promises");
 var import_node_child_process = require("node:child_process");
@@ -1183,12 +1205,15 @@ var path = __toESM(require("node:path"));
 var import_node_fs2 = require("node:fs");
 var import_node_async_hooks = require("node:async_hooks");
 var requestRoot = new import_node_async_hooks.AsyncLocalStorage();
-function withRequestRoot(root, run) {
-  return requestRoot.run(root, run);
+function withRequestRoot(root, run, conversationId) {
+  return requestRoot.run({ root, conversationId }, run);
+}
+function requestConversationId() {
+  return requestRoot.getStore()?.conversationId;
 }
 function workspaceFolder() {
   const folders = vscode5.workspace.workspaceFolders ?? [];
-  const root = requestRoot.getStore();
+  const root = requestRoot.getStore()?.root;
   if (root) {
     const target = path.resolve(root);
     const match = folders.find((folder) => path.resolve(folder.uri.fsPath) === target);
@@ -1207,41 +1232,57 @@ function relativePath(fsPath) {
   if (!root) return fsPath;
   return path.relative(root, fsPath).replace(/\\/g, "/") || fsPath;
 }
-function resolveInsideRootSync(root, relative6) {
-  if (relative6.includes("\0")) throw new Error("Path contains invalid characters");
-  if (path.isAbsolute(relative6) || /^[a-zA-Z]:[\\/]/.test(relative6)) {
+function resolveInsideRootSync(root, relative8, options = {}) {
+  if (relative8.includes("\0")) throw new Error("Path contains invalid characters");
+  if (path.isAbsolute(relative8) || /^[a-zA-Z]:[\\/]/.test(relative8)) {
     throw new Error("Path must be relative to the workspace folder");
   }
   const base = path.resolve(root);
-  const full = path.resolve(base, relative6);
-  if (!isInside(base, full)) throw new Error("Path escapes the workspace folder");
-  let probe = full;
-  while (!(0, import_node_fs2.existsSync)(probe) && probe !== base) probe = path.dirname(probe);
-  if ((0, import_node_fs2.existsSync)(probe)) {
-    const realBase = (0, import_node_fs2.realpathSync)(base);
-    const realProbe = (0, import_node_fs2.realpathSync)(probe);
-    if (!isInside(realBase, realProbe)) throw new Error("Path escapes the workspace folder");
+  const full = path.resolve(base, relative8);
+  if (!isPathInside(base, full)) throw new Error("Path escapes the workspace folder");
+  if (!(0, import_node_fs2.existsSync)(base)) return full;
+  const realBase = (0, import_node_fs2.realpathSync)(base);
+  const segments = path.relative(base, full).split(path.sep).filter(Boolean);
+  let current = base;
+  for (let i = 0; i < segments.length; i++) {
+    current = path.join(current, segments[i]);
+    let info;
+    try {
+      info = (0, import_node_fs2.lstatSync)(current, { throwIfNoEntry: false });
+    } catch {
+      break;
+    }
+    if (!info) break;
+    if (!info.isSymbolicLink()) continue;
+    if (options.forWrite && i === segments.length - 1) throw new Error("Refusing to write through a symbolic link");
+    let target;
+    try {
+      target = (0, import_node_fs2.realpathSync)(current);
+    } catch {
+      throw new Error("Path goes through a dangling symbolic link");
+    }
+    if (!isPathInside(realBase, target)) throw new Error("Path escapes the workspace folder");
   }
   return full;
 }
-async function resolveInsideRoot(root, relative6) {
-  return resolveInsideRootSync(root, relative6);
+async function resolveInsideRoot(root, relative8, options = {}) {
+  return resolveInsideRootSync(root, relative8, options);
 }
-function isInside(root, candidate) {
+function isPathInside(root, candidate) {
   const rel2 = path.relative(root, candidate);
   return rel2 === "" || rel2 !== ".." && !rel2.startsWith(`..${path.sep}`) && !path.isAbsolute(rel2);
 }
-function resolveFileUri(relative6) {
+function resolveFileUri(relative8) {
   const folder = workspaceFolder();
   if (!folder) throw new Error("No workspace folder open");
   if (folder.uri.scheme !== "file") {
-    const normalized = path.posix.normalize(relative6.replace(/\\/g, "/"));
+    const normalized = path.posix.normalize(relative8.replace(/\\/g, "/"));
     if (normalized.startsWith("../") || normalized === ".." || path.posix.isAbsolute(normalized)) {
       throw new Error("Path escapes the workspace folder");
     }
     return vscode5.Uri.joinPath(folder.uri, normalized);
   }
-  return vscode5.Uri.file(resolveInsideRootSync(folder.uri.fsPath, relative6));
+  return vscode5.Uri.file(resolveInsideRootSync(folder.uri.fsPath, relative8));
 }
 function rangeFromPayload(payload) {
   const startLine = Number(payload.startLine ?? payload.line ?? 1) - 1;
@@ -1252,6 +1293,62 @@ function rangeFromPayload(payload) {
 }
 function positionFromPayload(payload) {
   return new vscode5.Position(Number(payload.line ?? 1) - 1, Number(payload.character ?? 0));
+}
+
+// src/ide-delegate/handlers/redaction.ts
+var path2 = __toESM(require("node:path"));
+var SECRET_FILE_NAME = /^(\.env(\..*)?|\.npmrc|\.pypirc|\.netrc|\.git-credentials|credentials(\.json)?|secrets?\.(json|ya?ml|toml)|id_(rsa|dsa|ecdsa|ed25519)|.*\.(pem|key|p12|pfx|keystore|jks))$/i;
+function isSecretFile(filePath) {
+  const base = path2.basename(filePath);
+  return SECRET_FILE_NAME.test(base) && !/\.(example|sample|template|dist)$/i.test(base);
+}
+var SENSITIVE_PATTERNS = [
+  { pattern: /((?:api[_-]?key|token|secret|password|passwd|pwd|credential))[=:][ ]*[\x27\x22]?([\w\-/=]+)[\x27\x22]?/gi, replacement: "$1=[REDACTED]" },
+  { pattern: /x-api-key[=:][ ]*[\x27\x22]?([^\s,\x27\x22]+)[\x27\x22]?/gi, replacement: "x-api-key=[REDACTED]" },
+  { pattern: /"(?:api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|password|secret|private[_-]?key)"\s*:\s*"[^"]+"/gi, replacement: '"[REDACTED]":"[REDACTED]"' },
+  { pattern: /Bearer[ ]+([\w.-]+)/gi, replacement: "Bearer [REDACTED]" },
+  { pattern: /Basic[ ]+([\w+/=]+)/gi, replacement: "Basic [REDACTED]" },
+  { pattern: /(?:https?|git):\/\/[^:]+:[^@]+@/gi, replacement: "https://[REDACTED]@" },
+  { pattern: /(-----BEGIN[ ]+(?:RSA|DSA|EC|OPENSSH)[ ]+PRIVATE[ ]+KEY-----)[\s\S]*?(-----END[ ]+(?:RSA|DSA|EC|OPENSSH)[ ]+PRIVATE[ ]+KEY-----)/gi, replacement: "$1 [REDACTED] $2" },
+  { pattern: /((?:aws_access_key_id|aws_secret_access_key))[=:][ ]*[\x27\x22]?([\w/+ =]+)[\x27\x22]?/gi, replacement: "$1=[REDACTED]" },
+  { pattern: /(postgresql|mysql|mongodb|redis):\/\/([^:]+):([^@]+)@/gi, replacement: "$1://$2:[REDACTED]@" }
+];
+var KEY_MATERIAL = /^[A-Za-z0-9+/=]{16,}$/;
+function redactSecretFile(filePath, text) {
+  const base = path2.basename(filePath).toLowerCase();
+  let values = base.startsWith(".env") || base.endsWith(".npmrc") || base.endsWith(".pypirc") ? text.replace(/^(\s*(?:export\s+)?[\w.-]+\s*[=:]\s*)(\S.*)$/gm, "$1[REDACTED]") : text;
+  if (/\.(pem|key|p12|pfx|keystore|jks)$/.test(base) || /^id_/.test(base)) {
+    values = values.split("\n").map((line) => KEY_MATERIAL.test(line.trim()) ? "[REDACTED]" : line).join("\n");
+  }
+  for (const { pattern, replacement } of SENSITIVE_PATTERNS) values = values.replace(pattern, replacement);
+  return values;
+}
+function redactIfSecret(filePath, text) {
+  if (!isSecretFile(filePath)) return { text, redacted: false };
+  return { text: redactSecretFile(filePath, text), redacted: true };
+}
+function redactUnifiedDiff(diff, filePath) {
+  let secretPath = filePath && isSecretFile(filePath) ? filePath : void 0;
+  return diff.split("\n").map((line) => {
+    const header = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
+    if (header) {
+      secretPath = isSecretFile(header[2]) || isSecretFile(header[1]) ? header[2] : void 0;
+      return line;
+    }
+    if (!secretPath) return line;
+    if (/^(---|\+\+\+|@@|index |new file|deleted file|similarity|rename |old mode|new mode|Binary)/.test(line)) return line;
+    const prefix = line.slice(0, 1);
+    if (prefix !== "+" && prefix !== "-" && prefix !== " ") return line;
+    return prefix + redactSecretFile(secretPath, line.slice(1));
+  }).join("\n");
+}
+function countRedactionPlaceholders(text) {
+  return text.split("[REDACTED]").length - 1;
+}
+function assertNoRedactionPlaceholders(before, after, filePath) {
+  if (countRedactionPlaceholders(after) > countRedactionPlaceholders(before)) {
+    throw new Error(`Refusing to write '${filePath}': the new content contains [REDACTED] placeholders from a redacted read. Edit only the lines you need instead of rewriting redacted values.`);
+  }
 }
 
 // src/ide-delegate/handlers/fs.ts
@@ -1301,27 +1398,52 @@ var MAX_SEARCH_FILE_BYTES = 2e6;
 var preEditSnapshots = /* @__PURE__ */ new Map();
 var MAX_SNAPSHOTS = 200;
 var MAX_SNAPSHOT_BYTES = 5e6;
-async function snapshotBeforeChange(fullPath) {
-  if (preEditSnapshots.has(fullPath)) return;
-  const info = await (0, import_promises.stat)(fullPath).catch(() => void 0);
+var MAX_SNAPSHOT_SCOPES = 20;
+var DEFAULT_SCOPE = "";
+function snapshotScope(scope) {
+  let map2 = preEditSnapshots.get(scope);
+  if (!map2) {
+    map2 = /* @__PURE__ */ new Map();
+    preEditSnapshots.set(scope, map2);
+    while (preEditSnapshots.size > MAX_SNAPSHOT_SCOPES) preEditSnapshots.delete(preEditSnapshots.keys().next().value);
+  }
+  return map2;
+}
+async function snapshotBeforeChange(fullPath, scope = requestConversationId() ?? DEFAULT_SCOPE) {
+  const snapshots = snapshotScope(scope);
+  if (snapshots.has(fullPath)) return;
+  const info = await (0, import_promises.lstat)(fullPath).catch(() => void 0);
   if (info && (!info.isFile() || info.size > MAX_SNAPSHOT_BYTES)) return;
-  preEditSnapshots.set(fullPath, info ? await (0, import_promises.readFile)(fullPath, "utf8").catch(() => null) : null);
-  while (preEditSnapshots.size > MAX_SNAPSHOTS) preEditSnapshots.delete(preEditSnapshots.keys().next().value);
+  snapshots.set(fullPath, info ? await (0, import_promises.readFile)(fullPath, "utf8").catch(() => null) : null);
+  while (snapshots.size > MAX_SNAPSHOTS) snapshots.delete(snapshots.keys().next().value);
 }
-function resetPreEditSnapshots() {
-  preEditSnapshots.clear();
+function resetPreEditSnapshots(scope) {
+  if (scope === void 0) preEditSnapshots.clear();
+  else preEditSnapshots.delete(scope);
 }
-async function restorePreEditSnapshot(fullPath) {
-  if (!preEditSnapshots.has(fullPath)) return false;
-  const before = preEditSnapshots.get(fullPath);
+async function restorePreEditSnapshot(fullPath, scope = DEFAULT_SCOPE) {
+  const snapshots = preEditSnapshots.get(scope);
+  if (!snapshots?.has(fullPath)) return false;
+  const before = snapshots.get(fullPath);
   if (before === null) await (0, import_promises.rm)(fullPath, { force: true });
   else {
-    await (0, import_promises.mkdir)(path2.dirname(fullPath), { recursive: true });
-    await (0, import_promises.writeFile)(fullPath, before, "utf8");
+    await (0, import_promises.mkdir)(path3.dirname(fullPath), { recursive: true });
+    await writeFileNoFollow(fullPath, before);
   }
-  preEditSnapshots.delete(fullPath);
+  snapshots.delete(fullPath);
   return true;
 }
+async function writeFileNoFollow(fullPath, content, mode) {
+  const flags = import_node_fs3.constants.O_WRONLY | import_node_fs3.constants.O_CREAT | import_node_fs3.constants.O_TRUNC | (import_node_fs3.constants.O_NOFOLLOW ?? 0);
+  const handle = await (0, import_promises.open)(fullPath, flags, 438);
+  try {
+    await handle.writeFile(content, "utf8");
+    if (mode !== void 0) await handle.chmod(mode);
+  } finally {
+    await handle.close();
+  }
+}
+var MAX_READ_BYTES = 2e7;
 function relPath(payload, key = "path") {
   const value = payload[key];
   if (typeof value !== "string") throw new Error(`${key} is required`);
@@ -1344,20 +1466,40 @@ async function handleFsStat(root, payload) {
 }
 async function handleFsRead(root, payload) {
   const full = await resolveInsideRoot(root, relPath(payload));
-  return { content: await (0, import_promises.readFile)(full, "utf8") };
+  const info = await (0, import_promises.stat)(full);
+  if (!info.isFile()) throw new Error(`Not a file: ${String(payload.path)}`);
+  const ranged = payload.offset !== void 0 || payload.length !== void 0;
+  if (!ranged) {
+    if (info.size > MAX_READ_BYTES) {
+      throw new Error(`File is too large to read whole (${info.size} bytes, limit ${MAX_READ_BYTES}); pass offset/length to read a range`);
+    }
+    return { content: await (0, import_promises.readFile)(full, "utf8") };
+  }
+  const offset = Math.max(0, Math.floor(Number(payload.offset ?? 0)) || 0);
+  const length = Math.max(0, Math.min(Math.floor(Number(payload.length ?? MAX_READ_BYTES)) || 0, MAX_READ_BYTES, Math.max(0, info.size - offset)));
+  const handle = await (0, import_promises.open)(full, "r");
+  try {
+    const buffer = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, offset);
+    return { content: buffer.subarray(0, bytesRead).toString("utf8"), offset, length: bytesRead, size: info.size, hasMore: offset + bytesRead < info.size };
+  } finally {
+    await handle.close();
+  }
 }
 async function handleFsWrite(root, payload) {
-  const full = await resolveInsideRoot(root, relPath(payload));
+  const full = await resolveInsideRoot(root, relPath(payload), { forWrite: true });
   const content = typeof payload.content === "string" ? payload.content : "";
   await snapshotBeforeChange(full);
-  await (0, import_promises.mkdir)(path2.dirname(full), { recursive: true });
-  await (0, import_promises.writeFile)(full, content, "utf8");
-  if (typeof payload.mode === "number") await (0, import_promises.chmod)(full, payload.mode);
+  await (0, import_promises.mkdir)(path3.dirname(full), { recursive: true });
+  if (!isPathInside(await (0, import_promises.realpath)(root), await (0, import_promises.realpath)(path3.dirname(full)))) {
+    throw new Error("Path escapes the workspace folder");
+  }
+  await writeFileNoFollow(full, content, typeof payload.mode === "number" ? payload.mode : void 0);
   return { bytes: Buffer.byteLength(content) };
 }
 async function handleFsDelete(root, payload) {
   const full = await resolveInsideRoot(root, relPath(payload));
-  if (full === path2.resolve(root)) throw new Error("Refusing to delete the workspace root");
+  if (full === path3.resolve(root)) throw new Error("Refusing to delete the workspace root");
   await snapshotBeforeChange(full);
   await (0, import_promises.rm)(full, { force: true, recursive: payload.recursive === true });
   return { deleted: true };
@@ -1368,7 +1510,7 @@ async function handleFsRename(root, payload) {
   if (payload.overwrite !== true && (0, import_node_fs3.existsSync)(to)) throw new Error(`Target already exists: ${String(payload.to)}`);
   await snapshotBeforeChange(from);
   await snapshotBeforeChange(to);
-  await (0, import_promises.mkdir)(path2.dirname(to), { recursive: true });
+  await (0, import_promises.mkdir)(path3.dirname(to), { recursive: true });
   await (0, import_promises.rename)(from, to);
   return { renamed: true };
 }
@@ -1376,12 +1518,12 @@ async function listRecursive(dir, root, depth) {
   if (depth <= 0) return [];
   const entries = [];
   for (const item of await (0, import_promises.readdir)(dir, { withFileTypes: true })) {
-    const full = path2.join(dir, item.name);
-    const info = await (0, import_promises.stat)(full).catch(() => void 0);
-    if (!info) continue;
+    const full = path3.join(dir, item.name);
+    const info = await (0, import_promises.lstat)(full).catch(() => void 0);
+    if (!info || info.isSymbolicLink()) continue;
     const entry = {
       name: item.name,
-      path: path2.relative(root, full).replace(/\\/g, "/"),
+      path: path3.relative(root, full).replace(/\\/g, "/"),
       type: info.isDirectory() ? "directory" : "file",
       size: Number(info.size),
       modifiedAt: info.mtime.toISOString()
@@ -1402,8 +1544,8 @@ async function handleFsList(root, payload) {
 }
 function bundledRipgrep() {
   const candidates = [
-    path2.join(vscode6.env.appRoot, "node_modules", "@vscode", "ripgrep", "bin", "rg"),
-    path2.join(vscode6.env.appRoot, "node_modules.asar.unpacked", "@vscode", "ripgrep", "bin", "rg")
+    path3.join(vscode6.env.appRoot, "node_modules", "@vscode", "ripgrep", "bin", "rg"),
+    path3.join(vscode6.env.appRoot, "node_modules.asar.unpacked", "@vscode", "ripgrep", "bin", "rg")
   ];
   const suffix = process.platform === "win32" ? ".exe" : "";
   return candidates.map((candidate) => candidate + suffix).find((candidate) => (0, import_node_fs3.existsSync)(candidate));
@@ -1415,7 +1557,7 @@ function searchWithRipgrep(rg, root, query, isRegex, include, maxResults) {
   for (const ext of BINARY_EXTS) args.push("--glob", `!*${ext}`);
   if (include) args.push("--glob", include);
   args.push("--", query, ".");
-  return new Promise((resolve6, reject) => {
+  return new Promise((resolve7, reject) => {
     const proc = (0, import_node_child_process.spawn)(rg, args, { cwd: root, windowsHide: true });
     const results = [];
     let buffer = "";
@@ -1440,7 +1582,7 @@ function searchWithRipgrep(rg, root, query, isRegex, include, maxResults) {
     proc.on("close", (code) => {
       consume(buffer);
       if (code === 2 && results.length === 0) reject(new Error("ripgrep error"));
-      else resolve6(results);
+      else resolve7(results);
     });
   });
 }
@@ -1448,21 +1590,52 @@ function globToRegExp(pattern) {
   const source = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*/g, "\0").replace(/\*/g, "[^/]*").replace(/\u0000/g, ".*").replace(/\?/g, ".");
   return new RegExp(`^${source}$`);
 }
+function parseGitignore(text) {
+  const rules = [];
+  for (const raw of text.split(/\r?\n/)) {
+    let line = raw.replace(/\s+$/, "");
+    if (!line || line.startsWith("#")) continue;
+    const negate = line.startsWith("!");
+    if (negate) line = line.slice(1);
+    const dirOnly = line.endsWith("/");
+    if (dirOnly) line = line.replace(/\/+$/, "");
+    const anchored = line.includes("/");
+    line = line.replace(/^\//, "").replace(/^\*\*\//, "");
+    if (!line) continue;
+    rules.push({ re: globToRegExp(line), dirOnly, negate, anchored: anchored && !raw.trimStart().startsWith("**/") });
+  }
+  return rules;
+}
+function isIgnored(rules, rel2, isDir) {
+  let ignored = false;
+  const name = rel2.split("/").pop() ?? rel2;
+  for (const rule of rules) {
+    if (rule.dirOnly && !isDir) continue;
+    if (rule.anchored ? rule.re.test(rel2) : rule.re.test(name) || rule.re.test(rel2)) ignored = !rule.negate;
+  }
+  return ignored;
+}
 async function searchWithScan(root, query, isRegex, include, maxResults) {
   const results = [];
   const pattern = isRegex ? new RegExp(query) : void 0;
   const includeRe = include ? globToRegExp(include) : void 0;
-  const walk = async (dir) => {
+  const ignoredBy = (scopes, full, isDir) => scopes.some((scope) => isIgnored(scope.rules, path3.relative(scope.dir, full).replace(/\\/g, "/"), isDir));
+  const walk = async (dir, parents) => {
+    const ignoreText = await (0, import_promises.readFile)(path3.join(dir, ".gitignore"), "utf8").catch(() => "");
+    const scopes = ignoreText ? [...parents, { dir, rules: parseGitignore(ignoreText) }] : parents;
     for (const entry of await (0, import_promises.readdir)(dir, { withFileTypes: true }).catch(() => [])) {
       if (results.length >= maxResults) return;
-      const full = path2.join(dir, entry.name);
+      const full = path3.join(dir, entry.name);
+      const rel2 = path3.relative(root, full).replace(/\\/g, "/");
+      const explicitlyIncluded = includeRe !== void 0 && (includeRe.test(entry.name) || includeRe.test(rel2));
       if (entry.isDirectory()) {
-        if (!EXCLUDED_DIRS.has(entry.name)) await walk(full);
+        if (EXCLUDED_DIRS.has(entry.name) || entry.name.startsWith(".") || ignoredBy(scopes, full, true)) continue;
+        await walk(full, scopes);
         continue;
       }
-      if (!entry.isFile() || BINARY_EXTS.has(path2.extname(entry.name).toLowerCase())) continue;
-      const rel2 = path2.relative(root, full).replace(/\\/g, "/");
-      if (includeRe && !includeRe.test(entry.name) && !includeRe.test(rel2)) continue;
+      if (!entry.isFile() || BINARY_EXTS.has(path3.extname(entry.name).toLowerCase())) continue;
+      if (includeRe && !explicitlyIncluded) continue;
+      if (!explicitlyIncluded && (entry.name.startsWith(".") || ignoredBy(scopes, full, false))) continue;
       const info = await (0, import_promises.stat)(full).catch(() => void 0);
       if (!info || info.size > MAX_SEARCH_FILE_BYTES) continue;
       const lines = (await (0, import_promises.readFile)(full, "utf8").catch(() => "")).split("\n");
@@ -1472,8 +1645,14 @@ async function searchWithScan(root, query, isRegex, include, maxResults) {
       }
     }
   };
-  await walk(root);
+  await walk(root, []);
   return results;
+}
+function redactSearchMatches(results) {
+  return results.map((match) => {
+    const { text, redacted } = redactIfSecret(match.file, match.text);
+    return redacted ? { ...match, text, redacted: true } : match;
+  });
 }
 async function handleFsSearch(root, payload) {
   const query = String(payload.query ?? "");
@@ -1486,18 +1665,23 @@ async function handleFsSearch(root, payload) {
   let results;
   if (rg) results = await searchWithRipgrep(rg, realRoot, query, isRegex, include, maxResults).catch(() => void 0);
   results ??= await searchWithScan(realRoot, query, isRegex, include, maxResults);
+  results = redactSearchMatches(results);
   return { results, totalMatches: results.length };
 }
+
+// src/chat/chat-panel.ts
+var import_node_crypto3 = require("node:crypto");
+var nodePath = __toESM(require("node:path"));
 
 // src/project/identity.ts
 var vscode7 = __toESM(require("vscode"));
 var import_node_child_process2 = require("node:child_process");
-var import_node_crypto = require("node:crypto");
+var import_node_crypto2 = require("node:crypto");
 function gitExec(args, cwd) {
-  return new Promise((resolve6) => {
+  return new Promise((resolve7) => {
     (0, import_node_child_process2.execFile)("git", args, { cwd, timeout: 5e3, windowsHide: true }, (err, stdout) => {
-      if (err) return resolve6(null);
-      resolve6(stdout.toString().trim());
+      if (err) return resolve7(null);
+      resolve7(stdout.toString().trim());
     });
   });
 }
@@ -1509,7 +1693,7 @@ function normaliseRemote(remote) {
   return out.replace(/^https?:\/\//, "").toLowerCase();
 }
 function shortHash(input) {
-  return (0, import_node_crypto.createHash)("sha1").update(input).digest("hex").slice(0, 24);
+  return (0, import_node_crypto2.createHash)("sha1").update(input).digest("hex").slice(0, 24);
 }
 async function detectProjectIdentity() {
   const folder = vscode7.workspace.workspaceFolders?.[0];
@@ -1671,7 +1855,7 @@ __export(external_exports, {
   any: () => any,
   array: () => array,
   base64: () => base642,
-  base64url: () => base64url2,
+  base64url: () => base64url3,
   bigint: () => bigint2,
   boolean: () => boolean2,
   catch: () => _catch2,
@@ -2346,10 +2530,10 @@ function mergeDefs(...defs) {
 function cloneDef(schema) {
   return mergeDefs(schema._zod.def);
 }
-function getElementAtPath(obj, path7) {
-  if (!path7)
+function getElementAtPath(obj, path10) {
+  if (!path10)
     return obj;
-  return path7.reduce((acc, key) => acc?.[key], obj);
+  return path10.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -2758,11 +2942,11 @@ function explicitlyAborted(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path7, issues) {
+function prefixIssues(path10, issues) {
   return issues.map((iss) => {
     var _a3;
     (_a3 = iss).path ?? (_a3.path = []);
-    iss.path.unshift(path7);
+    iss.path.unshift(path10);
     return iss;
   });
 }
@@ -2909,16 +3093,16 @@ function flattenError(error51, mapper = (issue2) => issue2.message) {
 }
 function formatError(error51, mapper = (issue2) => issue2.message) {
   const fieldErrors = { _errors: [] };
-  const processError = (error52, path7 = []) => {
+  const processError = (error52, path10 = []) => {
     for (const issue2 of error52.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
-        issue2.errors.map((issues) => processError({ issues }, [...path7, ...issue2.path]));
+        issue2.errors.map((issues) => processError({ issues }, [...path10, ...issue2.path]));
       } else if (issue2.code === "invalid_key") {
-        processError({ issues: issue2.issues }, [...path7, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path10, ...issue2.path]);
       } else if (issue2.code === "invalid_element") {
-        processError({ issues: issue2.issues }, [...path7, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path10, ...issue2.path]);
       } else {
-        const fullpath = [...path7, ...issue2.path];
+        const fullpath = [...path10, ...issue2.path];
         if (fullpath.length === 0) {
           fieldErrors._errors.push(mapper(issue2));
         } else {
@@ -2945,17 +3129,17 @@ function formatError(error51, mapper = (issue2) => issue2.message) {
 }
 function treeifyError(error51, mapper = (issue2) => issue2.message) {
   const result = { errors: [] };
-  const processError = (error52, path7 = []) => {
+  const processError = (error52, path10 = []) => {
     var _a3, _b;
     for (const issue2 of error52.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
-        issue2.errors.map((issues) => processError({ issues }, [...path7, ...issue2.path]));
+        issue2.errors.map((issues) => processError({ issues }, [...path10, ...issue2.path]));
       } else if (issue2.code === "invalid_key") {
-        processError({ issues: issue2.issues }, [...path7, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path10, ...issue2.path]);
       } else if (issue2.code === "invalid_element") {
-        processError({ issues: issue2.issues }, [...path7, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path10, ...issue2.path]);
       } else {
-        const fullpath = [...path7, ...issue2.path];
+        const fullpath = [...path10, ...issue2.path];
         if (fullpath.length === 0) {
           result.errors.push(mapper(issue2));
           continue;
@@ -2987,8 +3171,8 @@ function treeifyError(error51, mapper = (issue2) => issue2.message) {
 }
 function toDotPath(_path) {
   const segs = [];
-  const path7 = _path.map((seg) => typeof seg === "object" ? seg.key : seg);
-  for (const seg of path7) {
+  const path10 = _path.map((seg) => typeof seg === "object" ? seg.key : seg);
+  for (const seg of path10) {
     if (typeof seg === "number")
       segs.push(`[${seg}]`);
     else if (typeof seg === "symbol")
@@ -3106,7 +3290,7 @@ var safeDecodeAsync = /* @__PURE__ */ _safeDecodeAsync($ZodRealError);
 var regexes_exports = {};
 __export(regexes_exports, {
   base64: () => base64,
-  base64url: () => base64url,
+  base64url: () => base64url2,
   bigint: () => bigint,
   boolean: () => boolean,
   browserEmail: () => browserEmail,
@@ -3201,7 +3385,7 @@ var mac = (delimiter) => {
 var cidrv4 = /^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\/([0-9]|[1-2][0-9]|3[0-2])$/;
 var cidrv6 = /^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|::|([0-9a-fA-F]{1,4})?::([0-9a-fA-F]{1,4}:?){0,6})\/(12[0-8]|1[01][0-9]|[1-9]?[0-9])$/;
 var base64 = /^$|^(?:[0-9a-zA-Z+/]{4})*(?:(?:[0-9a-zA-Z+/]{2}==)|(?:[0-9a-zA-Z+/]{3}=))?$/;
-var base64url = /^[A-Za-z0-9_-]*$/;
+var base64url2 = /^[A-Za-z0-9_-]*$/;
 var hostname = /^(?=.{1,253}\.?$)[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[-0-9a-zA-Z]{0,61}[0-9a-zA-Z])?)*\.?$/;
 var domain = /^([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$/;
 var httpProtocol = /^https?$/;
@@ -4215,14 +4399,14 @@ var $ZodBase64 = /* @__PURE__ */ $constructor("$ZodBase64", (inst, def) => {
   };
 });
 function isValidBase64URL(data) {
-  if (!base64url.test(data))
+  if (!base64url2.test(data))
     return false;
   const base643 = data.replace(/[-_]/g, (c) => c === "-" ? "+" : "/");
   const padded = base643.padEnd(Math.ceil(base643.length / 4) * 4, "=");
   return isValidBase64(padded);
 }
 var $ZodBase64URL = /* @__PURE__ */ $constructor("$ZodBase64URL", (inst, def) => {
-  def.pattern ?? (def.pattern = base64url);
+  def.pattern ?? (def.pattern = base64url2);
   $ZodStringFormat.init(inst, def);
   inst._zod.bag.contentEncoding = "base64url";
   inst._zod.check = (payload) => {
@@ -14048,7 +14232,7 @@ __export(schemas_exports2, {
   any: () => any,
   array: () => array,
   base64: () => base642,
-  base64url: () => base64url2,
+  base64url: () => base64url3,
   bigint: () => bigint2,
   boolean: () => boolean2,
   catch: () => _catch2,
@@ -14670,7 +14854,7 @@ var ZodBase64URL = /* @__PURE__ */ $constructor("ZodBase64URL", (inst, def) => {
   $ZodBase64URL.init(inst, def);
   ZodStringFormat.init(inst, def);
 });
-function base64url2(params) {
+function base64url3(params) {
   return _base64url(ZodBase64URL, params);
 }
 var ZodE164 = /* @__PURE__ */ $constructor("ZodE164", (inst, def) => {
@@ -15680,13 +15864,13 @@ function resolveRef(ref, ctx) {
   if (!ref.startsWith("#")) {
     throw new Error("External $ref is not supported, only local refs (#/...) are allowed");
   }
-  const path7 = ref.slice(1).split("/").filter(Boolean);
-  if (path7.length === 0) {
+  const path10 = ref.slice(1).split("/").filter(Boolean);
+  if (path10.length === 0) {
     return ctx.rootSchema;
   }
   const defsKey = ctx.version === "draft-2020-12" ? "$defs" : "definitions";
-  if (path7[0] === defsKey) {
-    const key = path7[1];
+  if (path10[0] === defsKey) {
+    const key = path10[1];
     if (!key || !ctx.defs[key]) {
       throw new Error(`Reference not found: ${ref}`);
     }
@@ -16536,8 +16720,8 @@ async function errorFromResponse(response) {
   if (response.status === 403) return new ChatStreamError(message === "forbidden" ? "You are not allowed to do that." : message, "forbidden", { status: 403 });
   return new ChatStreamError(message, "server", { status: response.status });
 }
-async function streamChatEndpoint(path7, body, handlers, signal, headers) {
-  const response = await apiFetch(path7, {
+async function streamChatEndpoint(path10, body, handlers, signal, headers) {
+  const response = await apiFetch(path10, {
     method: "POST",
     headers: { Accept: "text/event-stream", ...headers ?? {} },
     body: JSON.stringify(body),
@@ -16863,9 +17047,12 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
         case "openSession":
           await this.openSession(message.sessionId);
           break;
-        case "deleteSession":
-          await this.removeSession(message.sessionId);
+        case "deleteSession": {
+          const title = this.findSession(message.sessionId)?.title ?? "this chat";
+          const choice = await vscode9.window.showWarningMessage(`Delete "${title}"? This cannot be undone.`, { modal: true }, "Delete");
+          if (choice === "Delete") await this.removeSession(message.sessionId);
           break;
+        }
         case "renameSession":
           await this.renameSession(message.sessionId, message.title);
           break;
@@ -16921,10 +17108,10 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
           await this.copilotGithubLogin();
           break;
         case "revealFile":
-          await this.revealFile(message.path);
+          await this.revealFile(message.path, message.root);
           break;
-        case "undoEdit":
-          await this.undoEdit(message.path);
+        case "undoEdits":
+          await this.undoEdits(message.sessionId, message.files);
           break;
       }
     } catch (err) {
@@ -17567,7 +17754,7 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
       maxAgentSpawns: this.catalog.maxAgentSpawns,
       ideContext: this.buildIdeContext(conversationId)
     };
-    const { abort, streamState } = this.beginTurn(conversationId, assistantMessage);
+    const { abort, streamState } = this.beginTurn(conversationId, assistantMessage, body.ideContext?.projectPath);
     const turn = this.createTurnHandlers(conversationId, assistantMessage, streamState, content);
     try {
       const handlers = turn.handlers;
@@ -17615,15 +17802,16 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
   // ---------------------------------------------------------------------------
   // Turn lifecycle shared by chat, pipeline generation and approval resume
   // ---------------------------------------------------------------------------
-  beginTurn(conversationId, assistantMessage) {
-    resetPreEditSnapshots();
+  beginTurn(conversationId, assistantMessage, root) {
+    resetPreEditSnapshots(conversationId);
     const abort = new AbortController();
     const streamState = {
       abort,
       messageId: assistantMessage.id,
       startedAt: Date.now(),
       tools: /* @__PURE__ */ new Map(),
-      edits: /* @__PURE__ */ new Map()
+      edits: /* @__PURE__ */ new Map(),
+      root: root ?? activeWorkspaceFolder()?.uri.fsPath
     };
     this.streams.set(conversationId, streamState);
     this.broadcast({
@@ -18063,13 +18251,36 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
       this.output.appendLine(`[chat.refresh] ${err instanceof Error ? err.message : String(err)}`);
     }
   }
-  async revealFile(relativePath2) {
-    const root = vscode9.workspace.workspaceFolders?.[0]?.uri;
-    if (!root) {
-      this.broadcast({ type: "log", message: "No workspace folder open." });
+  /**
+   * The workspace folder an edit card refers to: the root it recorded (only
+   * if still open), else the only folder. With several folders and no
+   * recorded root there is no safe guess.
+   */
+  editRoot(root) {
+    const folders = vscode9.workspace.workspaceFolders ?? [];
+    if (root) return folders.find((folder) => nodePath.resolve(folder.uri.fsPath) === nodePath.resolve(root));
+    return folders.length === 1 ? folders[0] : void 0;
+  }
+  async revealFile(relativePath2, root) {
+    const folder = this.editRoot(root);
+    if (!folder) {
+      this.broadcast({ type: "log", message: root ? `The folder ${root} is no longer open.` : "No workspace folder for this file." });
       return;
     }
-    const target = vscode9.Uri.joinPath(root, relativePath2.replace(/^\/+/, ""));
+    const clean = relativePath2.replace(/^\/+/, "");
+    let target;
+    try {
+      if (folder.uri.scheme === "file") {
+        target = vscode9.Uri.file(resolveInsideRootSync(folder.uri.fsPath, clean));
+      } else {
+        const normalized = nodePath.posix.normalize(clean.replace(/\\/g, "/"));
+        if (normalized === ".." || normalized.startsWith("../") || nodePath.posix.isAbsolute(normalized)) throw new Error("Path escapes the workspace folder");
+        target = vscode9.Uri.joinPath(folder.uri, normalized);
+      }
+    } catch (err) {
+      this.broadcast({ type: "log", message: `Could not open ${relativePath2}: ${err instanceof Error ? err.message : err}` });
+      return;
+    }
     try {
       const doc = await vscode9.workspace.openTextDocument(target);
       await vscode9.window.showTextDocument(doc, { preview: false });
@@ -18077,42 +18288,65 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
       this.broadcast({ type: "log", message: `Could not open ${relativePath2}: ${err instanceof Error ? err.message : err}` });
     }
   }
-  async undoEdit(relativePath2) {
-    const root = vscode9.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    if (!root) {
-      this.broadcast({ type: "log", message: "No workspace folder open." });
-      return;
-    }
-    const clean = relativePath2.replace(/^\/+/, "");
-    let full;
-    try {
-      full = resolveInsideRootSync(root, clean);
-    } catch (err) {
-      this.broadcast({ type: "log", message: `Undo failed for ${clean}: ${err instanceof Error ? err.message : err}` });
-      return;
-    }
-    if (await restorePreEditSnapshot(full)) {
-      await this.revealFile(clean).catch(() => void 0);
-      this.broadcast({ type: "log", message: `Restored ${clean} to its content before the agent's edits.`, severity: "info" });
-      return;
-    }
+  /**
+   * Undo the agent's edits to `files` from this conversation's latest turn:
+   * exact pre-edit snapshots where they exist, otherwise (after a second
+   * confirmation) git checkout in the edit's own folder only.
+   */
+  async undoEdits(sessionId, files) {
+    if (!files.length) return;
     const choice = await vscode9.window.showWarningMessage(
-      `Revert ${clean} to the last git commit? This also discards your own uncommitted changes to it.`,
+      `Undo the agent's edits to ${files.length} file${files.length === 1 ? "" : "s"}?`,
+      { modal: true },
+      "Undo"
+    );
+    if (choice !== "Undo") return;
+    const needGit = [];
+    for (const file2 of files) {
+      const folder = this.editRoot(file2.root);
+      const clean = file2.path.replace(/^\/+/, "");
+      if (!folder || folder.uri.scheme !== "file") {
+        this.broadcast({ type: "log", message: `Undo failed for ${clean}: its workspace folder is not open.` });
+        continue;
+      }
+      const root = folder.uri.fsPath;
+      let full;
+      try {
+        full = resolveInsideRootSync(root, clean);
+      } catch (err) {
+        this.broadcast({ type: "log", message: `Undo failed for ${clean}: ${err instanceof Error ? err.message : err}` });
+        continue;
+      }
+      if (await restorePreEditSnapshot(full, sessionId)) {
+        this.broadcast({ type: "log", message: `Restored ${clean} to its content before the agent's edits.`, severity: "info" });
+        continue;
+      }
+      needGit.push({ clean, root });
+    }
+    if (!needGit.length) {
+      if (files[0]) await this.revealFile(files[0].path, files[0].root).catch(() => void 0);
+      return;
+    }
+    const names = needGit.map((file2) => file2.clean).join(", ");
+    const gitChoice = await vscode9.window.showWarningMessage(
+      `No exact snapshot for ${names}. Revert ${needGit.length === 1 ? "it" : "them"} to the last git commit? This also discards your own uncommitted changes.`,
       { modal: true },
       "Revert"
     );
-    if (choice !== "Revert") return;
-    await new Promise((resolve6, reject) => {
-      (0, import_node_child_process3.execFile)("git", ["checkout", "--", clean], { cwd: root, timeout: 15e3, windowsHide: true }, (err, _stdout, stderr) => {
-        if (err) reject(new Error(stderr || err.message));
-        else resolve6();
+    if (gitChoice !== "Revert") return;
+    for (const { clean, root } of needGit) {
+      if (!isPathInside(root, nodePath.resolve(root, clean))) continue;
+      await new Promise((resolve7, reject) => {
+        (0, import_node_child_process3.execFile)("git", ["checkout", "--", clean], { cwd: root, timeout: 15e3, windowsHide: true }, (err, _stdout, stderr) => {
+          if (err) reject(new Error(stderr || err.message));
+          else resolve7();
+        });
+      }).then(() => {
+        this.broadcast({ type: "log", message: `Reverted ${clean} to last git state.`, severity: "info" });
+      }).catch((err) => {
+        this.broadcast({ type: "log", message: `Undo failed for ${clean}: ${err instanceof Error ? err.message : err}` });
       });
-    }).then(async () => {
-      await this.revealFile(clean);
-      this.broadcast({ type: "log", message: `Reverted ${clean} to last git state.`, severity: "info" });
-    }).catch((err) => {
-      this.broadcast({ type: "log", message: `Undo failed for ${clean}: ${err instanceof Error ? err.message : err}` });
-    });
+    }
   }
   async writeGeneratedTasks(text) {
     const feature = this.store.getActiveFeature();
@@ -18440,7 +18674,7 @@ function applyToolEvent(stream, event) {
       status: "running"
     };
     stream.tools.set(event.id, entry);
-    recordFileEdit(stream.edits, event.name, event.arguments ?? {}, event.result);
+    recordFileEdit(stream.edits, event.name, event.arguments ?? {}, event.result, stream.root);
     return { entry, editedFiles: [...stream.edits.values()] };
   }
   existing.completedAt = now;
@@ -18449,21 +18683,21 @@ function applyToolEvent(stream, event) {
     existing.result = event.result;
     existing.status = looksLikeToolError(event.result) ? "error" : "complete";
     if (existing.status === "error") existing.error = event.result.slice(0, 300);
-    recordFileEdit(stream.edits, event.name, event.arguments ?? {}, event.result);
+    recordFileEdit(stream.edits, event.name, event.arguments ?? {}, event.result, stream.root);
   }
   return { entry: existing, editedFiles: [...stream.edits.values()] };
 }
 function summarizeTool(name, args) {
-  const path7 = typeof args.path === "string" ? args.path : void 0;
+  const path10 = typeof args.path === "string" ? args.path : void 0;
   switch (name) {
     case "ide_write_file":
-      return path7 ? `Wrote \`${path7}\`` : "Wrote file";
+      return path10 ? `Wrote \`${path10}\`` : "Wrote file";
     case "ide_edit_file":
-      return path7 ? `Edited \`${path7}\`` : "Edited file";
+      return path10 ? `Edited \`${path10}\`` : "Edited file";
     case "ide_read_file":
-      return path7 ? `Read \`${path7}\`` : "Read file";
+      return path10 ? `Read \`${path10}\`` : "Read file";
     case "ide_list_directory":
-      return path7 ? `Listed \`${path7}\`` : "Listed directory";
+      return path10 ? `Listed \`${path10}\`` : "Listed directory";
     case "ide_search_code":
       return typeof args.query === "string" ? `Searched for "${truncate(args.query, 40)}"` : "Searched code";
     case "ide_run_command":
@@ -18491,11 +18725,11 @@ function looksLikeToolError(result) {
   }
   return /^(error|failed|denied)/i.test(trimmed);
 }
-function recordFileEdit(edits, name, args, result) {
+function recordFileEdit(edits, name, args, result, root) {
   if (name !== "ide_write_file" && name !== "ide_edit_file") return;
-  const path7 = typeof args.path === "string" ? args.path : void 0;
-  if (!path7) return;
-  const current = edits.get(path7) ?? { path: path7, writes: 0, edits: 0, additions: 0, deletions: 0 };
+  const path10 = typeof args.path === "string" ? args.path : void 0;
+  if (!path10) return;
+  const current = edits.get(path10) ?? { path: path10, root, writes: 0, edits: 0, additions: 0, deletions: 0 };
   if (name === "ide_write_file") {
     current.writes += 1;
     const content = typeof args.content === "string" ? args.content : "";
@@ -18519,7 +18753,7 @@ function recordFileEdit(edits, name, args, result) {
       current.deletions = Math.max(current.deletions, parsedStats.deletions);
     }
   }
-  edits.set(path7, current);
+  edits.set(path10, current);
 }
 function parseEditStatsFromResult(result) {
   const match = result.match(/(\+|\u002B)(\d+).*?(-|\u2212)(\d+)/);
@@ -18530,13 +18764,12 @@ function randomId() {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 }
 function randomNonce2() {
-  const bytes = new Uint8Array(16);
-  for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  return (0, import_node_crypto3.randomBytes)(16).toString("hex");
 }
 
 // src/spec/store.ts
 var vscode10 = __toESM(require("vscode"));
+var SPEC_WATCH_GLOB = "**/.liberide/specs/**/*.md";
 var SpecStore = class {
   constructor(output) {
     this.output = output;
@@ -18545,7 +18778,6 @@ var SpecStore = class {
   onDidChange = this.changeEmitter.event;
   features = /* @__PURE__ */ new Map();
   watcher;
-  promptWatcher;
   activeFeatureId;
   refreshTimer;
   refreshInProgress = false;
@@ -18559,25 +18791,11 @@ var SpecStore = class {
   }
   async initialize(context) {
     this.activeFeatureId = context.workspaceState.get("liberide.activeFeatureId");
-    this.watcher = vscode10.workspace.createFileSystemWatcher("**//.liberide/specs/**/*.md");
+    this.watcher = vscode10.workspace.createFileSystemWatcher(SPEC_WATCH_GLOB);
     this.watcher.onDidCreate(() => this.scheduleRefresh());
     this.watcher.onDidChange(() => this.scheduleRefresh());
     this.watcher.onDidDelete(() => this.scheduleRefresh());
     context.subscriptions.push(this.watcher);
-    this.promptWatcher = vscode10.workspace.createFileSystemWatcher("**/.chatllm/**/*.md");
-    const syncPrompts = () => {
-      const root = vscode10.workspace.workspaceFolders?.[0]?.uri.fsPath;
-      if (!root) return;
-      void fetch(`${process.env.CHATLLM_API_ORIGIN ?? "http://127.0.0.1:3000"}/api/skills/import-from-workspace`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rootPath: root })
-      }).catch(() => void 0);
-    };
-    this.promptWatcher.onDidCreate(syncPrompts);
-    this.promptWatcher.onDidChange(syncPrompts);
-    this.promptWatcher.onDidDelete(syncPrompts);
-    context.subscriptions.push(this.promptWatcher);
     await this.refresh();
   }
   getFeatures() {
@@ -18693,7 +18911,6 @@ var SpecStore = class {
   dispose() {
     if (this.refreshTimer) clearTimeout(this.refreshTimer);
     this.watcher?.dispose();
-    this.promptWatcher?.dispose();
     this.changeEmitter.dispose();
   }
 };
@@ -18783,7 +19000,13 @@ function createThemeBridge(output) {
   const MAX_RETRY_DELAY = 3e4;
   function connect() {
     if (disposed) return;
-    ws = new WebSocket(`${apiOrigin.replace(/^http/, "ws")}/api/theme/stream`);
+    const protocols = bearerSubprotocols();
+    if (!protocols) {
+      setTimeout(connect, retryDelay);
+      retryDelay = Math.min(retryDelay * 2, MAX_RETRY_DELAY);
+      return;
+    }
+    ws = new WebSocket(`${wsOrigin(apiOrigin)}/api/theme/stream`, protocols);
     ws.addEventListener("open", () => {
       retryDelay = 1e3;
     });
@@ -18949,19 +19172,28 @@ var TasksTreeProvider = class {
 };
 
 // src/ide-delegate/stream.ts
-var vscode32 = __toESM(require("vscode"));
+var vscode33 = __toESM(require("vscode"));
 
 // src/ide-delegate/handlers/editors.ts
 var vscode15 = __toESM(require("vscode"));
+function inWorkspace(uri) {
+  return uri.scheme === "file" && isInWorkspace(uri.fsPath);
+}
+function tabPath(uri, label) {
+  return uri && inWorkspace(uri) ? relativePath(uri.fsPath) : label;
+}
 async function handleOpenEditors() {
   const groups = vscode15.window.tabGroups.all.map((group) => ({
     activeTab: group.activeTab ? {
       label: group.activeTab.label,
-      input: group.activeTab.input instanceof vscode15.TabInputText ? relativePath(group.activeTab.input.uri.fsPath) : group.activeTab.label
+      input: tabPath(group.activeTab.input instanceof vscode15.TabInputText ? group.activeTab.input.uri : void 0, group.activeTab.label)
     } : null,
     tabs: group.tabs.map((tab) => {
       const input = tab.input;
-      const filePath = input instanceof vscode15.TabInputText ? relativePath(input.uri.fsPath) : input instanceof vscode15.TabInputTextDiff ? relativePath(input.modified.fsPath) : tab.label;
+      const filePath = tabPath(
+        input instanceof vscode15.TabInputText ? input.uri : input instanceof vscode15.TabInputTextDiff ? input.modified : void 0,
+        tab.label
+      );
       return {
         label: tab.label,
         path: filePath,
@@ -18973,7 +19205,7 @@ async function handleOpenEditors() {
   const active = vscode15.window.activeTextEditor;
   return {
     tabGroups: groups,
-    activeEditor: active ? {
+    activeEditor: active && inWorkspace(active.document.uri) ? {
       path: relativePath(active.document.uri.fsPath),
       languageId: active.document.languageId,
       isDirty: active.document.isDirty,
@@ -18988,8 +19220,9 @@ async function handleDirtyBuffers(payload) {
   const buffers = [];
   for (const doc of vscode15.workspace.textDocuments) {
     if (!doc.isDirty) continue;
-    if (doc.uri.scheme !== "file" || !isInWorkspace(doc.uri.fsPath)) continue;
-    let content = doc.getText();
+    if (!inWorkspace(doc.uri)) continue;
+    const { text, redacted } = redactIfSecret(doc.uri.fsPath, doc.getText());
+    let content = text;
     let truncated = false;
     if (content.length > maxChars) {
       content = content.slice(0, maxChars);
@@ -18999,7 +19232,8 @@ async function handleDirtyBuffers(payload) {
       path: relativePath(doc.uri.fsPath),
       languageId: doc.languageId,
       content,
-      truncated
+      truncated,
+      ...redacted ? { redacted } : {}
     });
   }
   return { buffers, count: buffers.length };
@@ -19007,11 +19241,13 @@ async function handleDirtyBuffers(payload) {
 async function handleActiveSelection() {
   const editor = vscode15.window.activeTextEditor;
   if (!editor) return { available: false };
+  if (!inWorkspace(editor.document.uri)) return { available: false, reason: "The active editor is outside this workspace folder" };
   const sel = editor.selection;
-  const text = editor.document.getText(sel);
+  const { text, redacted } = redactIfSecret(editor.document.uri.fsPath, editor.document.getText(sel));
   return {
     path: relativePath(editor.document.uri.fsPath),
     text,
+    ...redacted ? { redacted } : {},
     startLine: sel.start.line + 1,
     startCharacter: sel.start.character,
     endLine: sel.end.line + 1,
@@ -19062,15 +19298,26 @@ function locationToJson(loc) {
     character: link.targetRange.start.character
   };
 }
+function pageOf(items, payload, defaultSize = 50) {
+  const size = Math.max(1, Math.min(Math.floor(Number(payload.maxResults ?? defaultSize)) || defaultSize, 500));
+  const offset = Math.max(0, Math.floor(Number(payload.offset ?? payload.cursor ?? 0)) || 0);
+  const page = items.slice(offset, offset + size);
+  const end = offset + page.length;
+  return { page, offset, total: items.length, ...end < items.length ? { nextCursor: end } : {} };
+}
 async function handleWorkspaceSymbols(payload) {
   const query = String(payload.query ?? "");
-  const maxResults = Number(payload.maxResults ?? 50);
-  const symbols = await vscode17.commands.executeCommand(
+  const all = await vscode17.commands.executeCommand(
     "vscode.executeWorkspaceSymbolProvider",
     query
   ) ?? [];
+  const symbols = all.filter((s) => s.location.uri.scheme !== "file" || isInWorkspace(s.location.uri.fsPath));
+  const { page, offset, total, nextCursor } = pageOf(symbols, payload);
   return {
-    symbols: symbols.slice(0, maxResults).map((s) => ({
+    offset,
+    total,
+    ...nextCursor !== void 0 ? { nextCursor, hasMore: true } : { hasMore: false },
+    symbols: page.map((s) => ({
       name: s.name,
       kind: vscode17.SymbolKind[s.kind],
       path: relativePath(s.location.uri.fsPath),
@@ -19155,22 +19402,22 @@ async function handleFindFiles(payload) {
 
 // src/ide-delegate/handlers/git.ts
 var vscode19 = __toESM(require("vscode"));
-var path3 = __toESM(require("node:path"));
-function isInside2(root, candidate) {
-  const rel2 = path3.relative(root, candidate);
-  return rel2 === "" || rel2 !== ".." && !rel2.startsWith(`..${path3.sep}`) && !path3.isAbsolute(rel2);
+var path4 = __toESM(require("node:path"));
+function isInside(root, candidate) {
+  const rel2 = path4.relative(root, candidate);
+  return rel2 === "" || rel2 !== ".." && !rel2.startsWith(`..${path4.sep}`) && !path4.isAbsolute(rel2);
 }
 async function getGitRepo(root) {
   const ext = vscode19.extensions.getExtension("vscode.git");
   if (!ext) throw new Error("vscode.git extension is not available");
   if (!ext.isActive) await ext.activate();
-  const repos = ext.exports.getAPI(1).repositories.filter((r) => isInside2(r.rootUri.fsPath, root) || isInside2(root, r.rootUri.fsPath)).sort((a, b) => b.rootUri.fsPath.length - a.rootUri.fsPath.length);
-  const repo = repos.find((r) => isInside2(r.rootUri.fsPath, root)) ?? repos[0];
+  const repos = ext.exports.getAPI(1).repositories.filter((r) => isInside(r.rootUri.fsPath, root) || isInside(root, r.rootUri.fsPath)).sort((a, b) => b.rootUri.fsPath.length - a.rootUri.fsPath.length);
+  const repo = repos.find((r) => isInside(r.rootUri.fsPath, root)) ?? repos[0];
   if (!repo) throw new Error("No git repository found in workspace");
   return repo;
 }
 function rel(fsPath, root) {
-  return path3.relative(root, fsPath).replace(/\\/g, "/");
+  return path4.relative(root, fsPath).replace(/\\/g, "/");
 }
 function truncate2(text, maxBytes) {
   return text.length > maxBytes ? `${text.slice(0, maxBytes)}
@@ -19220,7 +19467,7 @@ async function handleGitDiff(root, payload) {
   } else {
     text = await repo.diff(staged);
   }
-  return { path: relPath2 ?? ".", staged, diff: truncate2(text ?? "", maxBytes) };
+  return { path: relPath2 ?? ".", staged, diff: truncate2(redactUnifiedDiff(text ?? "", relPath2), maxBytes) };
 }
 async function handleGitBlame(root, payload) {
   const repo = await getGitRepo(root);
@@ -19232,11 +19479,11 @@ async function handleGitBlame(root, payload) {
 }
 
 // src/ide-delegate/handlers/terminal-session.ts
-var path5 = __toESM(require("node:path"));
+var path6 = __toESM(require("node:path"));
 
 // src/terminal/local-runner.ts
 var import_child_process = require("child_process");
-var path4 = __toESM(require("path"));
+var path5 = __toESM(require("path"));
 var MAX_OUTPUT = 1e5;
 var KILL_GRACE_MS = 2e3;
 var OutputBuffer = class {
@@ -19272,45 +19519,70 @@ function shellArgv(command) {
   const shell = process.env.SHELL ?? "/bin/sh";
   return [shell, "-c", command];
 }
+var liveProcesses = /* @__PURE__ */ new Set();
+function trackProcess(proc) {
+  liveProcesses.add(proc);
+  proc.once("exit", () => liveProcesses.delete(proc));
+  proc.once("error", () => liveProcesses.delete(proc));
+}
+function killAllProcesses() {
+  for (const proc of liveProcesses) {
+    if (proc.pid === void 0 || proc.exitCode !== null) continue;
+    try {
+      if (process.platform === "win32") proc.kill();
+      else process.kill(-proc.pid, "SIGKILL");
+    } catch {
+      try {
+        proc.kill("SIGKILL");
+      } catch {
+      }
+    }
+  }
+  liveProcesses.clear();
+}
+process.once("exit", killAllProcesses);
+function signalGroup(proc, signal) {
+  if (proc.pid === void 0) return;
+  try {
+    if (process.platform === "win32") throw new Error("no process groups");
+    process.kill(-proc.pid, signal);
+  } catch {
+    try {
+      proc.kill(signal);
+    } catch {
+    }
+  }
+}
 function killTree(proc) {
   if (proc.pid === void 0 || proc.exitCode !== null) return;
   if (process.platform === "win32") {
     (0, import_child_process.spawn)("taskkill", ["/pid", String(proc.pid), "/T", "/F"], { windowsHide: true }).on("error", () => void 0);
     return;
   }
-  const signalGroup = (signal) => {
-    try {
-      process.kill(-proc.pid, signal);
-    } catch {
-      try {
-        proc.kill(signal);
-      } catch {
-      }
-    }
-  };
-  signalGroup("SIGTERM");
+  signalGroup(proc, "SIGTERM");
   setTimeout(() => {
-    if (proc.exitCode === null && proc.signalCode === null) signalGroup("SIGKILL");
+    if (proc.exitCode === null && proc.signalCode === null) signalGroup(proc, "SIGKILL");
   }, KILL_GRACE_MS).unref();
 }
 function runLocalTerminal(delegate, signal, hooks = {}) {
-  const cwd = path4.resolve(delegate.cwd || delegate.projectPath);
+  const cwd = path5.resolve(delegate.cwd || delegate.projectPath);
   const argv = shellArgv(delegate.command);
   const timeoutMs = delegate.timeoutMs > 0 ? delegate.timeoutMs : 12e4;
-  return new Promise((resolve6) => {
+  return new Promise((resolve7) => {
     if (signal?.aborted) {
-      resolve6({ exitCode: null, stdout: "", stderr: "Cancelled before start", timedOut: false, cancelled: true });
+      resolve7({ exitCode: null, stdout: "", stderr: "Cancelled before start", timedOut: false, cancelled: true });
       return;
     }
     const proc = (0, import_child_process.spawn)(argv[0], argv.slice(1), {
       cwd,
       // The user's own environment (HOME, git/ssh config, caches) is what a
-      // command in their workspace expects.
-      env: process.env,
+      // command in their workspace expects, minus LiberIDE credentials.
+      env: childProcessEnv(),
       windowsHide: true,
       // Own process group so a timeout or Stop can kill every descendant.
       detached: process.platform !== "win32"
     });
+    trackProcess(proc);
     const stdout = new OutputBuffer();
     const stderr = new OutputBuffer();
     let timedOut = false;
@@ -19337,7 +19609,7 @@ function runLocalTerminal(delegate, signal, hooks = {}) {
     const finish = (result) => {
       clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
-      resolve6(result);
+      resolve7(result);
     };
     proc.on("close", (code, killSignal) => {
       finish({
@@ -19365,6 +19637,7 @@ var MAX_READ_CHARS = 1e5;
 var SESSION_IDLE_TTL_MS = 30 * 6e4;
 var SETTLE_QUIET_MS = 400;
 var DEFAULT_SEND_WAIT_MS = 2e3;
+var EXITED_SESSION_TTL_MS = 2 * 6e4;
 var MAX_SEND_WAIT_MS = 3e4;
 function toTerminalText(text) {
   return text.replace(/\r?\n/g, "\r\n");
@@ -19396,7 +19669,7 @@ var TerminalView = class {
     else this.writeEmitter.fire(chunk);
   }
   dispose() {
-    this.terminal.dispose();
+    if (!this.closedByUser) this.terminal.dispose();
     this.writeEmitter.dispose();
   }
 };
@@ -19441,16 +19714,19 @@ var AgentTerminalSession = class {
     const shell = shellCommand();
     this.proc = (0, import_child_process2.spawn)(shell.command, shell.args, {
       cwd,
-      env: process.env,
+      env: childProcessEnv(),
       windowsHide: true,
       detached: process.platform !== "win32"
     });
+    trackProcess(this.proc);
+    if (process.platform !== "win32") this.proc.stdin?.write("trap : INT\n");
     this.proc.stdout?.setEncoding("utf8");
     this.proc.stderr?.setEncoding("utf8");
     this.proc.stdout?.on("data", (chunk) => this.output(chunk));
     this.proc.stderr?.on("data", (chunk) => this.output(chunk));
     this.proc.on("close", (code) => {
       this.exited = true;
+      this.exitedAt = Date.now();
       this.exitCode = code;
       this.view.write(`
 \x1B[2m[session ended${code === null ? "" : ` with exit code ${code}`}]\x1B[0m
@@ -19459,6 +19735,7 @@ var AgentTerminalSession = class {
     });
     this.proc.on("error", (err) => {
       this.exited = true;
+      this.exitedAt = Date.now();
       this.exitCode = null;
       this.output(`${err.message}
 `);
@@ -19470,6 +19747,8 @@ var AgentTerminalSession = class {
   id = (0, import_crypto.randomUUID)();
   createdAt = Date.now();
   lastUsedAt = Date.now();
+  exitedAt;
+  closed = false;
   proc;
   view;
   buffer = new RollingBuffer();
@@ -19511,11 +19790,11 @@ var AgentTerminalSession = class {
       }
     }
   }
-  /** Ctrl+C: interrupt the shell's children (the shell itself keeps running). */
+  /** Ctrl+C: SIGINT to the process group (grandchildren too); the shell traps it and keeps running. */
   interrupt() {
     if (this.exited || this.proc.pid === void 0) return;
     if (process.platform === "win32") return;
-    (0, import_child_process2.spawn)("pkill", ["-INT", "-P", String(this.proc.pid)]).on("error", () => void 0);
+    signalGroup(this.proc, "SIGINT");
   }
   writeStdin(text) {
     if (this.exited) throw new Error("Terminal session has ended");
@@ -19533,14 +19812,14 @@ var AgentTerminalSession = class {
     return this.read(false);
   }
   waitForOutput(since, maxWaitMs, signal) {
-    return new Promise((resolve6) => {
+    return new Promise((resolve7) => {
       let quietTimer;
       const done = () => {
         clearTimeout(deadline);
         if (quietTimer) clearTimeout(quietTimer);
         this.outputListeners.delete(onOutput);
         signal?.removeEventListener("abort", done);
-        resolve6();
+        resolve7();
       };
       const onOutput = () => {
         if (this.exited) return done();
@@ -19566,19 +19845,23 @@ var AgentTerminalSession = class {
     };
   }
   close() {
+    if (this.closed) return;
+    this.closed = true;
     killTree(this.proc);
+    this.notify();
     this.outputListeners.clear();
-    if (!this.view.closedByUser) this.view.dispose();
+    this.view.dispose();
     this.onDisposed(this.id);
   }
 };
 var sessions = /* @__PURE__ */ new Map();
 var sweeper = setInterval(() => {
   const now = Date.now();
-  for (const session of sessions.values()) {
+  for (const session of [...sessions.values()]) {
     if (now - session.lastUsedAt > SESSION_IDLE_TTL_MS) session.close();
+    else if (session.exitedAt !== void 0 && now - session.exitedAt > EXITED_SESSION_TTL_MS) session.close();
   }
-}, 6e4);
+}, 3e4);
 sweeper.unref?.();
 function sessionFor(id) {
   const session = sessions.get(id);
@@ -19586,6 +19869,7 @@ function sessionFor(id) {
   return session;
 }
 function openAgentTerminal(input) {
+  for (const session2 of [...sessions.values()]) if (!session2.running) session2.close();
   if (sessions.size >= MAX_SESSIONS) {
     const oldest = [...sessions.values()].sort((a, b) => a.lastUsedAt - b.lastUsedAt)[0];
     oldest?.close();
@@ -19606,6 +19890,7 @@ function closeAgentTerminal(id) {
 }
 function disposeAgentTerminals() {
   clearInterval(sweeper);
+  killAllProcesses();
   for (const session of [...sessions.values()]) session.close();
   for (const view of outputViews.values()) view.dispose();
   outputViews.clear();
@@ -19614,7 +19899,14 @@ var outputViews = /* @__PURE__ */ new Map();
 function agentOutputView(name) {
   let view = outputViews.get(name);
   if (!view || view.closedByUser) {
-    view = new TerminalView(name, { onClose: () => outputViews.delete(name) });
+    view?.dispose();
+    const created = new TerminalView(name, {
+      onClose: () => {
+        outputViews.delete(name);
+        created.dispose();
+      }
+    });
+    view = created;
     outputViews.set(name, view);
   }
   view.terminal.show(true);
@@ -19623,10 +19915,10 @@ function agentOutputView(name) {
 
 // src/ide-delegate/handlers/terminal-session.ts
 function cwdInside(root, requested) {
-  const base = path5.resolve(root);
-  const cwd = path5.resolve(base, typeof requested === "string" && requested ? requested : ".");
-  const rel2 = path5.relative(base, cwd);
-  if (rel2 === ".." || rel2.startsWith(`..${path5.sep}`) || path5.isAbsolute(rel2)) {
+  const base = path6.resolve(root);
+  const cwd = path6.resolve(base, typeof requested === "string" && requested ? requested : ".");
+  const rel2 = path6.relative(base, cwd);
+  if (rel2 === ".." || rel2.startsWith(`..${path6.sep}`) || path6.isAbsolute(rel2)) {
     throw new Error("Terminal cwd is outside the workspace folder");
   }
   return cwd;
@@ -19679,7 +19971,7 @@ async function handleTerminalSessionClose(payload) {
 }
 
 // src/ide-delegate/handlers/terminal-run.ts
-var path6 = __toESM(require("node:path"));
+var path7 = __toESM(require("node:path"));
 async function handleTerminalRun(payload, signal) {
   const delegate = {
     delegateId: String(payload.delegateId ?? ""),
@@ -19690,17 +19982,73 @@ async function handleTerminalRun(payload, signal) {
     sessionId: payload.sessionId ? String(payload.sessionId) : void 0,
     conversationId: payload.conversationId ? String(payload.conversationId) : void 0
   };
-  const root = path6.resolve(delegate.projectPath);
-  const cwd = path6.resolve(root, delegate.cwd || ".");
-  const rel2 = path6.relative(root, cwd);
-  if (rel2 === ".." || rel2.startsWith(`..${path6.sep}`) || path6.isAbsolute(rel2)) {
+  const root = path7.resolve(delegate.projectPath);
+  const cwd = path7.resolve(root, delegate.cwd || ".");
+  const rel2 = path7.relative(root, cwd);
+  if (rel2 === ".." || rel2.startsWith(`..${path7.sep}`) || path7.isAbsolute(rel2)) {
     throw new Error("terminal.run cwd is outside the workspace folder");
   }
   return runLocalTerminal({ ...delegate, cwd }, signal);
 }
 
 // src/ide-delegate/handlers/refactor.ts
+var vscode22 = __toESM(require("vscode"));
+
+// src/ide-delegate/handlers/edit-apply.ts
 var vscode21 = __toESM(require("vscode"));
+var path8 = __toESM(require("node:path"));
+function relativeToFolder(uri) {
+  const folder = workspaceFolder();
+  if (!folder) throw new Error("No workspace folder open");
+  if (uri.scheme === "file" && folder.uri.scheme === "file") {
+    if (!isInWorkspace(uri.fsPath)) throw new Error(`Refusing to change a file outside the workspace folder: ${uri.fsPath}`);
+    return path8.relative(folder.uri.fsPath, uri.fsPath).replace(/\\/g, "/");
+  }
+  const rel2 = path8.posix.relative(folder.uri.path, uri.path);
+  if (uri.scheme !== folder.uri.scheme || rel2 === ".." || rel2.startsWith("../") || path8.posix.isAbsolute(rel2)) {
+    throw new Error(`Refusing to change a file outside the workspace folder: ${uri.toString()}`);
+  }
+  return rel2;
+}
+function assertEditableResource(resource) {
+  const rel2 = relativeToFolder(resource.uri);
+  if (rel2 === "" || rel2 === ".") throw new Error(`Refusing to ${resource.operation} the workspace root`);
+  if (rel2.split("/")[0]?.toLowerCase() === ".git") throw new Error(`Refusing to ${resource.operation} inside .git: ${rel2}`);
+}
+async function guardRedactedText(uri, edits) {
+  if (!edits.some((edit) => countRedactionPlaceholders(edit.newText) > 0)) return;
+  const doc = await vscode21.workspace.openTextDocument(uri).then((d) => d, () => void 0);
+  const label = uri.scheme === "file" ? relativePath(uri.fsPath) : uri.toString();
+  for (const edit of edits) assertNoRedactionPlaceholders(doc?.getText(edit.range) ?? "", edit.newText, label);
+}
+function touchedByEdit(edit) {
+  return edit.entries().map(([uri]) => ({ uri, operation: "edit" }));
+}
+async function saveDocuments(uris) {
+  const saved = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const uri of uris) {
+    const key = uri.toString();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const doc = vscode21.workspace.textDocuments.find((d) => d.uri.toString() === key);
+    if (doc?.isDirty && await doc.save()) saved.push(uri.scheme === "file" ? relativePath(uri.fsPath) : key);
+  }
+  return saved;
+}
+async function applyTrackedEdit(edit, touched) {
+  for (const resource of touched) assertEditableResource(resource);
+  for (const [uri, edits] of edit.entries()) await guardRedactedText(uri, edits);
+  for (const resource of touched) {
+    if (resource.uri.scheme === "file") await snapshotBeforeChange(resource.uri.fsPath);
+  }
+  const applied = await vscode21.workspace.applyEdit(edit);
+  const saved = applied ? await saveDocuments(touched.map((resource) => resource.uri)) : [];
+  return { applied, saved };
+}
+
+// src/ide-delegate/handlers/refactor.ts
+var CODE_ACTION_RESOLVE_COUNT = 50;
 var codeActionCache = /* @__PURE__ */ new Map();
 function cacheAction(action) {
   const id = crypto.randomUUID();
@@ -19715,11 +20063,12 @@ async function handleCodeActions(payload) {
   const uri = resolveFileUri(String(payload.path ?? ""));
   const range = rangeFromPayload(payload);
   const kinds = payload.only ? String(payload.only).split(",").map((kind) => kind.trim()).filter(Boolean) : [];
-  const provided = await vscode21.commands.executeCommand(
+  const provided = await vscode22.commands.executeCommand(
     "vscode.executeCodeActionProvider",
     uri,
     range,
-    kinds.length === 1 ? kinds[0] : void 0
+    kinds.length === 1 ? kinds[0] : void 0,
+    CODE_ACTION_RESOLVE_COUNT
   ) ?? [];
   const actions = kinds.length > 1 ? provided.filter((action) => kinds.some((kind) => action.kind?.value === kind || action.kind?.value.startsWith(`${kind}.`))) : provided;
   return {
@@ -19736,54 +20085,78 @@ async function handleApplyCodeAction(payload) {
   const actionId = String(payload.actionId ?? "");
   const action = codeActionCache.get(actionId);
   if (!action) throw new Error(`Unknown code action id: ${actionId}`);
+  if (action.disabled) throw new Error(`Code action '${action.title}' is disabled: ${action.disabled.reason}`);
+  if (!action.edit && !action.command) {
+    throw new Error(`Code action '${action.title}' has nothing to apply (no edit or command after resolving)`);
+  }
+  const touched = action.edit ? touchedByEdit(action.edit) : [];
   if (action.edit) {
-    const applied = await vscode21.workspace.applyEdit(action.edit);
+    const { applied } = await applyTrackedEdit(action.edit, touched);
     if (!applied) throw new Error("Failed to apply code action edit");
   }
   if (action.command) {
-    await vscode21.commands.executeCommand(action.command.command, ...action.command.arguments ?? []);
+    await vscode22.commands.executeCommand(action.command.command, ...action.command.arguments ?? []);
+    await saveDocuments(touched.map((resource) => resource.uri));
   }
   codeActionCache.delete(actionId);
-  return { applied: true, title: action.title };
+  return { applied: true, title: action.title, changedFiles: touched.filter((r) => r.uri.scheme === "file").map((r) => relativePath(r.uri.fsPath)) };
 }
 async function handleRenameSymbol(payload) {
   const uri = resolveFileUri(String(payload.path ?? ""));
   const position = positionFromPayload(payload);
   const newName = String(payload.newName ?? "");
   if (!newName) throw new Error("newName is required");
-  const edit = await vscode21.commands.executeCommand(
+  if (countRedactionPlaceholders(newName) > 0) throw new Error("newName contains a [REDACTED] placeholder");
+  const edit = await vscode22.commands.executeCommand(
     "vscode.executeDocumentRenameProvider",
     uri,
     position,
     newName
   );
   if (!edit) throw new Error("Rename provider returned no edit");
-  const applied = await vscode21.workspace.applyEdit(edit);
-  return { applied, newName };
+  const touched = touchedByEdit(edit);
+  const { applied, saved } = await applyTrackedEdit(edit, touched);
+  return { applied, newName, changedFiles: touched.filter((r) => r.uri.scheme === "file").map((r) => relativePath(r.uri.fsPath)), saved };
+}
+function formattingOptions(uri) {
+  const config2 = vscode22.workspace.getConfiguration("editor", uri);
+  return { tabSize: Number(config2.get("tabSize", 4)), insertSpaces: config2.get("insertSpaces") !== false };
+}
+async function applyFormatEdits(filePath, uri, edits) {
+  if (!edits?.length) return { path: filePath, formatted: false, reason: "No formatter changes (or no formatter for this file)" };
+  const edit = new vscode22.WorkspaceEdit();
+  edit.set(uri, edits);
+  const { applied, saved } = await applyTrackedEdit(edit, [{ uri, operation: "edit" }]);
+  return { path: filePath, formatted: applied, edits: edits.length, saved: saved.length > 0 };
 }
 async function handleFormatDocument(payload) {
   const filePath = String(payload.path ?? "");
   const uri = resolveFileUri(filePath);
-  const doc = await vscode21.workspace.openTextDocument(uri);
-  const editor = await vscode21.window.showTextDocument(doc, { preview: false, preserveFocus: true });
-  await vscode21.commands.executeCommand("editor.action.formatDocument");
-  return { path: filePath, formatted: true, isDirty: editor.document.isDirty };
+  await vscode22.workspace.openTextDocument(uri);
+  const edits = await vscode22.commands.executeCommand(
+    "vscode.executeFormatDocumentProvider",
+    uri,
+    formattingOptions(uri)
+  );
+  return applyFormatEdits(filePath, uri, edits);
 }
 async function handleFormatRange(payload) {
   const filePath = String(payload.path ?? "");
   const uri = resolveFileUri(filePath);
-  const doc = await vscode21.workspace.openTextDocument(uri);
-  const editor = await vscode21.window.showTextDocument(doc, { preview: false, preserveFocus: true });
-  const range = rangeFromPayload(payload);
-  editor.selection = new vscode21.Selection(range.start, range.end);
-  await vscode21.commands.executeCommand("editor.action.formatSelection");
-  return { path: filePath, formatted: true, isDirty: editor.document.isDirty };
+  await vscode22.workspace.openTextDocument(uri);
+  const edits = await vscode22.commands.executeCommand(
+    "vscode.executeFormatRangeProvider",
+    uri,
+    rangeFromPayload(payload),
+    formattingOptions(uri)
+  );
+  return applyFormatEdits(filePath, uri, edits);
 }
 
 // src/ide-delegate/handlers/workspace-edit.ts
-var vscode22 = __toESM(require("vscode"));
+var vscode23 = __toESM(require("vscode"));
 function rangeFromEditPayload(edit) {
-  return new vscode22.Range(
+  return new vscode23.Range(
     edit.range.startLine - 1,
     edit.range.startCharacter,
     edit.range.endLine - 1,
@@ -19791,12 +20164,14 @@ function rangeFromEditPayload(edit) {
   );
 }
 function buildWorkspaceEdit(payload) {
-  const edit = new vscode22.WorkspaceEdit();
+  const edit = new vscode23.WorkspaceEdit();
+  const touched = [];
   const changes = payload.changes;
   if (changes) {
     for (const [filePath, edits] of Object.entries(changes)) {
       const uri = resolveFileUri(filePath);
-      edit.set(uri, edits.map((e) => new vscode22.TextEdit(rangeFromEditPayload(e), e.newText)));
+      edit.set(uri, edits.map((e) => new vscode23.TextEdit(rangeFromEditPayload(e), e.newText)));
+      touched.push({ uri, operation: "edit" });
     }
   }
   const documentChanges = payload.documentChanges;
@@ -19807,34 +20182,36 @@ function buildWorkspaceEdit(payload) {
         const newUri = resolveFileUri(String(change.newPath ?? ""));
         const options = change.options;
         edit.renameFile(oldUri, newUri, options);
+        touched.push({ uri: oldUri, operation: "rename" }, { uri: newUri, operation: "rename" });
       } else if (change.kind === "create") {
         const uri = resolveFileUri(String(change.path ?? ""));
         const options = change.options;
         edit.createFile(uri, options);
+        touched.push({ uri, operation: "create" });
       } else if (change.kind === "delete") {
         const uri = resolveFileUri(String(change.path ?? ""));
         const options = change.options;
         edit.deleteFile(uri, options);
+        touched.push({ uri, operation: "delete" });
       } else if (change.textEdits) {
         const uri = resolveFileUri(String(change.path ?? ""));
         const edits = change.textEdits;
-        edit.set(uri, edits.map((e) => new vscode22.TextEdit(rangeFromEditPayload(e), e.newText)));
+        edit.set(uri, edits.map((e) => new vscode23.TextEdit(rangeFromEditPayload(e), e.newText)));
+        touched.push({ uri, operation: "edit" });
       }
     }
   }
-  return edit;
+  return { edit, touched };
 }
 async function handleApplyWorkspaceEdit(payload) {
-  const workspaceEdit = buildWorkspaceEdit(payload);
-  const applied = await vscode22.workspace.applyEdit(workspaceEdit);
-  const changedFiles = [];
-  const changes = payload.changes;
-  if (changes) changedFiles.push(...Object.keys(changes));
-  return { applied, changedFiles: [...new Set(changedFiles.map(relativePath))] };
+  const { edit, touched } = buildWorkspaceEdit(payload);
+  const { applied, saved } = await applyTrackedEdit(edit, touched);
+  const changedFiles = touched.filter((resource) => resource.uri.scheme === "file").map((resource) => relativePath(resource.uri.fsPath));
+  return { applied, changedFiles: [...new Set(changedFiles)], saved };
 }
 
 // src/ide-delegate/handlers/tasks.ts
-var vscode23 = __toESM(require("vscode"));
+var vscode24 = __toESM(require("vscode"));
 var taskRuns = /* @__PURE__ */ new Map();
 var MAX_TRACKED_RUNS = 100;
 var listening = false;
@@ -19845,11 +20222,11 @@ function runFor(execution) {
 function ensureTaskListeners() {
   if (listening) return;
   listening = true;
-  vscode23.tasks.onDidEndTaskProcess((event) => {
+  vscode24.tasks.onDidEndTaskProcess((event) => {
     const run = runFor(event.execution);
     if (run && event.exitCode !== void 0) run.exitCode = event.exitCode;
   });
-  vscode23.tasks.onDidEndTask((event) => {
+  vscode24.tasks.onDidEndTask((event) => {
     const run = runFor(event.execution);
     if (!run || run.state !== "running") return;
     run.state = "completed";
@@ -19880,17 +20257,17 @@ function taskToJson(task) {
 }
 async function handleTasksList(payload) {
   const filter = payload.filter;
-  const tasks2 = await vscode23.tasks.fetchTasks(filter ? { type: filter } : void 0);
+  const tasks2 = await vscode24.tasks.fetchTasks(filter ? { type: filter } : void 0);
   return { tasks: tasks2.map(taskToJson) };
 }
 async function handleTasksRun(payload) {
   const taskName = String(payload.name ?? "");
   const taskSource = payload.source ? String(payload.source) : void 0;
-  const tasks2 = await vscode23.tasks.fetchTasks();
+  const tasks2 = await vscode24.tasks.fetchTasks();
   const task = tasks2.find((t) => t.name === taskName && (!taskSource || t.source === taskSource));
   if (!task) throw new Error(`Task not found: ${taskName}`);
   ensureTaskListeners();
-  const execution = await vscode23.tasks.executeTask(task);
+  const execution = await vscode24.tasks.executeTask(task);
   const runId = `${task.name}-${Date.now()}`;
   taskRuns.set(runId, { runId, execution, name: task.name, startedAt: Date.now(), state: "running" });
   while (taskRuns.size > MAX_TRACKED_RUNS) taskRuns.delete(taskRuns.keys().next().value);
@@ -19915,17 +20292,17 @@ async function handleTasksStatus(payload) {
 }
 
 // src/ide-delegate/handlers/tests.ts
-var vscode24 = __toESM(require("vscode"));
+var vscode25 = __toESM(require("vscode"));
 var MAX_LISTED_TESTS = 500;
 var MAX_REPORTED_FAILURES = 20;
 var MAX_MESSAGE_CHARS = 2e3;
 var MAX_OUTPUT_CHARS = 2e4;
 var observer;
 function testObserver() {
-  if (!vscode24.tests.createTestObserver) {
+  if (!vscode25.tests.createTestObserver) {
     throw new Error("The test observer API is not available in this VS Code build");
   }
-  observer ??= vscode24.tests.createTestObserver();
+  observer ??= vscode25.tests.createTestObserver();
   return observer;
 }
 function flatten(items, out = []) {
@@ -19940,10 +20317,13 @@ function rangeJson(range) {
   return { startLine: range.start.line + 1, endLine: range.end.line + 1 };
 }
 async function handleTestsList() {
-  const all = flatten(testObserver().tests);
+  const controllerOf = /* @__PURE__ */ new Map();
+  for (const root of testObserver().tests) for (const item of flatten([root])) controllerOf.set(item, root.id);
+  const all = [...controllerOf.keys()];
   return {
     tests: all.slice(0, MAX_LISTED_TESTS).map((item) => ({
       id: item.id,
+      controllerId: controllerOf.get(item),
       label: item.label,
       path: item.uri ? relativePath(item.uri.fsPath) : void 0,
       range: rangeJson(item.range),
@@ -19992,20 +20372,26 @@ function summarize(result, summary) {
 }
 async function handleTestsRun(payload, signal) {
   const ids = new Set(Array.isArray(payload.testIds) ? payload.testIds.map(String) : []);
-  const all = flatten(testObserver().tests);
-  const include = ids.size ? all.filter((item) => ids.has(item.id)) : void 0;
-  if (ids.size && !include?.length) throw new Error(`No tests found for ids: ${[...ids].join(", ")}. Use the test list tool to get ids.`);
+  const controllerId = typeof payload.controllerId === "string" && payload.controllerId ? payload.controllerId : void 0;
+  const roots = testObserver().tests;
+  const scoped = controllerId ? roots.filter((item) => item.id === controllerId) : [...roots];
+  if (controllerId && !scoped.length) {
+    throw new Error(`No test controller '${controllerId}'. Known: ${roots.map((item) => item.id).join(", ") || "(none)"}`);
+  }
+  const all = flatten(scoped);
+  const include = ids.size ? all.filter((item) => ids.has(item.id)) : controllerId ? scoped : void 0;
+  if (ids.size && !include?.length) throw new Error(`No tests found for ids: ${[...ids].join(", ")}${controllerId ? ` in controller '${controllerId}'` : ""}. Use the test list tool to get ids.`);
   const runId = `test-${Date.now()}`;
   const summary = { runId, status: "running", startedAt: (/* @__PURE__ */ new Date()).toISOString() };
   runs.set(runId, summary);
   while (runs.size > 50) runs.delete(runs.keys().next().value);
-  const before = vscode24.tests.testResults[0];
-  const cancellation = new vscode24.CancellationTokenSource();
+  const before = vscode25.tests.testResults[0];
+  const cancellation = new vscode25.CancellationTokenSource();
   const onAbort = () => cancellation.cancel();
   signal?.addEventListener("abort", onAbort, { once: true });
   try {
-    await vscode24.tests.runTests(new vscode24.TestRunRequest(include), cancellation.token);
-    const latest = vscode24.tests.testResults[0];
+    await vscode25.tests.runTests(new vscode25.TestRunRequest(include), cancellation.token);
+    const latest = vscode25.tests.testResults[0];
     if (latest && latest !== before) summarize(latest, summary);
     summary.status = cancellation.token.isCancellationRequested ? "cancelled" : "completed";
   } catch (err) {
@@ -20023,36 +20409,36 @@ async function handleTestsStatus(payload) {
 }
 
 // src/ide-delegate/handlers/debug.ts
-var vscode25 = __toESM(require("vscode"));
+var vscode26 = __toESM(require("vscode"));
 async function handleDebugStart(payload) {
   const configName = String(payload.name ?? payload.configName ?? "");
   const folder = workspaceFolder();
   if (!folder) throw new Error("No workspace folder open");
-  const launch = vscode25.workspace.getConfiguration("launch", folder.uri);
+  const launch = vscode26.workspace.getConfiguration("launch", folder.uri);
   const configurations = launch.get("configurations") ?? [];
   const config2 = configurations.find((c) => c.name === configName);
   if (!config2) throw new Error(`Debug configuration not found: ${configName}`);
-  const started = await vscode25.debug.startDebugging(folder, config2);
+  const started = await vscode26.debug.startDebugging(folder, config2);
   return { started, name: configName };
 }
 async function handleDebugStop() {
-  const session = vscode25.debug.activeDebugSession;
+  const session = vscode26.debug.activeDebugSession;
   if (!session) return { stopped: false, reason: "no active session" };
-  await vscode25.debug.stopDebugging(session);
+  await vscode26.debug.stopDebugging(session);
   return { stopped: true, name: session.name };
 }
 async function handleDebugList() {
   const folder = workspaceFolder();
-  const launch = folder ? vscode25.workspace.getConfiguration("launch", folder.uri) : vscode25.workspace.getConfiguration("launch");
+  const launch = folder ? vscode26.workspace.getConfiguration("launch", folder.uri) : vscode26.workspace.getConfiguration("launch");
   const configurations = launch.get("configurations") ?? [];
-  const active = vscode25.debug.activeDebugSession;
+  const active = vscode26.debug.activeDebugSession;
   return {
     configurations: configurations.map((c) => ({ name: c.name, type: c.type, request: c.request })),
     activeSession: active ? { name: active.name, type: active.type, id: active.id } : null
   };
 }
 async function handleDebugStackTrace(payload) {
-  const session = vscode25.debug.activeDebugSession;
+  const session = vscode26.debug.activeDebugSession;
   if (!session) return { available: false, reason: "no active debug session" };
   const threadId = Number(payload.threadId ?? 1);
   try {
@@ -20073,11 +20459,11 @@ async function handleDebugStackTrace(payload) {
 }
 
 // src/ide-delegate/handlers/notebook.ts
-var vscode26 = __toESM(require("vscode"));
+var vscode27 = __toESM(require("vscode"));
 function cellToJson(cell) {
   return {
     index: cell.index,
-    kind: cell.kind === vscode26.NotebookCellKind.Code ? "code" : "markdown",
+    kind: cell.kind === vscode27.NotebookCellKind.Code ? "code" : "markdown",
     languageId: cell.document.languageId,
     value: cell.document.getText(),
     metadata: cell.metadata
@@ -20086,7 +20472,7 @@ function cellToJson(cell) {
 async function handleNotebookRead(payload) {
   const filePath = String(payload.path ?? "");
   const uri = resolveFileUri(filePath);
-  const notebook = await vscode26.workspace.openNotebookDocument(uri);
+  const notebook = await vscode27.workspace.openNotebookDocument(uri);
   return {
     path: filePath,
     cellCount: notebook.cellCount,
@@ -20096,68 +20482,138 @@ async function handleNotebookRead(payload) {
 async function handleNotebookEdit(payload) {
   const filePath = String(payload.path ?? "");
   const uri = resolveFileUri(filePath);
-  const notebook = await vscode26.workspace.openNotebookDocument(uri);
-  const edit = new vscode26.WorkspaceEdit();
+  assertEditableResource({ uri, operation: "edit" });
+  const notebook = await vscode27.workspace.openNotebookDocument(uri);
+  const edit = new vscode27.WorkspaceEdit();
   const cellIndex = Number(payload.cellIndex ?? 0);
   const newText = payload.newText != null ? String(payload.newText) : void 0;
-  const cellKind = payload.kind === "markdown" ? vscode26.NotebookCellKind.Markup : vscode26.NotebookCellKind.Code;
+  const cellKind = payload.kind === "markdown" ? vscode27.NotebookCellKind.Markup : vscode27.NotebookCellKind.Code;
   if (payload.operation === "insert") {
-    const cellData = new vscode26.NotebookCellData(cellKind, newText ?? "", String(payload.languageId ?? "python"));
-    edit.set(notebook.uri, [vscode26.NotebookEdit.insertCells(cellIndex, [cellData])]);
+    assertNoRedactionPlaceholders("", newText ?? "", filePath);
+    const cellData = new vscode27.NotebookCellData(cellKind, newText ?? "", String(payload.languageId ?? "python"));
+    edit.set(notebook.uri, [vscode27.NotebookEdit.insertCells(cellIndex, [cellData])]);
   } else if (payload.operation === "delete") {
-    edit.set(notebook.uri, [vscode26.NotebookEdit.deleteCells(new vscode26.NotebookRange(cellIndex, cellIndex + 1))]);
+    edit.set(notebook.uri, [vscode27.NotebookEdit.deleteCells(new vscode27.NotebookRange(cellIndex, cellIndex + 1))]);
   } else if (payload.operation === "replace" && newText != null) {
     const cell = notebook.cellAt(cellIndex);
+    assertNoRedactionPlaceholders(cell.document.getText(), newText, filePath);
     edit.set(notebook.uri, [
-      vscode26.NotebookEdit.updateCellMetadata(cellIndex, cell.metadata),
-      vscode26.NotebookEdit.replaceCells(
-        new vscode26.NotebookRange(cellIndex, cellIndex + 1),
-        [new vscode26.NotebookCellData(cell.kind, newText, cell.document.languageId)]
+      vscode27.NotebookEdit.updateCellMetadata(cellIndex, cell.metadata),
+      vscode27.NotebookEdit.replaceCells(
+        new vscode27.NotebookRange(cellIndex, cellIndex + 1),
+        [new vscode27.NotebookCellData(cell.kind, newText, cell.document.languageId)]
       )
     ]);
   } else {
     throw new Error("notebook edit requires operation: insert | delete | replace");
   }
-  const applied = await vscode26.workspace.applyEdit(edit);
-  return { path: filePath, applied, operation: payload.operation };
+  if (uri.scheme === "file") await snapshotBeforeChange(uri.fsPath);
+  const applied = await vscode27.workspace.applyEdit(edit);
+  const saved = applied && notebook.isDirty ? await notebook.save() : false;
+  return { path: filePath, applied, operation: payload.operation, saved };
 }
 async function handleNotebookExecute(payload) {
   const filePath = String(payload.path ?? "");
   const uri = resolveFileUri(filePath);
-  await vscode26.commands.executeCommand("notebook.execute");
+  const notebook = await vscode27.workspace.openNotebookDocument(uri);
+  await vscode27.window.showNotebookDocument(notebook, { preserveFocus: true, preview: false });
   const cellIndex = payload.cellIndex != null ? Number(payload.cellIndex) : void 0;
   if (cellIndex != null) {
-    await vscode26.commands.executeCommand("notebook.cell.execute", { uri, cellIndex });
+    if (!Number.isInteger(cellIndex) || cellIndex < 0 || cellIndex >= notebook.cellCount) {
+      throw new Error(`cellIndex ${String(payload.cellIndex)} is out of range (0..${notebook.cellCount - 1})`);
+    }
+    await vscode27.commands.executeCommand("notebook.cell.execute", { ranges: [{ start: cellIndex, end: cellIndex + 1 }], document: notebook.uri });
+  } else {
+    await vscode27.commands.executeCommand("notebook.execute", notebook.uri);
   }
   return { path: relativePath(uri.fsPath), executed: true, cellIndex: cellIndex ?? null };
 }
 
 // src/ide-delegate/handlers/config.ts
-var vscode27 = __toESM(require("vscode"));
+var vscode28 = __toESM(require("vscode"));
 var TARGET_MAP = {
-  workspace: vscode27.ConfigurationTarget.Workspace,
-  workspaceFolder: vscode27.ConfigurationTarget.WorkspaceFolder
+  workspace: vscode28.ConfigurationTarget.Workspace,
+  workspaceFolder: vscode28.ConfigurationTarget.WorkspaceFolder
 };
-var PROTECTED_SECTIONS = /^(security|liberide|extensions|http|terminal\.integrated\.(env|shell|profiles|automationProfile))/;
+var ALLOWED_KEYS = [
+  /^editor\.[\w.]+$/,
+  /^diffEditor\.[\w.]+$/,
+  /^files\.(exclude|associations|watcherExclude|readonlyInclude|readonlyExclude|insertFinalNewline|trimFinalNewlines|trimTrailingWhitespace|eol|encoding|autoGuessEncoding|autoSave|autoSaveDelay)$/,
+  /^search\.(exclude|useIgnoreFiles|useParentIgnoreFiles|smartCase)$/,
+  /^(typescript|javascript)\.format\.\w+$/,
+  /^(typescript|javascript)\.preferences\.(quoteStyle|importModuleSpecifier|importModuleSpecifierEnding|jsxAttributeCompletionStyle)$/,
+  /^prettier\.(semi|singleQuote|jsxSingleQuote|tabWidth|useTabs|printWidth|trailingComma|bracketSpacing|bracketSameLine|arrowParens|endOfLine|quoteProps|proseWrap|singleAttributePerLine|requireConfig)$/,
+  /^html\.format\.\w+$/,
+  /^(css|scss|less)\.format\.\w+$/,
+  /^json\.format\.\w+$/
+];
+var DENIED_KEY = /(path|paths|executable|interpreter|command|commands|args|env|shell|server|tsdk|nodePath|runtime|url)$/i;
+var LANGUAGE_OVERRIDE = /^\[([\w\-+#. ]+)\]\.(.+)$/;
+function isAgentConfigurableKey(fullKey) {
+  const override = LANGUAGE_OVERRIDE.exec(fullKey);
+  const key = override ? override[2] : fullKey;
+  if (!key || key.includes("[") || DENIED_KEY.test(key)) return false;
+  return ALLOWED_KEYS.some((re) => re.test(key));
+}
+function fullKeyOf(payload) {
+  const section = String(payload.section ?? "").trim();
+  const key = String(payload.key ?? "").trim();
+  return section && key ? `${section}.${key}` : section || key;
+}
+function scopedConfig(fullKey) {
+  const folder = workspaceFolder();
+  const override = LANGUAGE_OVERRIDE.exec(fullKey);
+  const languageId = override?.[1];
+  const key = override ? override[2] : fullKey;
+  const scope = languageId ? { uri: folder?.uri, languageId } : folder?.uri;
+  return { config: vscode28.workspace.getConfiguration(void 0, scope), key, languageId };
+}
+function workspaceValues(config2, key, languageId) {
+  const inspected = config2.inspect(key);
+  const workspaceValue = languageId ? inspected?.workspaceLanguageValue : inspected?.workspaceValue;
+  const workspaceFolderValue = languageId ? inspected?.workspaceFolderLanguageValue : inspected?.workspaceFolderValue;
+  return {
+    value: workspaceFolderValue ?? workspaceValue ?? (languageId ? inspected?.defaultLanguageValue : void 0) ?? inspected?.defaultValue,
+    defaultValue: languageId ? inspected?.defaultLanguageValue ?? inspected?.defaultValue : inspected?.defaultValue,
+    workspaceValue,
+    workspaceFolderValue
+  };
+}
+function leafKeys(value, prefix, out = []) {
+  if (out.length >= 300) return out;
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    for (const [name, child] of Object.entries(value)) {
+      const key = `${prefix}.${name}`;
+      if (isAgentConfigurableKey(key)) out.push(key);
+      else leafKeys(child, key, out);
+    }
+  }
+  return out;
+}
 async function handleConfigRead(payload) {
   const section = String(payload.section ?? "");
   const key = payload.key ? String(payload.key) : void 0;
   if (!section && !key) throw new Error("section or key is required; reading every setting is not supported");
-  const folder = workspaceFolder();
-  const config2 = folder ? vscode27.workspace.getConfiguration(section || void 0, folder.uri) : vscode27.workspace.getConfiguration(section || void 0);
-  if (key) {
-    const inspected = config2.inspect(key);
-    return {
-      section,
-      key,
-      value: config2.get(key),
-      defaultValue: inspected?.defaultValue,
-      globalValue: inspected?.globalValue,
-      workspaceValue: inspected?.workspaceValue,
-      workspaceFolderValue: inspected?.workspaceFolderValue
-    };
+  const fullKey = fullKeyOf(payload);
+  if (key || isAgentConfigurableKey(fullKey)) {
+    if (!isAgentConfigurableKey(fullKey)) throw new Error(`Setting '${fullKey}' is not readable by the agent (only editor and formatting settings are)`);
+    const scoped = scopedConfig(fullKey);
+    return { section, key: key ?? "", ...workspaceValues(scoped.config, scoped.key, scoped.languageId) };
   }
-  return { section, values: config2 };
+  const override = /^\[([^\]]+)\]\.?(.*)$/.exec(section);
+  const languageId = override?.[1];
+  const base = override ? override[2] : section;
+  if (!base) throw new Error(`Pass a section inside the language override, e.g. '${section}.editor'`);
+  const folder = workspaceFolder();
+  const config2 = vscode28.workspace.getConfiguration(void 0, languageId ? { uri: folder?.uri, languageId } : folder?.uri);
+  const keys = leafKeys(config2.get(base), base);
+  if (!keys.length) throw new Error(`Section '${section}' has no settings the agent may read (only editor and formatting settings)`);
+  const values = {};
+  for (const leaf of keys) {
+    const { workspaceValue, workspaceFolderValue, value } = workspaceValues(config2, leaf, languageId);
+    values[leaf.slice(base.length + 1)] = { value, ...workspaceValue !== void 0 ? { workspaceValue } : {}, ...workspaceFolderValue !== void 0 ? { workspaceFolderValue } : {} };
+  }
+  return { section, values };
 }
 async function handleConfigWrite(payload) {
   const section = String(payload.section ?? "");
@@ -20166,19 +20622,20 @@ async function handleConfigWrite(payload) {
   const targetName = String(payload.target ?? "workspace");
   const target = TARGET_MAP[targetName];
   if (target === void 0) throw new Error(`Setting target '${targetName}' is not allowed; use 'workspace' or 'workspaceFolder'`);
-  const fullKey = section ? `${section}.${key}` : key;
-  if (!key || PROTECTED_SECTIONS.test(fullKey)) throw new Error(`Setting '${fullKey}' cannot be changed by the agent`);
-  const folder = workspaceFolder();
-  const config2 = folder ? vscode27.workspace.getConfiguration(section || void 0, folder.uri) : vscode27.workspace.getConfiguration(section || void 0);
-  await config2.update(key, value, target);
+  const fullKey = fullKeyOf(payload);
+  if (!key || !isAgentConfigurableKey(fullKey)) {
+    throw new Error(`Setting '${fullKey}' cannot be changed by the agent (only editor and formatting settings can)`);
+  }
+  const scoped = scopedConfig(fullKey);
+  await scoped.config.update(scoped.key, value, target, scoped.languageId ? true : void 0);
   return { section, key, target: targetName, updated: true };
 }
 
 // src/ide-delegate/handlers/extensions.ts
-var vscode28 = __toESM(require("vscode"));
+var vscode29 = __toESM(require("vscode"));
 async function handleExtensionsList() {
   return {
-    extensions: vscode28.extensions.all.map((ext) => ({
+    extensions: vscode29.extensions.all.map((ext) => ({
       id: ext.id,
       version: ext.packageJSON.version,
       isActive: ext.isActive,
@@ -20186,27 +20643,27 @@ async function handleExtensionsList() {
       displayName: ext.packageJSON.displayName,
       publisher: ext.packageJSON.publisher
     })),
-    count: vscode28.extensions.all.length
+    count: vscode29.extensions.all.length
   };
 }
 
 // src/ide-delegate/handlers/problems.ts
-var vscode29 = __toESM(require("vscode"));
+var vscode30 = __toESM(require("vscode"));
 async function handleProblemsByOwner(payload) {
   const filePaths = payload.filePaths;
   const filter = filePaths ? new Set(filePaths.map((p) => p.replace(/\\/g, "/"))) : void 0;
   const byOwner = /* @__PURE__ */ new Map();
-  for (const [uri, diagnostics] of vscode29.languages.getDiagnostics()) {
+  for (const [uri, diagnostics] of vscode30.languages.getDiagnostics()) {
     if (uri.scheme !== "file") continue;
-    const path7 = relativePath(uri.fsPath);
-    if (filter && !filter.has(path7)) continue;
+    const path10 = relativePath(uri.fsPath);
+    if (filter && !filter.has(path10)) continue;
     for (const diag of diagnostics) {
       const owner = diag.source ?? "unknown";
       const list = byOwner.get(owner) ?? [];
       list.push({
-        path: path7,
+        path: path10,
         message: diag.message,
-        severity: vscode29.DiagnosticSeverity[diag.severity],
+        severity: vscode30.DiagnosticSeverity[diag.severity],
         code: typeof diag.code === "object" ? diag.code.value : diag.code,
         range: {
           startLine: diag.range.start.line + 1,
@@ -20225,10 +20682,10 @@ async function handleProblemsByOwner(payload) {
 }
 
 // src/ide-delegate/handlers/semantic.ts
-var vscode30 = __toESM(require("vscode"));
+var vscode31 = __toESM(require("vscode"));
 async function handleSemanticTokens(payload) {
   const uri = resolveFileUri(String(payload.path ?? ""));
-  const tokens = await vscode30.commands.executeCommand(
+  const tokens = await vscode31.commands.executeCommand(
     "vscode.provideDocumentSemanticTokens",
     uri
   );
@@ -20242,7 +20699,7 @@ async function handleSemanticTokens(payload) {
 }
 
 // src/ide-delegate/handlers/index.ts
-var vscode31 = __toESM(require("vscode"));
+var vscode32 = __toESM(require("vscode"));
 var TRUST_REQUIRED_KINDS = /* @__PURE__ */ new Set([
   "terminal.run",
   "vscode.terminalSession",
@@ -20264,12 +20721,12 @@ var TRUST_REQUIRED_KINDS = /* @__PURE__ */ new Set([
   "vscode.fs.rename"
 ]);
 async function dispatchIdeDelegate(request) {
-  return withRequestRoot(request.target.projectPath, () => dispatchInFolder(request));
+  return withRequestRoot(request.target.projectPath, () => dispatchInFolder(request), request.target.conversationId);
 }
 async function dispatchInFolder(request) {
   const { kind, payload } = request;
   const root = request.target.projectPath;
-  if (TRUST_REQUIRED_KINDS.has(kind) && !vscode31.workspace.isTrusted) {
+  if (TRUST_REQUIRED_KINDS.has(kind) && !vscode32.workspace.isTrusted) {
     throw new Error(`'${kind}' is blocked: this workspace is not trusted (Restricted Mode). Trust the folder in VS Code to allow it.`);
   }
   switch (kind) {
@@ -20386,15 +20843,6 @@ async function dispatchInFolder(request) {
 var RECONNECT_BASE_MS = 2e3;
 var RECONNECT_MAX_MS = 3e4;
 var OUTBOX_LIMIT = 100;
-var IDE_RPC_SUBPROTOCOL = "liberide.v1";
-function base64url3(value) {
-  return Buffer.from(value, "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-function wsOrigin(httpOrigin) {
-  if (httpOrigin.startsWith("https://")) return `wss://${httpOrigin.slice("https://".length)}`;
-  if (httpOrigin.startsWith("http://")) return `ws://${httpOrigin.slice("http://".length)}`;
-  return httpOrigin;
-}
 var IdeDelegateStream = class {
   constructor(target, output) {
     this.target = target;
@@ -20413,7 +20861,7 @@ var IdeDelegateStream = class {
       this.log(wasBlocked ? "credentials changed; reconnecting" : "credentials changed; reconnecting with the new token");
       void this.connect();
     });
-    this.focusSub = vscode32.window.onDidChangeWindowState((state) => {
+    this.focusSub = vscode33.window.onDidChangeWindowState((state) => {
       if (state.focused) this.announceFocus();
     });
   }
@@ -20436,8 +20884,8 @@ var IdeDelegateStream = class {
   focusSub;
   /** Tell the server this window is in use, so its calls come here. */
   announceFocus() {
-    if (!vscode32.window.state.focused) return;
-    this.sendJson({ jsonrpc: "2.0", method: "window.focus", params: { windowId: vscode32.env.sessionId } }, false);
+    if (!vscode33.window.state.focused) return;
+    this.sendJson({ jsonrpc: "2.0", method: "window.focus", params: { windowId: vscode33.env.sessionId } }, false);
   }
   start() {
     if (this.closed) return;
@@ -20470,13 +20918,13 @@ var IdeDelegateStream = class {
   /** The token travels in the `bearer.<base64url>` subprotocol, never in the URL. */
   buildRpcRequest() {
     const origin = getApiOrigin();
-    const token = getAuthToken();
-    if (!origin || !token) return void 0;
+    const protocols = bearerSubprotocols();
+    if (!origin || !protocols) return void 0;
     const url2 = new URL(`${wsOrigin(origin)}/api/ide/rpc`);
     url2.searchParams.set("projectPath", this.target.projectPath);
     url2.searchParams.set("sessionId", this.target.sessionId);
-    url2.searchParams.set("windowId", vscode32.env.sessionId);
-    return { url: url2.toString(), protocols: [IDE_RPC_SUBPROTOCOL, `bearer.${base64url3(token)}`] };
+    url2.searchParams.set("windowId", vscode33.env.sessionId);
+    return { url: url2.toString(), protocols };
   }
   async connect() {
     if (this.closed) return;
@@ -20607,27 +21055,113 @@ function streamTarget(folder) {
 function startIdeDelegateStream(output) {
   const streams = /* @__PURE__ */ new Map();
   const sync = () => {
-    const folders = vscode32.workspace.workspaceFolders ?? [];
+    const folders = vscode33.workspace.workspaceFolders ?? [];
     const wanted = new Map(folders.map((folder) => [folder.uri.fsPath, folder]));
-    for (const [path7, stream] of streams) {
-      if (wanted.has(path7)) continue;
+    for (const [path10, stream] of streams) {
+      if (wanted.has(path10)) continue;
       stream.dispose();
-      streams.delete(path7);
+      streams.delete(path10);
     }
-    for (const [path7, folder] of wanted) {
-      if (streams.has(path7)) continue;
+    for (const [path10, folder] of wanted) {
+      if (streams.has(path10)) continue;
       const stream = new IdeDelegateStream(streamTarget(folder), output);
-      streams.set(path7, stream);
+      streams.set(path10, stream);
       stream.start();
     }
   };
   sync();
-  const folderSub = vscode32.workspace.onDidChangeWorkspaceFolders(sync);
-  return new vscode32.Disposable(() => {
+  const folderSub = vscode33.workspace.onDidChangeWorkspaceFolders(sync);
+  return new vscode33.Disposable(() => {
     folderSub.dispose();
     for (const stream of streams.values()) stream.dispose();
     streams.clear();
   });
+}
+
+// src/workflows/ide-triggers.ts
+var vscode34 = __toESM(require("vscode"));
+var path9 = __toESM(require("node:path"));
+async function readJsonOrThrow(res) {
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    let message = body;
+    try {
+      message = JSON.parse(body).error ?? body;
+    } catch {
+    }
+    throw new Error(`${res.status} ${res.statusText}${message ? ` \u2014 ${message.slice(0, 300)}` : ""}`);
+  }
+  return await res.json();
+}
+async function listIdeWorkflowTriggers() {
+  return readJsonOrThrow(await apiFetch("/api/workflows/triggers/ide"));
+}
+function ideWorkflowPayload() {
+  const folder = activeWorkspaceFolder();
+  const editor = vscode34.window.activeTextEditor;
+  const doc = editor?.document;
+  const activeFile = folder && doc?.uri.scheme === "file" && folder.uri.scheme === "file" ? path9.relative(folder.uri.fsPath, doc.uri.fsPath).replace(/\\/g, "/") : void 0;
+  return {
+    source: "liberide",
+    ...folder ? { projectPath: folder.uri.fsPath, folderName: folder.name } : {},
+    ...activeFile && !activeFile.startsWith("..") ? { activeFile, languageId: doc?.languageId } : {},
+    ...activeFile && !activeFile.startsWith("..") && editor && !editor.selection.isEmpty ? { selection: { startLine: editor.selection.start.line + 1, endLine: editor.selection.end.line + 1 } } : {}
+  };
+}
+async function runIdeWorkflowCommand(output) {
+  const triggers = await listIdeWorkflowTriggers();
+  if (!triggers.length) {
+    void vscode34.window.showInformationMessage("No workflows have an IDE command trigger. Add one to a workflow in the LiberIDE app.");
+    return;
+  }
+  const picked = await vscode34.window.showQuickPick(
+    triggers.map((trigger) => ({
+      label: trigger.name || trigger.command,
+      description: trigger.pipelineName,
+      detail: trigger.command,
+      trigger
+    })),
+    { title: "Run Workflow", placeHolder: "Choose a workflow to run", matchOnDescription: true, matchOnDetail: true }
+  );
+  if (!picked) return;
+  const input = await vscode34.window.showInputBox({
+    title: `Run ${picked.trigger.pipelineName}`,
+    prompt: "Input for the workflow (optional)",
+    placeHolder: picked.trigger.command
+  });
+  if (input === void 0) return;
+  const payload = ideWorkflowPayload();
+  output.appendLine(`[workflow] ${picked.trigger.pipelineName}: starting (${picked.trigger.command})`);
+  output.show(true);
+  const run = await vscode34.window.withProgress(
+    { location: vscode34.ProgressLocation.Notification, title: `Running ${picked.trigger.pipelineName}\u2026`, cancellable: true },
+    async (_progress, token) => {
+      const abort = new AbortController();
+      const subscription = token.onCancellationRequested(() => abort.abort());
+      try {
+        return await readJsonOrThrow(await apiFetch("/api/workflows/triggers/ide/run", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ command: picked.trigger.command, input: input.trim() || void 0, payload }),
+          signal: abort.signal
+        }));
+      } finally {
+        subscription.dispose();
+      }
+    }
+  ).then((result) => result, (err) => {
+    const message = err instanceof Error ? err.name === "AbortError" ? "stopped waiting (the run continues on the server)" : err.message : String(err);
+    output.appendLine(`[workflow] ${picked.trigger.pipelineName}: ${message}`);
+    if (!(err instanceof Error && err.name === "AbortError")) void vscode34.window.showErrorMessage(`Workflow failed: ${message}`);
+    return void 0;
+  });
+  if (!run) return;
+  output.appendLine(`[workflow] ${run.pipelineName ?? picked.trigger.pipelineName}: ${run.status} (run ${run.id})`);
+  if (run.output) output.appendLine(run.output);
+  if (run.error) output.appendLine(`error: ${run.error}`);
+  const summary = `Workflow ${run.pipelineName ?? picked.trigger.pipelineName}: ${run.status}`;
+  if (run.status === "failed" || run.error) void vscode34.window.showErrorMessage(summary, "Show Output").then((choice) => choice && output.show());
+  else void vscode34.window.showInformationMessage(summary, "Show Output").then((choice) => choice && output.show());
 }
 
 // src/extension.ts
@@ -20636,7 +21170,7 @@ var pipeline;
 var chat;
 async function activate(context) {
   context.subscriptions.push(initApiFromContext(context));
-  const output = vscode33.window.createOutputChannel("LiberIDE");
+  const output = vscode35.window.createOutputChannel("LiberIDE");
   store = new SpecStore(output);
   await store.initialize(context);
   const specsTree = new SpecsTreeProvider(store);
@@ -20655,53 +21189,58 @@ async function activate(context) {
     store,
     pipeline,
     chat,
-    vscode33.window.registerWebviewViewProvider(LiberidePipelineController.viewType, pipeline, {
+    vscode35.window.registerWebviewViewProvider(LiberidePipelineController.viewType, pipeline, {
       webviewOptions: { retainContextWhenHidden: true }
     }),
-    vscode33.window.registerWebviewViewProvider(LiberideChatPanelController.viewType, chat, {
+    vscode35.window.registerWebviewViewProvider(LiberideChatPanelController.viewType, chat, {
       webviewOptions: { retainContextWhenHidden: true }
     }),
-    vscode33.window.registerTreeDataProvider("liberide.specs", specsTree),
-    vscode33.window.registerTreeDataProvider("liberide.tasks", tasksTree),
-    vscode33.window.registerTreeDataProvider("liberide.runs", runsTree),
+    vscode35.window.registerTreeDataProvider("liberide.specs", specsTree),
+    vscode35.window.registerTreeDataProvider("liberide.tasks", tasksTree),
+    vscode35.window.registerTreeDataProvider("liberide.runs", runsTree),
     createThemeBridge(output),
     statusBar(),
     startIdeDelegateStream(output),
-    ...commands8(context, specsTree, tasksTree, runsTree)
+    ...commands8(context, specsTree, tasksTree, runsTree),
+    vscode35.commands.registerCommand("liberide.runWorkflow", () => {
+      runIdeWorkflowCommand(output).catch((err) => {
+        void vscode35.window.showErrorMessage(err instanceof Error ? err.message : String(err));
+      });
+    })
   );
 }
 function commands8(context, specsTree, tasksTree, runsTree) {
   function safe(fn) {
     return (...args) => {
       fn(...args).catch((err) => {
-        void vscode33.window.showErrorMessage(err instanceof Error ? err.message : String(err));
+        void vscode35.window.showErrorMessage(err instanceof Error ? err.message : String(err));
       });
     };
   }
   return [
-    vscode33.commands.registerCommand("liberide.openChat", () => chat.show()),
-    vscode33.commands.registerCommand("liberide.newChat", safe(async () => {
+    vscode35.commands.registerCommand("liberide.openChat", () => chat.show()),
+    vscode35.commands.registerCommand("liberide.newChat", safe(async () => {
       chat.show();
       await chat.newSession();
     })),
-    vscode33.commands.registerCommand("liberide.openSettings", () => chat.openSettings()),
-    vscode33.commands.registerCommand("liberide.openChatHistory", () => chat.openChatHistory()),
-    vscode33.commands.registerCommand("liberide.renameChat", safe(async () => {
+    vscode35.commands.registerCommand("liberide.openSettings", () => chat.openSettings()),
+    vscode35.commands.registerCommand("liberide.openChatHistory", () => chat.openChatHistory()),
+    vscode35.commands.registerCommand("liberide.renameChat", safe(async () => {
       await chat.renameActiveChat();
     })),
-    vscode33.commands.registerCommand("liberide.openPipeline", () => pipeline.show()),
-    vscode33.commands.registerCommand("liberide.refreshSpecs", safe(async () => {
+    vscode35.commands.registerCommand("liberide.openPipeline", () => pipeline.show()),
+    vscode35.commands.registerCommand("liberide.refreshSpecs", safe(async () => {
       await store.refresh();
       specsTree.refresh();
     })),
-    vscode33.commands.registerCommand("liberide.refreshTasks", safe(async () => {
+    vscode35.commands.registerCommand("liberide.refreshTasks", safe(async () => {
       await store.refresh();
       tasksTree.refresh();
     })),
-    vscode33.commands.registerCommand("liberide.refreshRuns", () => runsTree.refresh()),
-    vscode33.commands.registerCommand("liberide.scaffoldFeature", safe(async () => {
-      const folder = vscode33.workspace.workspaceFolders?.[0];
-      const name = await vscode33.window.showInputBox({ prompt: "Feature name" });
+    vscode35.commands.registerCommand("liberide.refreshRuns", () => runsTree.refresh()),
+    vscode35.commands.registerCommand("liberide.scaffoldFeature", safe(async () => {
+      const folder = vscode35.workspace.workspaceFolders?.[0];
+      const name = await vscode35.window.showInputBox({ prompt: "Feature name" });
       if (!folder || !name) return;
       const root = await scaffoldFeature(folder, name);
       const id = root.path.split("/").pop() ?? name;
@@ -20710,38 +21249,38 @@ function commands8(context, specsTree, tasksTree, runsTree) {
       await store.refresh();
       specsTree.refresh();
     })),
-    vscode33.commands.registerCommand("liberide.setActiveFeature", safe(async (id) => {
+    vscode35.commands.registerCommand("liberide.setActiveFeature", safe(async (id) => {
       store.setActiveFeature(id);
       await context.workspaceState.update("liberide.activeFeatureId", id);
       tasksTree.refresh();
     })),
-    vscode33.commands.registerCommand("liberide.openTask", safe(async (arg) => {
+    vscode35.commands.registerCommand("liberide.openTask", safe(async (arg) => {
       const task = arg && store.getTask(arg.featureId, arg.task.id);
-      if (task) await vscode33.window.showTextDocument(task.filePath);
+      if (task) await vscode35.window.showTextDocument(task.filePath);
     })),
-    vscode33.commands.registerCommand("liberide.runTask", safe(async (arg) => {
+    vscode35.commands.registerCommand("liberide.runTask", safe(async (arg) => {
       const feature = arg && store.getFeature(arg.featureId);
       if (!feature || !arg) return;
       await pipeline.dispatch(feature.id, [arg.task.id]);
     })),
-    vscode33.commands.registerCommand("liberide.markTaskReady", safe(async (arg) => {
+    vscode35.commands.registerCommand("liberide.markTaskReady", safe(async (arg) => {
       const task = arg && store.getTask(arg.featureId, arg.task.id);
       if (task) await updateTaskStatus(task.filePath, "ready");
       await store.refresh();
     })),
-    vscode33.commands.registerCommand("liberide.dispatchFeature", safe(async () => {
+    vscode35.commands.registerCommand("liberide.dispatchFeature", safe(async () => {
       const feature = store.getActiveFeature();
       if (!feature) return;
       await pipeline.dispatch(feature.id);
     })),
-    vscode33.commands.registerCommand("liberide.regenerateTasksIndex", safe(async () => {
+    vscode35.commands.registerCommand("liberide.regenerateTasksIndex", safe(async () => {
       const feature = store.getActiveFeature();
-      if (feature?.tasksDirUri) await writeTextFile(vscode33.Uri.joinPath(feature.tasksDirUri, "index.md"), regenerateTasksIndex(feature.tasks));
+      if (feature?.tasksDirUri) await writeTextFile(vscode35.Uri.joinPath(feature.tasksDirUri, "index.md"), regenerateTasksIndex(feature.tasks));
     })),
-    vscode33.commands.registerCommand("liberide.cancelRun", safe(async (arg) => {
+    vscode35.commands.registerCommand("liberide.cancelRun", safe(async (arg) => {
       const graphId = typeof arg === "string" ? arg : arg?.run?.graphId;
       if (!graphId) {
-        void vscode33.window.showInformationMessage("Select an active run from the Agent Runs view to cancel it.");
+        void vscode35.window.showInformationMessage("Select an active run from the Agent Runs view to cancel it.");
         return;
       }
       await pipeline.cancel(graphId);
@@ -20749,7 +21288,7 @@ function commands8(context, specsTree, tasksTree, runsTree) {
   ];
 }
 function statusBar() {
-  const item = vscode33.window.createStatusBarItem(vscode33.StatusBarAlignment.Left, 100);
+  const item = vscode35.window.createStatusBarItem(vscode35.StatusBarAlignment.Left, 100);
   item.text = "$(comment-discussion) LiberIDE";
   item.tooltip = "Open LiberIDE chat";
   item.command = "liberide.openChat";

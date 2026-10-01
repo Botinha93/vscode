@@ -1,14 +1,19 @@
 import * as vscode from "vscode";
 import * as path from "node:path";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, realpathSync } from "node:fs";
 import { AsyncLocalStorage } from "node:async_hooks";
 
-/** The folder the current RPC request is for (each socket serves one folder). */
-const requestRoot = new AsyncLocalStorage<string>();
+/** The folder (and conversation) the current RPC request is for (each socket serves one folder). */
+const requestRoot = new AsyncLocalStorage<{ root: string; conversationId?: string }>();
 
 /** Run a handler with `workspaceFolder()` bound to the request's folder. */
-export function withRequestRoot<T>(root: string, run: () => Promise<T>): Promise<T> {
-  return requestRoot.run(root, run);
+export function withRequestRoot<T>(root: string, run: () => Promise<T>, conversationId?: string): Promise<T> {
+  return requestRoot.run({ root, conversationId }, run);
+}
+
+/** The conversation whose turn issued the current request, when the server sent one. */
+export function requestConversationId(): string | undefined {
+  return requestRoot.getStore()?.conversationId;
 }
 
 /**
@@ -17,7 +22,7 @@ export function withRequestRoot<T>(root: string, run: () => Promise<T>): Promise
  */
 export function workspaceFolder(): vscode.WorkspaceFolder | undefined {
   const folders = vscode.workspace.workspaceFolders ?? [];
-  const root = requestRoot.getStore();
+  const root = requestRoot.getStore()?.root;
   if (root) {
     const target = path.resolve(root);
     const match = folders.find((folder) => path.resolve(folder.uri.fsPath) === target);
@@ -42,32 +47,52 @@ export function relativePath(fsPath: string): string {
 
 /**
  * Resolve a model-supplied path inside `root`. Rejects absolute paths, NUL
- * bytes, `..` escapes and symlinks whose real target leaves the root (checked
- * on the nearest existing ancestor so not-yet-created files are covered too).
+ * bytes, `..` escapes, dangling symlinks and symlinks whose real target leaves
+ * the root. Every existing component is checked with lstat, so a link that
+ * does not resolve (whose target would be created on write) cannot pass by
+ * falling back to its parent. `forWrite` also refuses a symlink as the final
+ * component: writes never go through links.
  */
-export function resolveInsideRootSync(root: string, relative: string): string {
+export function resolveInsideRootSync(root: string, relative: string, options: { forWrite?: boolean } = {}): string {
   if (relative.includes("\0")) throw new Error("Path contains invalid characters");
   if (path.isAbsolute(relative) || /^[a-zA-Z]:[\\/]/.test(relative)) {
     throw new Error("Path must be relative to the workspace folder");
   }
   const base = path.resolve(root);
   const full = path.resolve(base, relative);
-  if (!isInside(base, full)) throw new Error("Path escapes the workspace folder");
-  let probe = full;
-  while (!existsSync(probe) && probe !== base) probe = path.dirname(probe);
-  if (existsSync(probe)) {
-    const realBase = realpathSync(base);
-    const realProbe = realpathSync(probe);
-    if (!isInside(realBase, realProbe)) throw new Error("Path escapes the workspace folder");
+  if (!isPathInside(base, full)) throw new Error("Path escapes the workspace folder");
+  if (!existsSync(base)) return full;
+  const realBase = realpathSync(base);
+  const segments = path.relative(base, full).split(path.sep).filter(Boolean);
+  let current = base;
+  for (let i = 0; i < segments.length; i++) {
+    current = path.join(current, segments[i]!);
+    let info;
+    try {
+      info = lstatSync(current, { throwIfNoEntry: false });
+    } catch {
+      // ENOTDIR and similar: the rest of the path cannot exist.
+      break;
+    }
+    if (!info) break;
+    if (!info.isSymbolicLink()) continue;
+    if (options.forWrite && i === segments.length - 1) throw new Error("Refusing to write through a symbolic link");
+    let target: string;
+    try {
+      target = realpathSync(current);
+    } catch {
+      throw new Error("Path goes through a dangling symbolic link");
+    }
+    if (!isPathInside(realBase, target)) throw new Error("Path escapes the workspace folder");
   }
   return full;
 }
 
-export async function resolveInsideRoot(root: string, relative: string): Promise<string> {
-  return resolveInsideRootSync(root, relative);
+export async function resolveInsideRoot(root: string, relative: string, options: { forWrite?: boolean } = {}): Promise<string> {
+  return resolveInsideRootSync(root, relative, options);
 }
 
-function isInside(root: string, candidate: string): boolean {
+export function isPathInside(root: string, candidate: string): boolean {
   const rel = path.relative(root, candidate);
   return rel === "" || (rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
 }

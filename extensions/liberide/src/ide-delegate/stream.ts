@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { getApiOrigin, getAuthToken, onAuthChanged, probeBackend } from "../api";
+import { bearerSubprotocols, getApiOrigin, getAuthToken, onAuthChanged, probeBackend, wsOrigin } from "../api";
 import type { JsonRpcRequest } from "@nexus/shared";
 import { isJsonRpcRequest } from "@nexus/shared";
 import type { IdeDelegateKind, IdeDelegatePayload } from "./types";
@@ -8,18 +8,6 @@ import { dispatchIdeDelegate } from "./handlers";
 const RECONNECT_BASE_MS = 2_000;
 const RECONNECT_MAX_MS = 30_000;
 const OUTBOX_LIMIT = 100;
-/** Must match IDE_RPC_SUBPROTOCOL on the server; echoed back on a bearer handshake. */
-const IDE_RPC_SUBPROTOCOL = "liberide.v1";
-
-function base64url(value: string): string {
-  return Buffer.from(value, "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-function wsOrigin(httpOrigin: string): string {
-  if (httpOrigin.startsWith("https://")) return `wss://${httpOrigin.slice("https://".length)}`;
-  if (httpOrigin.startsWith("http://")) return `ws://${httpOrigin.slice("http://".length)}`;
-  return httpOrigin;
-}
 
 export class IdeDelegateStream implements vscode.Disposable {
   private closed = false;
@@ -107,14 +95,14 @@ export class IdeDelegateStream implements vscode.Disposable {
   /** The token travels in the `bearer.<base64url>` subprotocol, never in the URL. */
   private buildRpcRequest(): { url: string; protocols: string[] } | undefined {
     const origin = getApiOrigin();
-    const token = getAuthToken();
-    if (!origin || !token) return undefined;
+    const protocols = bearerSubprotocols();
+    if (!origin || !protocols) return undefined;
     const url = new URL(`${wsOrigin(origin)}/api/ide/rpc`);
     url.searchParams.set("projectPath", this.target.projectPath);
     url.searchParams.set("sessionId", this.target.sessionId);
     // Several windows can serve the same folder; the server routes per window.
     url.searchParams.set("windowId", vscode.env.sessionId);
-    return { url: url.toString(), protocols: [IDE_RPC_SUBPROTOCOL, `bearer.${base64url(token)}`] };
+    return { url: url.toString(), protocols };
   }
 
   private async connect(): Promise<void> {
