@@ -20932,12 +20932,62 @@ async function dispatchInFolder(request) {
   }
 }
 
+// src/ide-delegate/op-ledger.ts
+var OP_LEDGER_LIMIT = 500;
+var OP_LEDGER_TTL_MS = 10 * 6e4;
+var OpLedger = class {
+  constructor(limit = OP_LEDGER_LIMIT, ttlMs = OP_LEDGER_TTL_MS, now = Date.now) {
+    this.limit = limit;
+    this.ttlMs = ttlMs;
+    this.now = now;
+  }
+  entries = /* @__PURE__ */ new Map();
+  /**
+   * Run `execute` once per opId. `retryable(outcome)` true drops the entry
+   * after it settles (e.g. a cancelled run), so a later repeat runs again.
+   */
+  run(opId, execute, retryable = () => false) {
+    this.prune();
+    const existing = this.entries.get(opId);
+    if (existing) {
+      this.entries.delete(opId);
+      this.entries.set(opId, existing);
+      return { outcome: existing.outcome, replayed: true };
+    }
+    const entry = { outcome: execute() };
+    this.entries.set(opId, entry);
+    void entry.outcome.then((outcome) => {
+      if (this.entries.get(opId) !== entry) return;
+      if (retryable(outcome)) this.entries.delete(opId);
+      else entry.settledAt = this.now();
+    });
+    while (this.entries.size > this.limit) {
+      const oldest = this.entries.keys().next().value;
+      this.entries.delete(oldest);
+    }
+    return { outcome: entry.outcome, replayed: false };
+  }
+  get size() {
+    return this.entries.size;
+  }
+  clear() {
+    this.entries.clear();
+  }
+  prune() {
+    const cutoff = this.now() - this.ttlMs;
+    for (const [opId, entry] of this.entries) {
+      if (entry.settledAt !== void 0 && entry.settledAt <= cutoff) this.entries.delete(opId);
+    }
+  }
+};
+
 // src/ide-delegate/stream.ts
 var RECONNECT_BASE_MS = 2e3;
 var RECONNECT_MAX_MS = 3e4;
 var OUTBOX_LIMIT = 100;
 var CLOSE_BAD_HELLO = 4400;
 var CLOSE_FORBIDDEN = 4403;
+var opLedger = new OpLedger();
 var IdeDelegateStream = class {
   constructor(target, output) {
     this.target = target;
@@ -21155,16 +21205,25 @@ var IdeDelegateStream = class {
       timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 3e4,
       signal: controller.signal
     };
+    const execute = async () => {
+      try {
+        return { ok: true, result: await dispatchIdeDelegate(delegateRequest) };
+      } catch (err) {
+        return { ok: false, message: err instanceof Error ? err.message : String(err) };
+      }
+    };
     try {
-      const result = await dispatchIdeDelegate(delegateRequest);
-      this.sendJson({ jsonrpc: "2.0", id: request.id, result });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      this.sendJson({
-        jsonrpc: "2.0",
-        id: request.id,
-        error: { code: -32603, message }
-      });
+      const opId = typeof request.opId === "string" && request.opId ? request.opId : void 0;
+      let outcome;
+      if (opId) {
+        const entry = opLedger.run(opId, execute, () => controller.signal.aborted);
+        if (entry.replayed) this.log(`request ${request.id} repeats operation ${opId}; returning its result`);
+        outcome = await entry.outcome;
+      } else {
+        outcome = await execute();
+      }
+      if (outcome.ok) this.sendJson({ jsonrpc: "2.0", id: request.id, result: outcome.result });
+      else this.sendJson({ jsonrpc: "2.0", id: request.id, error: { code: -32603, message: outcome.message } });
     } finally {
       this.running.delete(request.id);
     }

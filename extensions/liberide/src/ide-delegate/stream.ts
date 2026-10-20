@@ -6,6 +6,7 @@ import { isJsonRpcRequest } from "@nexus/shared";
 import type { IdeDelegateKind, IdeDelegatePayload } from "./types";
 import { dispatchIdeDelegate } from "./handlers";
 import { currentExtensionVersion, currentMachineId, setWorkspaceId } from "./machine";
+import { OpLedger, type OpOutcome } from "./op-ledger";
 
 const RECONNECT_BASE_MS = 2_000;
 const RECONNECT_MAX_MS = 30_000;
@@ -15,6 +16,9 @@ const CLOSE_BAD_HELLO = 4400;
 const CLOSE_FORBIDDEN = 4403;
 
 type StreamTarget = { userId: string; projectPath: string; sessionId: string; folderName: string };
+
+/** Shared by every folder's socket: a repeated opId never runs twice in this window. */
+const opLedger = new OpLedger();
 
 export class IdeDelegateStream implements vscode.Disposable {
   private closed = false;
@@ -271,16 +275,27 @@ export class IdeDelegateStream implements vscode.Disposable {
       signal: controller.signal,
     };
 
+    const execute = async (): Promise<OpOutcome> => {
+      try {
+        return { ok: true, result: await dispatchIdeDelegate(delegateRequest) };
+      } catch (err) {
+        return { ok: false, message: err instanceof Error ? err.message : String(err) };
+      }
+    };
+
     try {
-      const result = await dispatchIdeDelegate(delegateRequest);
-      this.sendJson({ jsonrpc: "2.0", id: request.id, result });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      this.sendJson({
-        jsonrpc: "2.0",
-        id: request.id,
-        error: { code: -32603, message },
-      });
+      const opId = typeof request.opId === "string" && request.opId ? request.opId : undefined;
+      let outcome: OpOutcome;
+      if (opId) {
+        // A cancelled run may be retried under the same opId; anything else is final.
+        const entry = opLedger.run(opId, execute, () => controller.signal.aborted);
+        if (entry.replayed) this.log(`request ${request.id} repeats operation ${opId}; returning its result`);
+        outcome = await entry.outcome;
+      } else {
+        outcome = await execute();
+      }
+      if (outcome.ok) this.sendJson({ jsonrpc: "2.0", id: request.id, result: outcome.result });
+      else this.sendJson({ jsonrpc: "2.0", id: request.id, error: { code: -32603, message: outcome.message } });
     } finally {
       this.running.delete(request.id);
     }
