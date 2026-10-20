@@ -163,6 +163,11 @@
         "category": "LiberIDE"
       },
       {
+        "command": "liberide.pairWithServer",
+        "title": "Pair with Server\u2026",
+        "category": "LiberIDE"
+      },
+      {
         "command": "liberide.refreshSpecs",
         "title": "Refresh Specs",
         "category": "LiberIDE"

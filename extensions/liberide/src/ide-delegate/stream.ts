@@ -1,13 +1,20 @@
 import * as vscode from "vscode";
+import { hostname } from "node:os";
 import { bearerSubprotocols, getApiOrigin, getAuthToken, onAuthChanged, probeBackend, wsOrigin } from "../api";
-import type { JsonRpcRequest } from "@nexus/shared";
+import type { IdeHelloParams, JsonRpcRequest } from "@nexus/shared";
 import { isJsonRpcRequest } from "@nexus/shared";
 import type { IdeDelegateKind, IdeDelegatePayload } from "./types";
 import { dispatchIdeDelegate } from "./handlers";
+import { currentExtensionVersion, currentMachineId, setWorkspaceId } from "./machine";
 
 const RECONNECT_BASE_MS = 2_000;
 const RECONNECT_MAX_MS = 30_000;
 const OUTBOX_LIMIT = 100;
+/** Server close codes: bad hello, revoked token/machine, machine revoked or token bound elsewhere. */
+const CLOSE_BAD_HELLO = 4400;
+const CLOSE_FORBIDDEN = 4403;
+
+type StreamTarget = { userId: string; projectPath: string; sessionId: string; folderName: string };
 
 export class IdeDelegateStream implements vscode.Disposable {
   private closed = false;
@@ -29,7 +36,7 @@ export class IdeDelegateStream implements vscode.Disposable {
   private readonly focusSub: vscode.Disposable;
 
   constructor(
-    private readonly target: { userId: string; projectPath: string; sessionId: string },
+    private readonly target: StreamTarget,
     private readonly output?: vscode.OutputChannel,
   ) {
     this.offAuth = onAuthChanged(() => {
@@ -51,6 +58,23 @@ export class IdeDelegateStream implements vscode.Disposable {
     this.focusSub = vscode.window.onDidChangeWindowState((state) => {
       if (state.focused) this.announceFocus();
     });
+  }
+
+  private helloParams(): IdeHelloParams {
+    return {
+      machineId: currentMachineId(),
+      hostname: hostname(),
+      platform: process.platform,
+      pathStyle: process.platform === "win32" ? "win" : "posix",
+      extensionVersion: currentExtensionVersion(),
+      capabilities: {
+        trusted: vscode.workspace.isTrusted,
+        terminal: typeof vscode.window.createTerminal === "function",
+        fs: Boolean(vscode.workspace.fs),
+        git: Boolean(vscode.extensions.getExtension("vscode.git")),
+      },
+      workspace: { rootPath: this.target.projectPath, name: this.target.folderName },
+    };
   }
 
   /** Tell the server this window is in use, so its calls come here. */
@@ -102,6 +126,8 @@ export class IdeDelegateStream implements vscode.Disposable {
     url.searchParams.set("sessionId", this.target.sessionId);
     // Several windows can serve the same folder; the server routes per window.
     url.searchParams.set("windowId", vscode.env.sessionId);
+    // Identifies the machine; the server then waits for `hello` before routing calls here.
+    url.searchParams.set("machineId", currentMachineId());
     return { url: url.toString(), protocols };
   }
 
@@ -133,6 +159,8 @@ export class IdeDelegateStream implements vscode.Disposable {
       this.reconnectAttempt = 0;
       this.connectedOrigin = getApiOrigin();
       this.log(`IDE RPC connected (${this.target.projectPath})`);
+      // Must be the first message on the socket.
+      ws.send(JSON.stringify({ jsonrpc: "2.0", method: "hello", params: this.helloParams() }));
       this.announceFocus();
       const pending = this.outbox;
       this.outbox = [];
@@ -147,10 +175,17 @@ export class IdeDelegateStream implements vscode.Disposable {
       this.log("IDE RPC socket error");
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       // A superseded socket (reconnect with new credentials) must not reschedule.
       if (this.closed || this.ws !== ws) return;
       this.ws = undefined;
+      if (event.code === CLOSE_FORBIDDEN) {
+        // Revoked machine, or a token paired to another machine: retrying cannot help.
+        this.authBlocked = true;
+        this.log(`IDE RPC refused this machine (${event.reason || "forbidden"}); pair again with "LiberIDE: Pair with Server…"`);
+        return;
+      }
+      if (event.code === CLOSE_BAD_HELLO) this.log(`IDE RPC rejected the handshake (${event.reason || "bad hello"})`);
       if (opened) {
         this.log("IDE RPC disconnected");
         this.scheduleReconnect();
@@ -195,6 +230,12 @@ export class IdeDelegateStream implements vscode.Disposable {
       const method = typeof parsed === "object" && parsed && "method" in parsed ? (parsed as { method?: string }).method : undefined;
       if (method === "connected") {
         this.log("IDE RPC handshake received");
+      } else if (method === "hello.ack") {
+        const workspaceId = (parsed as { params?: { workspaceId?: unknown } }).params?.workspaceId;
+        if (typeof workspaceId === "string") {
+          setWorkspaceId(this.target.projectPath, workspaceId);
+          this.log(`IDE RPC registered as workspace ${workspaceId}`);
+        }
       } else if (method === "$/cancelRequest") {
         const id = String((parsed as { params?: { id?: unknown } }).params?.id ?? "");
         const controller = this.running.get(id);
@@ -225,7 +266,7 @@ export class IdeDelegateStream implements vscode.Disposable {
         ...params,
         delegateId: request.id,
       },
-      target: this.target,
+      target: { userId: this.target.userId, projectPath: this.target.projectPath, sessionId: this.target.sessionId },
       timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 30_000,
       signal: controller.signal,
     };
@@ -246,11 +287,12 @@ export class IdeDelegateStream implements vscode.Disposable {
   }
 }
 
-function streamTarget(folder: vscode.WorkspaceFolder): { userId: string; projectPath: string; sessionId: string } {
+function streamTarget(folder: vscode.WorkspaceFolder): StreamTarget {
   return {
     userId: "default",
     projectPath: folder.uri.fsPath,
     sessionId: `vscode-${folder.name}`,
+    folderName: folder.name,
   };
 }
 

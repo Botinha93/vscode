@@ -34,7 +34,7 @@ __export(extension_exports, {
   deactivate: () => deactivate
 });
 module.exports = __toCommonJS(extension_exports);
-var vscode35 = __toESM(require("vscode"));
+var vscode36 = __toESM(require("vscode"));
 
 // src/api.ts
 var import_node_fs = require("node:fs");
@@ -264,10 +264,7 @@ function refreshAuthToken() {
       const snapshot = loadIntegrationFile();
       if (snapshot && cachedIntegrationSource) {
         try {
-          const next = { ...snapshot, authToken: body.token, expiresAt: body.expiresAt, updatedAt: (/* @__PURE__ */ new Date()).toISOString() };
-          (0, import_node_fs.writeFileSync)(cachedIntegrationSource, JSON.stringify(next), { mode: 384 });
-          (0, import_node_fs.chmodSync)(cachedIntegrationSource, 384);
-          cachedIntegration = next;
+          writeIntegrationFile(cachedIntegrationSource, { ...snapshot, authToken: body.token, expiresAt: body.expiresAt });
         } catch {
         }
       }
@@ -281,6 +278,57 @@ function refreshAuthToken() {
     }
   })();
   return refreshInFlight;
+}
+function writeIntegrationFile(path10, snapshot) {
+  const next = { ...snapshot, updatedAt: (/* @__PURE__ */ new Date()).toISOString() };
+  (0, import_node_fs.mkdirSync)((0, import_node_path.dirname)(path10), { recursive: true });
+  (0, import_node_fs.writeFileSync)(path10, JSON.stringify(next), { mode: 384 });
+  (0, import_node_fs.chmodSync)(path10, 384);
+  cachedIntegration = next;
+  cachedIntegrationSource = path10;
+}
+var UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function getIntegrationMachineId() {
+  const value = loadIntegrationFile()?.machineId;
+  return typeof value === "string" && UUID_PATTERN.test(value) ? value.toLowerCase() : void 0;
+}
+function normalizeServerUrl(input) {
+  try {
+    const url2 = new URL(input.trim());
+    if (url2.protocol !== "http:" && url2.protocol !== "https:") return void 0;
+    return `${url2.origin}${url2.pathname}`.replace(/\/+$/, "");
+  } catch {
+    return void 0;
+  }
+}
+async function pairWithServer(input) {
+  const apiOrigin = normalizeServerUrl(input.serverUrl);
+  if (!apiOrigin) throw new Error("Enter the server's http(s) URL.");
+  const res = await fetch(`${apiOrigin}/api/machines/pair`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code: input.code, machineId: input.machineId, hostname: input.hostname, platform: input.platform })
+  });
+  if (!res.ok) {
+    const body2 = await res.json().catch(() => ({}));
+    throw new Error(`Pairing failed: ${body2.error ?? `${res.status} ${res.statusText}`}`);
+  }
+  const body = await res.json();
+  if (!body.authToken) throw new Error("Pairing failed: the server returned no token.");
+  const target = cachedIntegrationSource ?? integrationCandidates()[0];
+  if (!target) throw new Error("Pairing failed: no location for the LiberIDE integration file.");
+  writeIntegrationFile(target, {
+    ...loadIntegrationFile() ?? {},
+    apiOrigin: body.apiOrigin ?? apiOrigin,
+    webOrigin: body.webOrigin,
+    authToken: body.authToken,
+    expiresAt: body.expiresAt,
+    machineId: body.machineId ?? input.machineId
+  });
+  refreshedAuth = void 0;
+  scheduleTokenRefresh();
+  notifyAuthChanged();
+  return { apiOrigin: body.apiOrigin ?? apiOrigin, machineId: body.machineId ?? input.machineId };
 }
 async function recoverFromUnauthorized() {
   if (reloadAuth()) return true;
@@ -476,7 +524,7 @@ function subscribeConversationListSync(onChange) {
 }
 
 // src/panel/panel.ts
-var import_node_crypto = require("node:crypto");
+var import_node_crypto2 = require("node:crypto");
 var vscode4 = __toESM(require("vscode"));
 
 // src/spec/dag.ts
@@ -703,6 +751,42 @@ async function cancelExecutionGraph(graphId) {
 
 // src/ide-delegate/context.ts
 var vscode = __toESM(require("vscode"));
+
+// src/ide-delegate/machine.ts
+var import_node_crypto = require("node:crypto");
+var MACHINE_ID_STATE_KEY = "liberide.machineId";
+var storedMachineId;
+var extensionVersion;
+var workspaceIds = /* @__PURE__ */ new Map();
+function initMachineIdentity(context) {
+  const existing = context.globalState.get(MACHINE_ID_STATE_KEY);
+  if (typeof existing === "string" && UUID_PATTERN.test(existing)) {
+    storedMachineId = existing.toLowerCase();
+  } else {
+    storedMachineId = (0, import_node_crypto.randomUUID)();
+    void context.globalState.update(MACHINE_ID_STATE_KEY, storedMachineId);
+  }
+  const version2 = context.extension?.packageJSON?.version;
+  extensionVersion = typeof version2 === "string" ? version2 : void 0;
+  return currentMachineId();
+}
+function currentMachineId() {
+  const fromFile = getIntegrationMachineId();
+  if (fromFile) return fromFile;
+  storedMachineId ??= (0, import_node_crypto.randomUUID)();
+  return storedMachineId;
+}
+function currentExtensionVersion() {
+  return extensionVersion;
+}
+function setWorkspaceId(rootPath, workspaceId) {
+  workspaceIds.set(rootPath, workspaceId);
+}
+function workspaceIdFor(rootPath) {
+  return workspaceIds.get(rootPath);
+}
+
+// src/ide-delegate/context.ts
 function activeWorkspaceFolder() {
   const active = vscode.window.activeTextEditor?.document.uri;
   return (active && vscode.workspace.getWorkspaceFolder(active)) ?? vscode.workspace.workspaceFolders?.[0];
@@ -717,7 +801,10 @@ function buildIdeContextPayload(conversationId) {
     projectPath: folder.uri.fsPath,
     mode: "desktop",
     terminalExecutor: "client",
-    conversationId
+    conversationId,
+    // Lets the server pin tool calls to this machine's window for the folder.
+    machineId: currentMachineId(),
+    workspaceId: workspaceIdFor(folder.uri.fsPath)
   };
 }
 
@@ -1186,7 +1273,7 @@ function mapStatus(status) {
   return void 0;
 }
 function randomNonce() {
-  return (0, import_node_crypto.randomBytes)(16).toString("hex");
+  return (0, import_node_crypto2.randomBytes)(16).toString("hex");
 }
 
 // src/chat/chat-panel.ts
@@ -1670,13 +1757,13 @@ async function handleFsSearch(root, payload) {
 }
 
 // src/chat/chat-panel.ts
-var import_node_crypto3 = require("node:crypto");
+var import_node_crypto4 = require("node:crypto");
 var nodePath = __toESM(require("node:path"));
 
 // src/project/identity.ts
 var vscode7 = __toESM(require("vscode"));
 var import_node_child_process2 = require("node:child_process");
-var import_node_crypto2 = require("node:crypto");
+var import_node_crypto3 = require("node:crypto");
 function gitExec(args, cwd) {
   return new Promise((resolve7) => {
     (0, import_node_child_process2.execFile)("git", args, { cwd, timeout: 5e3, windowsHide: true }, (err, stdout) => {
@@ -1693,7 +1780,7 @@ function normaliseRemote(remote) {
   return out.replace(/^https?:\/\//, "").toLowerCase();
 }
 function shortHash(input) {
-  return (0, import_node_crypto2.createHash)("sha1").update(input).digest("hex").slice(0, 24);
+  return (0, import_node_crypto3.createHash)("sha1").update(input).digest("hex").slice(0, 24);
 }
 async function detectProjectIdentity() {
   const folder = vscode7.workspace.workspaceFolders?.[0];
@@ -16348,9 +16435,11 @@ var patchHandoffSchema = baseHandoffSchema.extend({
     sizeBytes: external_exports.number().optional()
   }))
 });
+var verificationHandoffStatusSchema = external_exports.enum(["passed", "failed", "inconclusive", "not_applicable"]);
 var verificationReportHandoffSchema = baseHandoffSchema.extend({
   kind: external_exports.literal("VerificationReport"),
   passed: external_exports.boolean(),
+  status: verificationHandoffStatusSchema.optional(),
   stages: external_exports.array(external_exports.object({
     stageId: external_exports.string(),
     passed: external_exports.boolean(),
@@ -16368,6 +16457,7 @@ var genericHandoffSchema = baseHandoffSchema.extend({
 var testReportHandoffSchema = baseHandoffSchema.extend({
   kind: external_exports.literal("TestReport"),
   passed: external_exports.boolean(),
+  status: verificationHandoffStatusSchema.optional(),
   failures: external_exports.array(external_exports.object({
     test: external_exports.string(),
     message: external_exports.string().optional()
@@ -18766,7 +18856,7 @@ function randomId() {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 }
 function randomNonce2() {
-  return (0, import_node_crypto3.randomBytes)(16).toString("hex");
+  return (0, import_node_crypto4.randomBytes)(16).toString("hex");
 }
 
 // src/spec/store.ts
@@ -19175,6 +19265,7 @@ var TasksTreeProvider = class {
 
 // src/ide-delegate/stream.ts
 var vscode33 = __toESM(require("vscode"));
+var import_node_os = require("node:os");
 
 // src/ide-delegate/handlers/editors.ts
 var vscode15 = __toESM(require("vscode"));
@@ -20845,6 +20936,8 @@ async function dispatchInFolder(request) {
 var RECONNECT_BASE_MS = 2e3;
 var RECONNECT_MAX_MS = 3e4;
 var OUTBOX_LIMIT = 100;
+var CLOSE_BAD_HELLO = 4400;
+var CLOSE_FORBIDDEN = 4403;
 var IdeDelegateStream = class {
   constructor(target, output) {
     this.target = target;
@@ -20884,6 +20977,22 @@ var IdeDelegateStream = class {
   connectedOrigin;
   offAuth;
   focusSub;
+  helloParams() {
+    return {
+      machineId: currentMachineId(),
+      hostname: (0, import_node_os.hostname)(),
+      platform: process.platform,
+      pathStyle: process.platform === "win32" ? "win" : "posix",
+      extensionVersion: currentExtensionVersion(),
+      capabilities: {
+        trusted: vscode33.workspace.isTrusted,
+        terminal: typeof vscode33.window.createTerminal === "function",
+        fs: Boolean(vscode33.workspace.fs),
+        git: Boolean(vscode33.extensions.getExtension("vscode.git"))
+      },
+      workspace: { rootPath: this.target.projectPath, name: this.target.folderName }
+    };
+  }
   /** Tell the server this window is in use, so its calls come here. */
   announceFocus() {
     if (!vscode33.window.state.focused) return;
@@ -20926,6 +21035,7 @@ var IdeDelegateStream = class {
     url2.searchParams.set("projectPath", this.target.projectPath);
     url2.searchParams.set("sessionId", this.target.sessionId);
     url2.searchParams.set("windowId", vscode33.env.sessionId);
+    url2.searchParams.set("machineId", currentMachineId());
     return { url: url2.toString(), protocols };
   }
   async connect() {
@@ -20951,6 +21061,7 @@ var IdeDelegateStream = class {
       this.reconnectAttempt = 0;
       this.connectedOrigin = getApiOrigin();
       this.log(`IDE RPC connected (${this.target.projectPath})`);
+      ws.send(JSON.stringify({ jsonrpc: "2.0", method: "hello", params: this.helloParams() }));
       this.announceFocus();
       const pending = this.outbox;
       this.outbox = [];
@@ -20962,9 +21073,15 @@ var IdeDelegateStream = class {
     ws.onerror = () => {
       this.log("IDE RPC socket error");
     };
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       if (this.closed || this.ws !== ws) return;
       this.ws = void 0;
+      if (event.code === CLOSE_FORBIDDEN) {
+        this.authBlocked = true;
+        this.log(`IDE RPC refused this machine (${event.reason || "forbidden"}); pair again with "LiberIDE: Pair with Server\u2026"`);
+        return;
+      }
+      if (event.code === CLOSE_BAD_HELLO) this.log(`IDE RPC rejected the handshake (${event.reason || "bad hello"})`);
       if (opened) {
         this.log("IDE RPC disconnected");
         this.scheduleReconnect();
@@ -21003,6 +21120,12 @@ var IdeDelegateStream = class {
       const method = typeof parsed === "object" && parsed && "method" in parsed ? parsed.method : void 0;
       if (method === "connected") {
         this.log("IDE RPC handshake received");
+      } else if (method === "hello.ack") {
+        const workspaceId = parsed.params?.workspaceId;
+        if (typeof workspaceId === "string") {
+          setWorkspaceId(this.target.projectPath, workspaceId);
+          this.log(`IDE RPC registered as workspace ${workspaceId}`);
+        }
       } else if (method === "$/cancelRequest") {
         const id = String(parsed.params?.id ?? "");
         const controller = this.running.get(id);
@@ -21028,7 +21151,7 @@ var IdeDelegateStream = class {
         ...params,
         delegateId: request.id
       },
-      target: this.target,
+      target: { userId: this.target.userId, projectPath: this.target.projectPath, sessionId: this.target.sessionId },
       timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 3e4,
       signal: controller.signal
     };
@@ -21051,7 +21174,8 @@ function streamTarget(folder) {
   return {
     userId: "default",
     projectPath: folder.uri.fsPath,
-    sessionId: `vscode-${folder.name}`
+    sessionId: `vscode-${folder.name}`,
+    folderName: folder.name
   };
 }
 function startIdeDelegateStream(output) {
@@ -21166,13 +21290,44 @@ async function runIdeWorkflowCommand(output) {
   else void vscode34.window.showInformationMessage(summary, "Show Output").then((choice) => choice && output.show());
 }
 
+// src/pairing.ts
+var vscode35 = __toESM(require("vscode"));
+var import_node_os2 = require("node:os");
+var PAIRING_CODE_LENGTH = 8;
+async function pairWithServerCommand(output) {
+  const serverUrl = await vscode35.window.showInputBox({
+    title: "Pair with Server",
+    prompt: "URL of the server to connect this machine to",
+    placeHolder: "https://chat.example.com",
+    value: getApiOrigin() || void 0,
+    ignoreFocusOut: true,
+    validateInput: (value) => normalizeServerUrl(value) ? void 0 : "Enter an http(s) URL"
+  });
+  if (!serverUrl) return;
+  const code = await vscode35.window.showInputBox({
+    title: "Pair with Server",
+    prompt: "Pairing code from Settings \u2192 Machines \u2192 Connect a machine",
+    placeHolder: "ABCD-EFGH",
+    ignoreFocusOut: true,
+    validateInput: (value) => value.replace(/[\s-]/g, "").length === PAIRING_CODE_LENGTH ? void 0 : "The code has 8 characters"
+  });
+  if (!code) return;
+  const result = await vscode35.window.withProgress(
+    { location: vscode35.ProgressLocation.Notification, title: "Pairing with server\u2026" },
+    () => pairWithServer({ serverUrl, code, machineId: currentMachineId(), hostname: (0, import_node_os2.hostname)(), platform: process.platform })
+  );
+  output.appendLine(`[pairing] paired with ${result.apiOrigin} as machine ${result.machineId}`);
+  void vscode35.window.showInformationMessage(`LiberIDE is now connected to ${result.apiOrigin}.`);
+}
+
 // src/extension.ts
 var store;
 var pipeline;
 var chat;
 async function activate(context) {
   context.subscriptions.push(initApiFromContext(context));
-  const output = vscode35.window.createOutputChannel("LiberIDE");
+  initMachineIdentity(context);
+  const output = vscode36.window.createOutputChannel("LiberIDE");
   store = new SpecStore(output);
   await store.initialize(context);
   const specsTree = new SpecsTreeProvider(store);
@@ -21191,22 +21346,27 @@ async function activate(context) {
     store,
     pipeline,
     chat,
-    vscode35.window.registerWebviewViewProvider(LiberidePipelineController.viewType, pipeline, {
+    vscode36.window.registerWebviewViewProvider(LiberidePipelineController.viewType, pipeline, {
       webviewOptions: { retainContextWhenHidden: true }
     }),
-    vscode35.window.registerWebviewViewProvider(LiberideChatPanelController.viewType, chat, {
+    vscode36.window.registerWebviewViewProvider(LiberideChatPanelController.viewType, chat, {
       webviewOptions: { retainContextWhenHidden: true }
     }),
-    vscode35.window.registerTreeDataProvider("liberide.specs", specsTree),
-    vscode35.window.registerTreeDataProvider("liberide.tasks", tasksTree),
-    vscode35.window.registerTreeDataProvider("liberide.runs", runsTree),
+    vscode36.window.registerTreeDataProvider("liberide.specs", specsTree),
+    vscode36.window.registerTreeDataProvider("liberide.tasks", tasksTree),
+    vscode36.window.registerTreeDataProvider("liberide.runs", runsTree),
     createThemeBridge(output),
     statusBar(),
     startIdeDelegateStream(output),
     ...commands8(context, specsTree, tasksTree, runsTree),
-    vscode35.commands.registerCommand("liberide.runWorkflow", () => {
+    vscode36.commands.registerCommand("liberide.pairWithServer", () => {
+      pairWithServerCommand(output).catch((err) => {
+        void vscode36.window.showErrorMessage(err instanceof Error ? err.message : String(err));
+      });
+    }),
+    vscode36.commands.registerCommand("liberide.runWorkflow", () => {
       runIdeWorkflowCommand(output).catch((err) => {
-        void vscode35.window.showErrorMessage(err instanceof Error ? err.message : String(err));
+        void vscode36.window.showErrorMessage(err instanceof Error ? err.message : String(err));
       });
     })
   );
@@ -21215,34 +21375,34 @@ function commands8(context, specsTree, tasksTree, runsTree) {
   function safe(fn) {
     return (...args) => {
       fn(...args).catch((err) => {
-        void vscode35.window.showErrorMessage(err instanceof Error ? err.message : String(err));
+        void vscode36.window.showErrorMessage(err instanceof Error ? err.message : String(err));
       });
     };
   }
   return [
-    vscode35.commands.registerCommand("liberide.openChat", () => chat.show()),
-    vscode35.commands.registerCommand("liberide.newChat", safe(async () => {
+    vscode36.commands.registerCommand("liberide.openChat", () => chat.show()),
+    vscode36.commands.registerCommand("liberide.newChat", safe(async () => {
       chat.show();
       await chat.newSession();
     })),
-    vscode35.commands.registerCommand("liberide.openSettings", () => chat.openSettings()),
-    vscode35.commands.registerCommand("liberide.openChatHistory", () => chat.openChatHistory()),
-    vscode35.commands.registerCommand("liberide.renameChat", safe(async () => {
+    vscode36.commands.registerCommand("liberide.openSettings", () => chat.openSettings()),
+    vscode36.commands.registerCommand("liberide.openChatHistory", () => chat.openChatHistory()),
+    vscode36.commands.registerCommand("liberide.renameChat", safe(async () => {
       await chat.renameActiveChat();
     })),
-    vscode35.commands.registerCommand("liberide.openPipeline", () => pipeline.show()),
-    vscode35.commands.registerCommand("liberide.refreshSpecs", safe(async () => {
+    vscode36.commands.registerCommand("liberide.openPipeline", () => pipeline.show()),
+    vscode36.commands.registerCommand("liberide.refreshSpecs", safe(async () => {
       await store.refresh();
       specsTree.refresh();
     })),
-    vscode35.commands.registerCommand("liberide.refreshTasks", safe(async () => {
+    vscode36.commands.registerCommand("liberide.refreshTasks", safe(async () => {
       await store.refresh();
       tasksTree.refresh();
     })),
-    vscode35.commands.registerCommand("liberide.refreshRuns", () => runsTree.refresh()),
-    vscode35.commands.registerCommand("liberide.scaffoldFeature", safe(async () => {
-      const folder = vscode35.workspace.workspaceFolders?.[0];
-      const name = await vscode35.window.showInputBox({ prompt: "Feature name" });
+    vscode36.commands.registerCommand("liberide.refreshRuns", () => runsTree.refresh()),
+    vscode36.commands.registerCommand("liberide.scaffoldFeature", safe(async () => {
+      const folder = vscode36.workspace.workspaceFolders?.[0];
+      const name = await vscode36.window.showInputBox({ prompt: "Feature name" });
       if (!folder || !name) return;
       const root = await scaffoldFeature(folder, name);
       const id = root.path.split("/").pop() ?? name;
@@ -21251,38 +21411,38 @@ function commands8(context, specsTree, tasksTree, runsTree) {
       await store.refresh();
       specsTree.refresh();
     })),
-    vscode35.commands.registerCommand("liberide.setActiveFeature", safe(async (id) => {
+    vscode36.commands.registerCommand("liberide.setActiveFeature", safe(async (id) => {
       store.setActiveFeature(id);
       await context.workspaceState.update("liberide.activeFeatureId", id);
       tasksTree.refresh();
     })),
-    vscode35.commands.registerCommand("liberide.openTask", safe(async (arg) => {
+    vscode36.commands.registerCommand("liberide.openTask", safe(async (arg) => {
       const task = arg && store.getTask(arg.featureId, arg.task.id);
-      if (task) await vscode35.window.showTextDocument(task.filePath);
+      if (task) await vscode36.window.showTextDocument(task.filePath);
     })),
-    vscode35.commands.registerCommand("liberide.runTask", safe(async (arg) => {
+    vscode36.commands.registerCommand("liberide.runTask", safe(async (arg) => {
       const feature = arg && store.getFeature(arg.featureId);
       if (!feature || !arg) return;
       await pipeline.dispatch(feature.id, [arg.task.id]);
     })),
-    vscode35.commands.registerCommand("liberide.markTaskReady", safe(async (arg) => {
+    vscode36.commands.registerCommand("liberide.markTaskReady", safe(async (arg) => {
       const task = arg && store.getTask(arg.featureId, arg.task.id);
       if (task) await updateTaskStatus(task.filePath, "ready");
       await store.refresh();
     })),
-    vscode35.commands.registerCommand("liberide.dispatchFeature", safe(async () => {
+    vscode36.commands.registerCommand("liberide.dispatchFeature", safe(async () => {
       const feature = store.getActiveFeature();
       if (!feature) return;
       await pipeline.dispatch(feature.id);
     })),
-    vscode35.commands.registerCommand("liberide.regenerateTasksIndex", safe(async () => {
+    vscode36.commands.registerCommand("liberide.regenerateTasksIndex", safe(async () => {
       const feature = store.getActiveFeature();
-      if (feature?.tasksDirUri) await writeTextFile(vscode35.Uri.joinPath(feature.tasksDirUri, "index.md"), regenerateTasksIndex(feature.tasks));
+      if (feature?.tasksDirUri) await writeTextFile(vscode36.Uri.joinPath(feature.tasksDirUri, "index.md"), regenerateTasksIndex(feature.tasks));
     })),
-    vscode35.commands.registerCommand("liberide.cancelRun", safe(async (arg) => {
+    vscode36.commands.registerCommand("liberide.cancelRun", safe(async (arg) => {
       const graphId = typeof arg === "string" ? arg : arg?.run?.graphId;
       if (!graphId) {
-        void vscode35.window.showInformationMessage("Select an active run from the Agent Runs view to cancel it.");
+        void vscode36.window.showInformationMessage("Select an active run from the Agent Runs view to cancel it.");
         return;
       }
       await pipeline.cancel(graphId);
@@ -21290,7 +21450,7 @@ function commands8(context, specsTree, tasksTree, runsTree) {
   ];
 }
 function statusBar() {
-  const item = vscode35.window.createStatusBarItem(vscode35.StatusBarAlignment.Left, 100);
+  const item = vscode36.window.createStatusBarItem(vscode36.StatusBarAlignment.Left, 100);
   item.text = "$(comment-discussion) LiberIDE";
   item.tooltip = "Open LiberIDE chat";
   item.command = "liberide.openChat";

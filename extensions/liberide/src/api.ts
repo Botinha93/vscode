@@ -5,8 +5,8 @@ import type {
   DocumentRecord,
   SharingFolder,
 } from "./chat/types";
-import { existsSync, readFileSync, unwatchFile, watchFile, writeFileSync, chmodSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, unwatchFile, watchFile, writeFileSync, chmodSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { backoffDelay, readSseStream } from "./sse";
 
 type IntegrationSnapshot = {
@@ -14,6 +14,8 @@ type IntegrationSnapshot = {
   authToken?: string;
   /** ISO timestamp at which `authToken` stops being accepted, when known. */
   expiresAt?: string;
+  /** LiberIDE machine id (written by the desktop app, or by pairing). */
+  machineId?: string;
   [key: string]: unknown;
 };
 
@@ -215,11 +217,7 @@ export function refreshAuthToken(): Promise<boolean> {
       const snapshot = loadIntegrationFile();
       if (snapshot && cachedIntegrationSource) {
         try {
-          const next = { ...snapshot, authToken: body.token, expiresAt: body.expiresAt, updatedAt: new Date().toISOString() };
-          writeFileSync(cachedIntegrationSource, JSON.stringify(next), { mode: 0o600 });
-          // `mode` only applies when the file is created; tighten an existing one too.
-          chmodSync(cachedIntegrationSource, 0o600);
-          cachedIntegration = next;
+          writeIntegrationFile(cachedIntegrationSource, { ...snapshot, authToken: body.token, expiresAt: body.expiresAt });
         } catch {
           // read-only location: the in-memory token still works for this window
         }
@@ -234,6 +232,77 @@ export function refreshAuthToken(): Promise<boolean> {
     }
   })();
   return refreshInFlight;
+}
+
+/** Write the integration file (0600) and make it the cached snapshot. */
+function writeIntegrationFile(path: string, snapshot: IntegrationSnapshot): void {
+  const next = { ...snapshot, updatedAt: new Date().toISOString() };
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(next), { mode: 0o600 });
+  // `mode` only applies when the file is created; tighten an existing one too.
+  chmodSync(path, 0o600);
+  cachedIntegration = next;
+  cachedIntegrationSource = path;
+}
+
+export const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Machine id from the integration file, when it carries a valid one. */
+export function getIntegrationMachineId(): string | undefined {
+  const value = loadIntegrationFile()?.machineId;
+  return typeof value === "string" && UUID_PATTERN.test(value) ? value.toLowerCase() : undefined;
+}
+
+/** `https://host[/prefix]` without a trailing slash, or undefined when not an http(s) URL. */
+export function normalizeServerUrl(input: string): string | undefined {
+  try {
+    const url = new URL(input.trim());
+    if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+    return `${url.origin}${url.pathname}`.replace(/\/+$/, "");
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Pair this machine with a server using a code from Settings → Machines. The
+ * issued token (bound to `machineId` on the server) is written to the
+ * integration file, which switches this window to that server.
+ */
+export async function pairWithServer(input: {
+  serverUrl: string;
+  code: string;
+  machineId: string;
+  hostname?: string;
+  platform?: string;
+}): Promise<{ apiOrigin: string; machineId: string }> {
+  const apiOrigin = normalizeServerUrl(input.serverUrl);
+  if (!apiOrigin) throw new Error("Enter the server's http(s) URL.");
+  const res = await fetch(`${apiOrigin}/api/machines/pair`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code: input.code, machineId: input.machineId, hostname: input.hostname, platform: input.platform }),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(`Pairing failed: ${body.error ?? `${res.status} ${res.statusText}`}`);
+  }
+  const body = (await res.json()) as { apiOrigin?: string; webOrigin?: string; authToken?: string; expiresAt?: string; machineId?: string };
+  if (!body.authToken) throw new Error("Pairing failed: the server returned no token.");
+  const target = cachedIntegrationSource ?? integrationCandidates()[0];
+  if (!target) throw new Error("Pairing failed: no location for the LiberIDE integration file.");
+  writeIntegrationFile(target, {
+    ...(loadIntegrationFile() ?? {}),
+    apiOrigin: body.apiOrigin ?? apiOrigin,
+    webOrigin: body.webOrigin,
+    authToken: body.authToken,
+    expiresAt: body.expiresAt,
+    machineId: body.machineId ?? input.machineId,
+  });
+  refreshedAuth = undefined;
+  scheduleTokenRefresh();
+  notifyAuthChanged();
+  return { apiOrigin: body.apiOrigin ?? apiOrigin, machineId: body.machineId ?? input.machineId };
 }
 
 /**

@@ -11,6 +11,8 @@ import { TasksTreeProvider } from "./views/tasksTree";
 import { startIdeDelegateStream } from "./ide-delegate/stream";
 import { disposeAgentTerminals } from "./terminal/agent-terminals";
 import { runIdeWorkflowCommand } from "./workflows/ide-triggers";
+import { initMachineIdentity } from "./ide-delegate/machine";
+import { pairWithServerCommand } from "./pairing";
 
 let store: SpecStore;
 let pipeline: LiberidePipelineController;
@@ -18,6 +20,7 @@ let chat: LiberideChatPanelController;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   context.subscriptions.push(initApiFromContext(context));
+  initMachineIdentity(context);
   const output = vscode.window.createOutputChannel("LiberIDE");
   store = new SpecStore(output);
   await store.initialize(context);
@@ -53,6 +56,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     statusBar(),
     startIdeDelegateStream(output),
     ...commands(context, specsTree, tasksTree, runsTree),
+    vscode.commands.registerCommand("liberide.pairWithServer", () => {
+      pairWithServerCommand(output).catch((err: unknown) => {
+        void vscode.window.showErrorMessage(err instanceof Error ? err.message : String(err));
+      });
+    }),
     vscode.commands.registerCommand("liberide.runWorkflow", () => {
       runIdeWorkflowCommand(output).catch((err: unknown) => {
         void vscode.window.showErrorMessage(err instanceof Error ? err.message : String(err));
