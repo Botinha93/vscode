@@ -7,6 +7,7 @@ import type { IdeDelegateKind, IdeDelegatePayload } from "./types";
 import { dispatchIdeDelegate } from "./handlers";
 import { currentExtensionVersion, currentMachineId, setWorkspaceId } from "./machine";
 import { OpLedger, type OpOutcome } from "./op-ledger";
+import { parseConversationOpenParams, requestConversationOpen } from "../chat/continuation";
 
 const RECONNECT_BASE_MS = 2_000;
 const RECONNECT_MAX_MS = 30_000;
@@ -239,6 +240,12 @@ export class IdeDelegateStream implements vscode.Disposable {
         if (typeof workspaceId === "string") {
           setWorkspaceId(this.target.projectPath, workspaceId);
           this.log(`IDE RPC registered as workspace ${workspaceId}`);
+        }
+      } else if (method === "conversation.open") {
+        const conversationId = parseConversationOpenParams((parsed as { params?: unknown }).params);
+        if (conversationId) {
+          this.log(`opening conversation ${conversationId} (requested from another surface)`);
+          requestConversationOpen(conversationId);
         }
       } else if (method === "$/cancelRequest") {
         const id = String((parsed as { params?: { id?: unknown } }).params?.id ?? "");

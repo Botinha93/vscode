@@ -28,6 +28,7 @@ let refreshedAuth: { token: string; expiresAt?: string } | undefined;
 let refreshTimer: ReturnType<typeof setTimeout> | undefined;
 let refreshInFlight: Promise<boolean> | undefined;
 const authListeners = new Set<() => void>();
+const integrationListeners = new Set<() => void>();
 
 /** Refresh the token this long before it expires. */
 const REFRESH_LEAD_MS = 5 * 60_000;
@@ -55,6 +56,7 @@ export function initApiFromContext(context: { globalStorageUri: { fsPath: string
     watchFile(path, { interval: WATCH_INTERVAL_MS, persistent: false }, (curr, prev) => {
       if (curr.mtimeMs === prev.mtimeMs && curr.size === prev.size) return;
       reloadAuth();
+      for (const listener of [...integrationListeners]) listener();
     });
   }
   scheduleTokenRefresh();
@@ -64,6 +66,7 @@ export function initApiFromContext(context: { globalStorageUri: { fsPath: string
       if (refreshTimer) clearTimeout(refreshTimer);
       refreshTimer = undefined;
       authListeners.clear();
+      integrationListeners.clear();
     },
   };
 }
@@ -72,6 +75,23 @@ export function initApiFromContext(context: { globalStorageUri: { fsPath: string
 export function onAuthChanged(listener: () => void): () => void {
   authListeners.add(listener);
   return () => authListeners.delete(listener);
+}
+
+/** Notified whenever the integration file is rewritten (a launch may carry a conversation to open). */
+export function onIntegrationFileChanged(listener: () => void): () => void {
+  integrationListeners.add(listener);
+  return () => integrationListeners.delete(listener);
+}
+
+/** The integration file as last read (null when there is none). */
+export function getIntegrationSnapshot(): Readonly<IntegrationSnapshot> | null {
+  return loadIntegrationFile();
+}
+
+/** The web app's origin (written by pairing or the desktop app), for "Continue in Browser". */
+export function getWebOrigin(): string | undefined {
+  const value = loadIntegrationFile()?.webOrigin;
+  return typeof value === "string" && value ? value : undefined;
 }
 
 function notifyAuthChanged(): void {

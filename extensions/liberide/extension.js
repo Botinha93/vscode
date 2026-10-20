@@ -127,6 +127,7 @@ var refreshedAuth;
 var refreshTimer;
 var refreshInFlight;
 var authListeners = /* @__PURE__ */ new Set();
+var integrationListeners = /* @__PURE__ */ new Set();
 var REFRESH_LEAD_MS = 5 * 6e4;
 var MIN_REFRESH_DELAY_MS = 3e4;
 var WATCH_INTERVAL_MS = 2e3;
@@ -145,6 +146,7 @@ function initApiFromContext(context) {
     (0, import_node_fs.watchFile)(path10, { interval: WATCH_INTERVAL_MS, persistent: false }, (curr, prev) => {
       if (curr.mtimeMs === prev.mtimeMs && curr.size === prev.size) return;
       reloadAuth();
+      for (const listener of [...integrationListeners]) listener();
     });
   }
   scheduleTokenRefresh();
@@ -154,12 +156,24 @@ function initApiFromContext(context) {
       if (refreshTimer) clearTimeout(refreshTimer);
       refreshTimer = void 0;
       authListeners.clear();
+      integrationListeners.clear();
     }
   };
 }
 function onAuthChanged(listener) {
   authListeners.add(listener);
   return () => authListeners.delete(listener);
+}
+function onIntegrationFileChanged(listener) {
+  integrationListeners.add(listener);
+  return () => integrationListeners.delete(listener);
+}
+function getIntegrationSnapshot() {
+  return loadIntegrationFile();
+}
+function getWebOrigin() {
+  const value = loadIntegrationFile()?.webOrigin;
+  return typeof value === "string" && value ? value : void 0;
 }
 function notifyAuthChanged() {
   for (const listener of [...authListeners]) {
@@ -211,9 +225,9 @@ var AUTH_ENV_KEYS = ["LIBERIDE_AUTH_TOKEN", "CHATLLM_AUTH_TOKEN"];
 var launchEnvToken = AUTH_ENV_KEYS.map((key) => process.env[key]).find(Boolean) ?? "";
 for (const key of AUTH_ENV_KEYS) delete process.env[key];
 var AUTH_ENV_NAME = /^(LIBERIDE|CHATLLM)_.*(TOKEN|SECRET|PASSWORD|AUTH|KEY|COOKIE)/i;
-function childProcessEnv(env3 = process.env) {
+function childProcessEnv(env4 = process.env) {
   const out = {};
-  for (const [key, value] of Object.entries(env3)) if (!AUTH_ENV_NAME.test(key)) out[key] = value;
+  for (const [key, value] of Object.entries(env4)) if (!AUTH_ENV_NAME.test(key)) out[key] = value;
   return out;
 }
 var IDE_RPC_SUBPROTOCOL = "liberide.v1";
@@ -521,6 +535,61 @@ function subscribeConversationListSync(onChange) {
     stopPoll();
     if (retryTimer) clearTimeout(retryTimer);
   };
+}
+
+// src/chat/continuation.ts
+var import_node_path2 = require("node:path");
+var STARTUP_REQUEST_MAX_AGE_MS = 5 * 6e4;
+var listeners = /* @__PURE__ */ new Set();
+var pending;
+var lastStartupRequest;
+function onConversationOpenRequest(listener) {
+  listeners.add(listener);
+  if (pending) {
+    const id = pending;
+    pending = void 0;
+    listener(id);
+  }
+  return () => listeners.delete(listener);
+}
+function requestConversationOpen(conversationId) {
+  if (!listeners.size) {
+    pending = conversationId;
+    return;
+  }
+  for (const listener of [...listeners]) listener(conversationId);
+}
+function parseConversationOpenParams(params) {
+  const id = params && typeof params === "object" ? params.conversationId : void 0;
+  return typeof id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(id) ? id : void 0;
+}
+function continueInBrowserUrl(webOrigin, conversationId) {
+  if (typeof webOrigin !== "string" || !conversationId || conversationId.startsWith("draft:")) return void 0;
+  let base;
+  try {
+    const url2 = new URL(webOrigin.trim());
+    if (url2.protocol !== "http:" && url2.protocol !== "https:") return void 0;
+    base = `${url2.origin}${url2.pathname}`.replace(/\/+$/, "");
+  } catch {
+    return void 0;
+  }
+  return `${base}/c/${encodeURIComponent(conversationId)}`;
+}
+function samePath(a, b) {
+  const norm = (p) => (0, import_node_path2.resolve)(p).replace(/[\\/]+$/, "");
+  return process.platform === "win32" || process.platform === "darwin" ? norm(a).toLowerCase() === norm(b).toLowerCase() : norm(a) === norm(b);
+}
+function takeStartupConversationRequest(snapshot, folders, now = Date.now()) {
+  const conversationId = parseConversationOpenParams(snapshot);
+  if (!snapshot || !conversationId || typeof snapshot.conversationRequestedAt !== "string") return void 0;
+  const requestedAt = Date.parse(snapshot.conversationRequestedAt);
+  if (!Number.isFinite(requestedAt) || now - requestedAt > STARTUP_REQUEST_MAX_AGE_MS) return void 0;
+  const projectPath = typeof snapshot.projectPath === "string" ? snapshot.projectPath : "";
+  if (projectPath ? !folders.some((folder) => samePath(folder, projectPath)) : folders.length > 0) return void 0;
+  const key = `${conversationId}@${snapshot.conversationRequestedAt}`;
+  if (key === lastStartupRequest) return void 0;
+  lastStartupRequest = key;
+  return conversationId;
 }
 
 // src/panel/panel.ts
@@ -1644,7 +1713,7 @@ function searchWithRipgrep(rg, root, query, isRegex, include, maxResults) {
   for (const ext of BINARY_EXTS) args.push("--glob", `!*${ext}`);
   if (include) args.push("--glob", include);
   args.push("--", query, ".");
-  return new Promise((resolve7, reject) => {
+  return new Promise((resolve8, reject) => {
     const proc = (0, import_node_child_process.spawn)(rg, args, { cwd: root, windowsHide: true });
     const results = [];
     let buffer = "";
@@ -1669,7 +1738,7 @@ function searchWithRipgrep(rg, root, query, isRegex, include, maxResults) {
     proc.on("close", (code) => {
       consume(buffer);
       if (code === 2 && results.length === 0) reject(new Error("ripgrep error"));
-      else resolve7(results);
+      else resolve8(results);
     });
   });
 }
@@ -1765,10 +1834,10 @@ var vscode7 = __toESM(require("vscode"));
 var import_node_child_process2 = require("node:child_process");
 var import_node_crypto3 = require("node:crypto");
 function gitExec(args, cwd) {
-  return new Promise((resolve7) => {
+  return new Promise((resolve8) => {
     (0, import_node_child_process2.execFile)("git", args, { cwd, timeout: 5e3, windowsHide: true }, (err, stdout) => {
-      if (err) return resolve7(null);
-      resolve7(stdout.toString().trim());
+      if (err) return resolve8(null);
+      resolve8(stdout.toString().trim());
     });
   });
 }
@@ -16820,11 +16889,17 @@ async function streamChatEndpoint(path10, body, handlers, signal, headers) {
     signal
   });
   if (!response.ok || !response.body) throw await errorFromResponse(response);
+  return consumeChatStream(response.body, handlers);
+}
+async function consumeChatStream(body, handlers) {
   let finalResponse;
   let fallback;
   let routing;
-  await readSseStream(response.body, ({ event, data }) => {
+  await readSseStream(body, ({ event, data }) => {
     switch (event) {
+      case "snapshot":
+        handlers.onSnapshot?.(data);
+        break;
       case "conversation":
         handlers.onConversation?.(data.conversationId);
         break;
@@ -16898,6 +16973,19 @@ function streamChat(body, handlers, signal) {
     "X-Terminal-Executor": body.ideContext?.terminalExecutor === "client" ? "client" : "server"
   });
 }
+async function openTurnStream(conversationId, signal) {
+  const response = await apiFetch(`/api/conversations/${encodeURIComponent(conversationId)}/turn/stream`, {
+    headers: { Accept: "text/event-stream" },
+    signal
+  });
+  if (response.status === 204 || !response.body) {
+    response.body?.cancel().catch(() => void 0);
+    return void 0;
+  }
+  if (!response.ok) throw await errorFromResponse(response);
+  const body = response.body;
+  return (handlers) => consumeChatStream(body, handlers);
+}
 function isAgentRunResumed(value) {
   return typeof value.agentRunResumed === "string";
 }
@@ -16927,7 +17015,7 @@ async function listConversationApprovals(conversationId) {
 
 // src/chat/chat-panel.ts
 var import_node_child_process3 = require("node:child_process");
-var import_node_path2 = require("node:path");
+var import_node_path3 = require("node:path");
 var OVERRIDES_STORAGE_KEY = "liberide.chat.overrides";
 var ACTIVE_SESSION_STORAGE_KEY = "liberide.chat.activeSession";
 function resolveAllowedAgentIds(agents, configured) {
@@ -16969,6 +17057,7 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     this.output = output;
     this.overrides = this.context.workspaceState.get(OVERRIDES_STORAGE_KEY, {});
     this.activeSessionId = this.context.workspaceState.get(ACTIVE_SESSION_STORAGE_KEY, null);
+    this.publishActiveContext();
     const storedKinds = this.context.workspaceState.get("liberide.chat.sessionKinds") ?? {};
     for (const [id, kind] of Object.entries(storedKinds)) this.sessionKinds.set(id, kind);
     this.disposables.push(
@@ -17024,12 +17113,17 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
   /** conversationId -> placeholder shown while a resumed sub-agent works; kept across refreshes until its result lands. */
   agentResumeNotes = /* @__PURE__ */ new Map();
   /** Locally-staged session for "new chat" before the first message creates it on the backend. */
+  /** Conversations opened from another surface: listed even when they are not this project's. */
+  openedConversations = /* @__PURE__ */ new Set();
+  /** Conversations whose running turn is being looked up (re-attach). */
+  attaching = /* @__PURE__ */ new Set();
   draftSession = null;
   activeSessionId = null;
   async onConversationListEvent(event) {
     if (event.type === "message_updated" && event.conversationId) {
       this.agentResumeNotes.delete(event.conversationId);
       if (this.messagesCache.has(event.conversationId)) await this.refreshSingleConversation(event.conversationId);
+      if (event.conversationId === this.activeSessionId) void this.attachRunningTurn(event.conversationId);
       return;
     }
     await this.refreshConversations();
@@ -17059,6 +17153,19 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     await this.persistActive();
     this.broadcastSessions();
     this.broadcastActiveSession();
+  }
+  /** Show a conversation (opened from the web app or the quick pick), following its running turn. */
+  async openConversation(conversationId) {
+    this.openedConversations.add(conversationId);
+    this.activeSessionId = conversationId;
+    await this.persistActive();
+    this.show();
+    if (this.view) await this.openSession(conversationId);
+  }
+  /** The active saved conversation (not a draft). */
+  activeConversationId() {
+    const id = this.activeSessionId;
+    return id && !id.startsWith("draft:") && this.conversations.has(id) ? id : void 0;
   }
   openSettings() {
     this.show();
@@ -17236,6 +17343,7 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
       backendStatus: this.backendStatus,
       apiOrigin: getApiOrigin()
     });
+    if (this.activeSessionId) void this.attachRunningTurn(this.activeSessionId);
   }
   async refreshCatalog() {
     const reachability = await probeBackend();
@@ -17341,7 +17449,7 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     try {
       const all = await listConversations();
       await this.syncProjectConversations(all);
-      const owned = all.filter((c) => this.conversationBelongsToProject(c));
+      const owned = all.filter((c) => this.conversationBelongsToProject(c) || this.openedConversations.has(c.id));
       this.conversations.clear();
       for (const c of owned) this.conversations.set(c.id, c);
       if (this.activeSessionId && this.activeSessionId.startsWith("draft:")) {
@@ -17570,7 +17678,12 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     };
   }
   async persistActive() {
+    this.publishActiveContext();
     await this.context.workspaceState.update(ACTIVE_SESSION_STORAGE_KEY, this.activeSessionId);
+  }
+  /** Enables "Continue in Browser" while a saved conversation is active. */
+  publishActiveContext() {
+    void vscode9.commands.executeCommand("setContext", "liberide.hasActiveConversation", Boolean(this.activeSessionId && !this.activeSessionId.startsWith("draft:")));
   }
   async persistOverrides() {
     await this.context.workspaceState.update(OVERRIDES_STORAGE_KEY, this.overrides);
@@ -17599,6 +17712,7 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     await this.ensureMessagesLoaded(id);
     this.broadcastSessions();
     this.broadcastActiveSession();
+    void this.attachRunningTurn(id);
   }
   async removeSession(id) {
     if (id.startsWith("draft:")) {
@@ -17677,7 +17791,7 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     for (const uri of uris) {
       try {
         const bytes = await vscode9.workspace.fs.readFile(uri);
-        const name = (0, import_node_path2.basename)(uri.fsPath);
+        const name = (0, import_node_path3.basename)(uri.fsPath);
         const document = await uploadDocument({ name, bytes });
         uploadedIds.push(document.id);
         this.attachmentBytes.set(document.id, { data: bytes, mimeType: document.mimeType, name: document.name });
@@ -17687,7 +17801,7 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         this.output.appendLine(`[chat.attach] ${msg}`);
-        this.broadcast({ type: "log", message: `Failed to attach ${(0, import_node_path2.basename)(uri.fsPath)}: ${msg}` });
+        this.broadcast({ type: "log", message: `Failed to attach ${(0, import_node_path3.basename)(uri.fsPath)}: ${msg}` });
       }
     }
     if (!uploadedIds.length) return;
@@ -17894,9 +18008,8 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
   // ---------------------------------------------------------------------------
   // Turn lifecycle shared by chat, pipeline generation and approval resume
   // ---------------------------------------------------------------------------
-  beginTurn(conversationId, assistantMessage, root) {
+  beginTurn(conversationId, assistantMessage, root, abort = new AbortController()) {
     resetPreEditSnapshots(conversationId);
-    const abort = new AbortController();
     const streamState = {
       abort,
       messageId: assistantMessage.id,
@@ -17922,6 +18035,17 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
   createTurnHandlers(conversationId, assistantMessage, streamState, prompt) {
     let buffer = "";
     const handlers = {
+      onSnapshot: (snapshot) => {
+        buffer = snapshot.content ?? "";
+        assistantMessage.content = buffer;
+        this.postPatch(conversationId, assistantMessage.id, { content: buffer });
+        if (snapshot.thinking) {
+          this.thinkingByMessage.set(assistantMessage.id, snapshot.thinking);
+          this.postPatch(conversationId, assistantMessage.id, { thinking: snapshot.thinking });
+        }
+        if (Array.isArray(snapshot.todos)) this.postPatch(conversationId, assistantMessage.id, { todos: snapshot.todos });
+        for (const event of snapshot.toolEvents ?? []) handlers.onToolEvent?.(event);
+      },
       onConversation: (serverConversationId) => {
         streamState.serverConversationId = serverConversationId;
         if (streamState.stopRequested) void requestTurnCancel(serverConversationId);
@@ -17984,8 +18108,8 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
     const messageId = assistantMessage.id;
     const warnings = response.context?.warnings?.filter(Boolean) ?? [];
     if (warnings.length) this.turnWarnings.set(messageId, warnings);
-    const pending = (response.approvals ?? []).filter((a) => a.status === "pending");
-    const approval = assistantMessage.approvalId && response.approvals?.find((a) => a.id === assistantMessage.approvalId) || pending[0];
+    const pending2 = (response.approvals ?? []).filter((a) => a.status === "pending");
+    const approval = assistantMessage.approvalId && response.approvals?.find((a) => a.id === assistantMessage.approvalId) || pending2[0];
     if (approval) {
       this.approvalCards.set(messageId, approvalCardFrom(approval));
       if (!assistantMessage.approvalId) assistantMessage.approvalId = approval.id;
@@ -18216,6 +18340,53 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
       publish();
     }
   }
+  /**
+   * Follow the conversation's running turn, wherever it started (the web
+   * app, another window, a background approval resume): what streamed so far
+   * arrives as a snapshot, then the live events. No-op when none is running.
+   */
+  async attachRunningTurn(conversationId) {
+    if (conversationId.startsWith("draft:") || this.backendStatus !== "ok") return;
+    if (this.streams.has(conversationId) || this.attaching.has(conversationId)) return;
+    this.attaching.add(conversationId);
+    const abort = new AbortController();
+    let read;
+    try {
+      read = await openTurnStream(conversationId, abort.signal);
+    } catch (err) {
+      this.output.appendLine(`[chat.attach-turn] ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    } finally {
+      this.attaching.delete(conversationId);
+    }
+    if (!read) return;
+    if (this.streams.has(conversationId)) {
+      abort.abort();
+      return;
+    }
+    const assistantMessage = {
+      id: `local:asst:${randomId()}`,
+      conversationId,
+      role: "assistant",
+      content: "",
+      createdAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    this.messagesCache.set(conversationId, [...this.messagesCache.get(conversationId) ?? [], assistantMessage]);
+    if (this.activeSessionId === conversationId) this.broadcastActiveSession();
+    const { streamState } = this.beginTurn(conversationId, assistantMessage, void 0, abort);
+    streamState.serverConversationId = conversationId;
+    const turn = this.createTurnHandlers(conversationId, assistantMessage, streamState, "");
+    try {
+      const response = await read(turn.handlers);
+      const localId = assistantMessage.id;
+      this.applyTurnResponse(conversationId, assistantMessage, response);
+      this.completeTurn(conversationId, localId, assistantMessage.id);
+    } catch (err) {
+      this.failTurn(conversationId, assistantMessage, err, abort.signal.aborted, turn.buffer());
+    } finally {
+      this.endTurn(conversationId, streamState);
+    }
+  }
   /** Stream the continuation of a paused turn into a new assistant bubble. */
   async runApprovalResume(conversationId, pausedMessageId, approvalId) {
     const messages = this.messagesCache.get(conversationId) ?? [];
@@ -18428,10 +18599,10 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
     if (gitChoice !== "Revert") return;
     for (const { clean, root } of needGit) {
       if (!isPathInside(root, nodePath.resolve(root, clean))) continue;
-      await new Promise((resolve7, reject) => {
+      await new Promise((resolve8, reject) => {
         (0, import_node_child_process3.execFile)("git", ["checkout", "--", clean], { cwd: root, timeout: 15e3, windowsHide: true }, (err, _stdout, stderr) => {
           if (err) reject(new Error(stderr || err.message));
-          else resolve7();
+          else resolve8();
         });
       }).then(() => {
         this.broadcast({ type: "log", message: `Reverted ${clean} to last git state.`, severity: "info" });
@@ -19661,9 +19832,9 @@ function runLocalTerminal(delegate, signal, hooks = {}) {
   const cwd = path5.resolve(delegate.cwd || delegate.projectPath);
   const argv = shellArgv(delegate.command);
   const timeoutMs = delegate.timeoutMs > 0 ? delegate.timeoutMs : 12e4;
-  return new Promise((resolve7) => {
+  return new Promise((resolve8) => {
     if (signal?.aborted) {
-      resolve7({ exitCode: null, stdout: "", stderr: "Cancelled before start", timedOut: false, cancelled: true });
+      resolve8({ exitCode: null, stdout: "", stderr: "Cancelled before start", timedOut: false, cancelled: true });
       return;
     }
     const proc = (0, import_child_process.spawn)(argv[0], argv.slice(1), {
@@ -19702,7 +19873,7 @@ function runLocalTerminal(delegate, signal, hooks = {}) {
     const finish = (result) => {
       clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
-      resolve7(result);
+      resolve8(result);
     };
     proc.on("close", (code, killSignal) => {
       finish({
@@ -19905,14 +20076,14 @@ var AgentTerminalSession = class {
     return this.read(false);
   }
   waitForOutput(since, maxWaitMs, signal) {
-    return new Promise((resolve7) => {
+    return new Promise((resolve8) => {
       let quietTimer;
       const done = () => {
         clearTimeout(deadline);
         if (quietTimer) clearTimeout(quietTimer);
         this.outputListeners.delete(onOutput);
         signal?.removeEventListener("abort", done);
-        resolve7();
+        resolve8();
       };
       const onOutput = () => {
         if (this.exited) return done();
@@ -21113,9 +21284,9 @@ var IdeDelegateStream = class {
       this.log(`IDE RPC connected (${this.target.projectPath})`);
       ws.send(JSON.stringify({ jsonrpc: "2.0", method: "hello", params: this.helloParams() }));
       this.announceFocus();
-      const pending = this.outbox;
+      const pending2 = this.outbox;
       this.outbox = [];
-      for (const message of pending) ws.send(message);
+      for (const message of pending2) ws.send(message);
     };
     ws.onmessage = (event) => {
       void this.handleMessage(String(event.data));
@@ -21175,6 +21346,12 @@ var IdeDelegateStream = class {
         if (typeof workspaceId === "string") {
           setWorkspaceId(this.target.projectPath, workspaceId);
           this.log(`IDE RPC registered as workspace ${workspaceId}`);
+        }
+      } else if (method === "conversation.open") {
+        const conversationId = parseConversationOpenParams(parsed.params);
+        if (conversationId) {
+          this.log(`opening conversation ${conversationId} (requested from another surface)`);
+          requestConversationOpen(conversationId);
         }
       } else if (method === "$/cancelRequest") {
         const id = String(parsed.params?.id ?? "");
@@ -21427,8 +21604,60 @@ async function activate(context) {
       runIdeWorkflowCommand(output).catch((err) => {
         void vscode36.window.showErrorMessage(err instanceof Error ? err.message : String(err));
       });
-    })
+    }),
+    ...continuation(output)
   );
+}
+function continuation(output) {
+  const open2 = (conversationId) => {
+    chat.openConversation(conversationId).catch((err) => {
+      output.appendLine(`[continuation] ${err instanceof Error ? err.message : String(err)}`);
+    });
+  };
+  const updateContext = () => {
+    void vscode36.commands.executeCommand("setContext", "liberide.hasWebOrigin", Boolean(getWebOrigin()));
+  };
+  const checkLaunchRequest = () => {
+    const folders = (vscode36.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
+    const conversationId = takeStartupConversationRequest(getIntegrationSnapshot(), folders);
+    if (conversationId) open2(conversationId);
+  };
+  const offRequests = onConversationOpenRequest(open2);
+  const offFile = onIntegrationFileChanged(() => {
+    updateContext();
+    checkLaunchRequest();
+  });
+  updateContext();
+  checkLaunchRequest();
+  return [
+    { dispose: offRequests },
+    { dispose: offFile },
+    vscode36.commands.registerCommand("liberide.continueInBrowser", async () => {
+      const url2 = continueInBrowserUrl(getWebOrigin(), chat.activeConversationId());
+      if (!url2) {
+        void vscode36.window.showInformationMessage(getWebOrigin() ? "Open a saved conversation first." : "No web app address is known. Pair with the server (LiberIDE: Pair with Server\u2026) or open LiberIDE from the desktop app.");
+        return;
+      }
+      await vscode36.env.openExternal(vscode36.Uri.parse(url2));
+    }),
+    vscode36.commands.registerCommand("liberide.openConversation", async () => {
+      try {
+        const conversations = (await listConversations()).filter((conversation) => !conversation.archived);
+        const picked = await vscode36.window.showQuickPick(
+          conversations.slice(0, 50).map((conversation) => ({
+            label: conversation.title || "Untitled",
+            description: conversation.folder ?? void 0,
+            detail: new Date(conversation.updatedAt).toLocaleString(),
+            id: conversation.id
+          })),
+          { placeHolder: "Open a conversation", matchOnDescription: true }
+        );
+        if (picked) open2(picked.id);
+      } catch (err) {
+        void vscode36.window.showErrorMessage(`Could not list conversations: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    })
+  ];
 }
 function commands8(context, specsTree, tasksTree, runsTree) {
   function safe(fn) {

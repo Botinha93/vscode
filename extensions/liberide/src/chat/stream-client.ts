@@ -10,7 +10,19 @@ import type {
   ToolCallEvent,
 } from "./types";
 
+/** What a running turn streamed before a client (re-)attached. */
+export interface TurnSnapshot {
+  conversationId?: string;
+  content: string;
+  thinking: string;
+  toolEvents: ToolCallEvent[];
+  todos?: unknown[];
+  startedAt: string;
+}
+
 export interface ChatStreamHandlers {
+  /** Sent first on a re-attach: everything streamed so far. */
+  onSnapshot?: (snapshot: TurnSnapshot) => void;
   /** The turn's server conversation id, sent early (drafts learn it before `done`). */
   onConversation?: (conversationId: string) => void;
   onToken?: (token: string) => void;
@@ -89,13 +101,20 @@ async function streamChatEndpoint(
     signal,
   });
   if (!response.ok || !response.body) throw await errorFromResponse(response);
+  return consumeChatStream(response.body, handlers);
+}
 
+/** Dispatch a chat-shaped SSE body; resolves with the `done` payload. */
+async function consumeChatStream(body: ReadableStream<Uint8Array>, handlers: ChatStreamHandlers): Promise<ChatResponse> {
   let finalResponse: ChatResponse | undefined;
   let fallback: FallbackRequiredResolution | undefined;
   let routing: RoutingUnsatisfiedResolution | undefined;
 
-  await readSseStream(response.body, ({ event, data }) => {
+  await readSseStream(body, ({ event, data }) => {
     switch (event) {
+      case "snapshot":
+        handlers.onSnapshot?.(data as TurnSnapshot);
+        break;
       case "conversation":
         handlers.onConversation?.((data as { conversationId: string }).conversationId);
         break;
@@ -170,6 +189,28 @@ export function streamChat(body: ChatRequest, handlers: ChatStreamHandlers, sign
   return streamChatEndpoint("/api/chat/stream", body, handlers, signal, {
     "X-Terminal-Executor": body.ideContext?.terminalExecutor === "client" ? "client" : "server",
   });
+}
+
+/**
+ * Open the stream of the conversation's running turn (started here or on
+ * another surface). Undefined when none is running: the messages are current.
+ * The returned function reads it to the end like any chat stream.
+ */
+export async function openTurnStream(
+  conversationId: string,
+  signal?: AbortSignal,
+): Promise<((handlers: ChatStreamHandlers) => Promise<ChatResponse>) | undefined> {
+  const response = await apiFetch(`/api/conversations/${encodeURIComponent(conversationId)}/turn/stream`, {
+    headers: { Accept: "text/event-stream" },
+    signal,
+  });
+  if (response.status === 204 || !response.body) {
+    response.body?.cancel().catch(() => undefined);
+    return undefined;
+  }
+  if (!response.ok) throw await errorFromResponse(response);
+  const body = response.body;
+  return (handlers) => consumeChatStream(body, handlers);
 }
 
 /**

@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
-import { initApiFromContext } from "./api";
+import { getIntegrationSnapshot, getWebOrigin, initApiFromContext, listConversations, onIntegrationFileChanged } from "./api";
+import { continueInBrowserUrl, onConversationOpenRequest, takeStartupConversationRequest } from "./chat/continuation";
 import { LiberidePipelineController } from "./panel/panel";
 import { LiberideChatPanelController } from "./chat/chat-panel";
 import { scaffoldFeature, regenerateTasksIndex, updateTaskStatus, writeTextFile } from "./spec/writer";
@@ -66,7 +67,64 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         void vscode.window.showErrorMessage(err instanceof Error ? err.message : String(err));
       });
     }),
+    ...continuation(output),
   );
+}
+
+/** Conversations opened from the web app, and back: "Continue in Browser", "Open Conversation…". */
+function continuation(output: vscode.OutputChannel): vscode.Disposable[] {
+  const open = (conversationId: string) => {
+    chat.openConversation(conversationId).catch((err: unknown) => {
+      output.appendLine(`[continuation] ${err instanceof Error ? err.message : String(err)}`);
+    });
+  };
+  const updateContext = () => {
+    void vscode.commands.executeCommand("setContext", "liberide.hasWebOrigin", Boolean(getWebOrigin()));
+  };
+  const checkLaunchRequest = () => {
+    const folders = (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
+    const conversationId = takeStartupConversationRequest(getIntegrationSnapshot(), folders);
+    if (conversationId) open(conversationId);
+  };
+  const offRequests = onConversationOpenRequest(open);
+  const offFile = onIntegrationFileChanged(() => {
+    updateContext();
+    checkLaunchRequest();
+  });
+  updateContext();
+  checkLaunchRequest();
+
+  return [
+    { dispose: offRequests },
+    { dispose: offFile },
+    vscode.commands.registerCommand("liberide.continueInBrowser", async () => {
+      const url = continueInBrowserUrl(getWebOrigin(), chat.activeConversationId());
+      if (!url) {
+        void vscode.window.showInformationMessage(getWebOrigin()
+          ? "Open a saved conversation first."
+          : "No web app address is known. Pair with the server (LiberIDE: Pair with Server…) or open LiberIDE from the desktop app.");
+        return;
+      }
+      await vscode.env.openExternal(vscode.Uri.parse(url));
+    }),
+    vscode.commands.registerCommand("liberide.openConversation", async () => {
+      try {
+        const conversations = (await listConversations()).filter((conversation) => !conversation.archived);
+        const picked = await vscode.window.showQuickPick(
+          conversations.slice(0, 50).map((conversation) => ({
+            label: conversation.title || "Untitled",
+            description: conversation.folder ?? undefined,
+            detail: new Date(conversation.updatedAt).toLocaleString(),
+            id: conversation.id,
+          })),
+          { placeHolder: "Open a conversation", matchOnDescription: true },
+        );
+        if (picked) open(picked.id);
+      } catch (err) {
+        void vscode.window.showErrorMessage(`Could not list conversations: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }),
+  ];
 }
 
 function commands(

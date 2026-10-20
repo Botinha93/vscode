@@ -112,6 +112,18 @@
         "category": "LiberIDE"
       },
       {
+        "command": "liberide.continueInBrowser",
+        "title": "Continue in Browser",
+        "category": "LiberIDE",
+        "icon": "$(link-external)",
+        "enablement": "liberide.hasWebOrigin && liberide.hasActiveConversation"
+      },
+      {
+        "command": "liberide.openConversation",
+        "title": "Open Conversation…",
+        "category": "LiberIDE"
+      },
+      {
         "command": "liberide.openPipeline",
         "title": "Open LiberIDE Pipeline",
         "category": "LiberIDE",
@@ -256,6 +268,12 @@
           "command": "liberide.renameChat"
         },
         {
+          "command": "liberide.continueInBrowser"
+        },
+        {
+          "command": "liberide.openConversation"
+        },
+        {
           "command": "liberide.openPipeline"
         },
         {
@@ -290,6 +308,16 @@
           "command": "liberide.renameChat",
           "when": "view == liberide.chat",
           "group": "1_modify"
+        },
+        {
+          "command": "liberide.openConversation",
+          "when": "view == liberide.chat",
+          "group": "2_continue@1"
+        },
+        {
+          "command": "liberide.continueInBrowser",
+          "when": "view == liberide.chat",
+          "group": "2_continue@2"
         },
         {
           "command": "liberide.refreshSpecs",

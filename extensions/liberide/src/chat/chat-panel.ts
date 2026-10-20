@@ -45,6 +45,7 @@ import {
   ChatStreamError,
   isAgentRunResumed,
   listConversationApprovals,
+  openTurnStream,
   resolveApproval,
   streamApprovalResume,
   streamChat,
@@ -250,6 +251,10 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
   private agentResumeNotes = new Map<string, ConversationMessage>();
 
   /** Locally-staged session for "new chat" before the first message creates it on the backend. */
+  /** Conversations opened from another surface: listed even when they are not this project's. */
+  private readonly openedConversations = new Set<string>();
+  /** Conversations whose running turn is being looked up (re-attach). */
+  private readonly attaching = new Set<string>();
   private draftSession: ChatSession | null = null;
   private activeSessionId: string | null = null;
 
@@ -260,6 +265,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
   ) {
     this.overrides = this.context.workspaceState.get<OverridesCache>(OVERRIDES_STORAGE_KEY, {});
     this.activeSessionId = this.context.workspaceState.get<string | null>(ACTIVE_SESSION_STORAGE_KEY, null);
+    this.publishActiveContext();
     const storedKinds = this.context.workspaceState.get<Record<string, ChatSessionKind>>("liberide.chat.sessionKinds") ?? {};
     for (const [id, kind] of Object.entries(storedKinds)) this.sessionKinds.set(id, kind);
     this.disposables.push(
@@ -283,6 +289,8 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       this.agentResumeNotes.delete(event.conversationId);
       // A graph (or another client) changed a message: reload just that conversation.
       if (this.messagesCache.has(event.conversationId)) await this.refreshSingleConversation(event.conversationId);
+      // An approval answered elsewhere may have resumed the turn: follow it here too.
+      if (event.conversationId === this.activeSessionId) void this.attachRunningTurn(event.conversationId);
       return;
     }
     await this.refreshConversations();
@@ -316,6 +324,22 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     await this.persistActive();
     this.broadcastSessions();
     this.broadcastActiveSession();
+  }
+
+  /** Show a conversation (opened from the web app or the quick pick), following its running turn. */
+  async openConversation(conversationId: string): Promise<void> {
+    this.openedConversations.add(conversationId);
+    this.activeSessionId = conversationId;
+    await this.persistActive();
+    this.show();
+    // Before the view is up, `ready` → sendInit opens the active session.
+    if (this.view) await this.openSession(conversationId);
+  }
+
+  /** The active saved conversation (not a draft). */
+  activeConversationId(): string | undefined {
+    const id = this.activeSessionId;
+    return id && !id.startsWith("draft:") && this.conversations.has(id) ? id : undefined;
   }
 
   openSettings(): void {
@@ -507,6 +531,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       backendStatus: this.backendStatus,
       apiOrigin: getApiOrigin(),
     });
+    if (this.activeSessionId) void this.attachRunningTurn(this.activeSessionId);
   }
 
   private async refreshCatalog(): Promise<void> {
@@ -623,7 +648,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     try {
       const all = await listConversations();
       await this.syncProjectConversations(all);
-      const owned = all.filter((c) => this.conversationBelongsToProject(c));
+      const owned = all.filter((c) => this.conversationBelongsToProject(c) || this.openedConversations.has(c.id));
       this.conversations.clear();
       for (const c of owned) this.conversations.set(c.id, c);
       if (this.activeSessionId && this.activeSessionId.startsWith("draft:")) {
@@ -879,7 +904,13 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
   }
 
   private async persistActive(): Promise<void> {
+    this.publishActiveContext();
     await this.context.workspaceState.update(ACTIVE_SESSION_STORAGE_KEY, this.activeSessionId);
+  }
+
+  /** Enables "Continue in Browser" while a saved conversation is active. */
+  private publishActiveContext(): void {
+    void vscode.commands.executeCommand("setContext", "liberide.hasActiveConversation", Boolean(this.activeSessionId && !this.activeSessionId.startsWith("draft:")));
   }
 
   private async persistOverrides(): Promise<void> {
@@ -912,6 +943,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     await this.ensureMessagesLoaded(id);
     this.broadcastSessions();
     this.broadcastActiveSession();
+    void this.attachRunningTurn(id);
   }
 
   private async removeSession(id: string): Promise<void> {
@@ -1274,11 +1306,15 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
   // Turn lifecycle shared by chat, pipeline generation and approval resume
   // ---------------------------------------------------------------------------
 
-  private beginTurn(conversationId: string, assistantMessage: ConversationMessage, root?: string): { abort: AbortController; streamState: ActiveStream } {
+  private beginTurn(
+    conversationId: string,
+    assistantMessage: ConversationMessage,
+    root?: string,
+    abort = new AbortController(),
+  ): { abort: AbortController; streamState: ActiveStream } {
     // Undo snapshots cover the edits of the turn that is starting, in this
     // conversation only: another chat's turn keeps its own baseline.
     resetPreEditSnapshots(conversationId);
-    const abort = new AbortController();
     const streamState: ActiveStream = {
       abort,
       messageId: assistantMessage.id,
@@ -1311,6 +1347,17 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
   ): { handlers: ChatStreamHandlers; buffer: () => string } {
     let buffer = "";
     const handlers: ChatStreamHandlers = {
+      onSnapshot: (snapshot) => {
+        buffer = snapshot.content ?? "";
+        assistantMessage.content = buffer;
+        this.postPatch(conversationId, assistantMessage.id, { content: buffer });
+        if (snapshot.thinking) {
+          this.thinkingByMessage.set(assistantMessage.id, snapshot.thinking);
+          this.postPatch(conversationId, assistantMessage.id, { thinking: snapshot.thinking });
+        }
+        if (Array.isArray(snapshot.todos)) this.postPatch(conversationId, assistantMessage.id, { todos: snapshot.todos as ChatMessage["todos"] });
+        for (const event of snapshot.toolEvents ?? []) handlers.onToolEvent?.(event);
+      },
       onConversation: (serverConversationId) => {
         streamState.serverConversationId = serverConversationId;
         if (streamState.stopRequested) void requestTurnCancel(serverConversationId);
@@ -1639,6 +1686,54 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     } finally {
       card.busy = false;
       publish();
+    }
+  }
+
+  /**
+   * Follow the conversation's running turn, wherever it started (the web
+   * app, another window, a background approval resume): what streamed so far
+   * arrives as a snapshot, then the live events. No-op when none is running.
+   */
+  private async attachRunningTurn(conversationId: string): Promise<void> {
+    if (conversationId.startsWith("draft:") || this.backendStatus !== "ok") return;
+    if (this.streams.has(conversationId) || this.attaching.has(conversationId)) return;
+    this.attaching.add(conversationId);
+    const abort = new AbortController();
+    let read: Awaited<ReturnType<typeof openTurnStream>>;
+    try {
+      read = await openTurnStream(conversationId, abort.signal);
+    } catch (err) {
+      this.output.appendLine(`[chat.attach-turn] ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    } finally {
+      this.attaching.delete(conversationId);
+    }
+    if (!read) return;
+    if (this.streams.has(conversationId)) {
+      abort.abort();
+      return;
+    }
+    const assistantMessage: ConversationMessage = {
+      id: `local:asst:${randomId()}`,
+      conversationId,
+      role: "assistant",
+      content: "",
+      createdAt: new Date().toISOString(),
+    };
+    this.messagesCache.set(conversationId, [...(this.messagesCache.get(conversationId) ?? []), assistantMessage]);
+    if (this.activeSessionId === conversationId) this.broadcastActiveSession();
+    const { streamState } = this.beginTurn(conversationId, assistantMessage, undefined, abort);
+    streamState.serverConversationId = conversationId;
+    const turn = this.createTurnHandlers(conversationId, assistantMessage, streamState, "");
+    try {
+      const response = await read(turn.handlers);
+      const localId = assistantMessage.id;
+      this.applyTurnResponse(conversationId, assistantMessage, response);
+      this.completeTurn(conversationId, localId, assistantMessage.id);
+    } catch (err) {
+      this.failTurn(conversationId, assistantMessage, err, abort.signal.aborted, turn.buffer());
+    } finally {
+      this.endTurn(conversationId, streamState);
     }
   }
 
