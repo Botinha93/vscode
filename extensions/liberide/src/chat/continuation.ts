@@ -54,6 +54,40 @@ export function continueInBrowserUrl(webOrigin: unknown, conversationId: string 
   return `${base}/c/${encodeURIComponent(conversationId)}`;
 }
 
+/**
+ * A one-time sign-in link from `POST /api/auth/handoff`, accepted only when it
+ * is the web app's `/auth/handoff` page on the same origin as `plainUrl` with
+ * the code in the fragment.
+ */
+export function acceptHandoffUrl(value: unknown, plainUrl: string): string | undefined {
+  if (typeof value !== "string") return undefined;
+  try {
+    const url = new URL(value);
+    if (url.origin !== new URL(plainUrl).origin || url.pathname !== "/auth/handoff" || url.search) return undefined;
+    return new URLSearchParams(url.hash.slice(1)).get("code") ? url.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The URL "Continue in Browser" opens: a one-time sign-in link to the
+ * conversation when the server mints one, else the plain deep link (older
+ * servers, offline, or an unusable answer).
+ */
+export async function resolveContinueInBrowserUrl(
+  plainUrl: string,
+  conversationId: string,
+  mint: (next: string) => Promise<{ url?: unknown }>,
+): Promise<string> {
+  try {
+    const minted = await mint(`/c/${encodeURIComponent(conversationId)}`);
+    return acceptHandoffUrl(minted?.url, plainUrl) ?? plainUrl;
+  } catch {
+    return plainUrl;
+  }
+}
+
 function samePath(a: string, b: string): boolean {
   const norm = (p: string) => resolve(p).replace(/[\\/]+$/, "");
   return process.platform === "win32" || process.platform === "darwin"

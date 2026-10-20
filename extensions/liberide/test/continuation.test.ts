@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { vscodeMock } from "./vscode-mock";
 
 mock.module("vscode", () => ({
@@ -10,12 +10,16 @@ mock.module("../src/ide-delegate/handlers", () => ({ dispatchIdeDelegate: async 
 const { IdeDelegateStream } = await import("../src/ide-delegate/stream");
 const {
   STARTUP_REQUEST_MAX_AGE_MS,
+  acceptHandoffUrl,
   continueInBrowserUrl,
   onConversationOpenRequest,
   parseConversationOpenParams,
   resetContinuationState,
+  resolveContinueInBrowserUrl,
   takeStartupConversationRequest,
 } = await import("../src/chat/continuation");
+// Another suite mocks "../src/api" process-wide; load the real client under its own specifier.
+const { createAuthHandoff } = await import("../src/api.ts?real") as typeof import("../src/api");
 
 function notify(method: string, params: unknown) {
   const stream = new IdeDelegateStream({ userId: "u", projectPath: "/p", sessionId: "s", folderName: "p" });
@@ -70,6 +74,71 @@ describe("continue in browser", () => {
     expect(continueInBrowserUrl("https://chat.example.com", "draft:123")).toBeUndefined();
     expect(continueInBrowserUrl("javascript:alert(1)", "abc")).toBeUndefined();
     expect(continueInBrowserUrl("not a url", "abc")).toBeUndefined();
+  });
+});
+
+describe("continue in browser sign-in handoff", () => {
+  const plain = "http://127.0.0.1:5173/c/abc";
+  const handoff = "http://127.0.0.1:5173/auth/handoff#code=Zm9v_YmFy-123&next=%2Fc%2Fabc";
+
+  test("accepts only a same-origin /auth/handoff link with the code in the fragment", () => {
+    expect(acceptHandoffUrl(handoff, plain)).toBe(handoff);
+    expect(acceptHandoffUrl("https://evil.example/auth/handoff#code=x", plain)).toBeUndefined();
+    expect(acceptHandoffUrl("http://127.0.0.1:5174/auth/handoff#code=x", plain)).toBeUndefined();
+    expect(acceptHandoffUrl("http://127.0.0.1:5173/auth/handoff?code=x", plain)).toBeUndefined();
+    expect(acceptHandoffUrl("http://127.0.0.1:5173/auth/handoff#next=%2F", plain)).toBeUndefined();
+    expect(acceptHandoffUrl("http://127.0.0.1:5173/c/abc#code=x", plain)).toBeUndefined();
+    expect(acceptHandoffUrl("javascript:alert(1)//#code=x", plain)).toBeUndefined();
+    expect(acceptHandoffUrl(undefined, plain)).toBeUndefined();
+  });
+
+  test("opens the minted link for the conversation", async () => {
+    const asked: string[] = [];
+    const url = await resolveContinueInBrowserUrl(plain, "abc", async (next) => {
+      asked.push(next);
+      return { url: handoff };
+    });
+    expect(url).toBe(handoff);
+    expect(asked).toEqual(["/c/abc"]);
+  });
+
+  test("falls back to the plain link when minting fails or answers oddly", async () => {
+    expect(await resolveContinueInBrowserUrl(plain, "abc", async () => { throw new Error("offline"); })).toBe(plain);
+    expect(await resolveContinueInBrowserUrl(plain, "abc", async () => ({}))).toBe(plain);
+    expect(await resolveContinueInBrowserUrl(plain, "abc", async () => ({ url: "https://evil.example/auth/handoff#code=x" }))).toBe(plain);
+  });
+
+  describe("through the API client", () => {
+    const realFetch = globalThis.fetch;
+    const calls: Array<{ url: string; method?: string; body?: unknown; auth?: string }> = [];
+    let respond: () => Response | Promise<Response> = () => new Response("{}");
+
+    beforeAll(() => {
+      process.env.LIBERIDE_API_ORIGIN = "http://127.0.0.1:3999";
+      globalThis.fetch = (async (input: string, init?: RequestInit) => {
+        const headers = (init?.headers ?? {}) as Record<string, string>;
+        calls.push({ url: String(input), method: init?.method, body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined, auth: headers.Authorization });
+        return respond();
+      }) as typeof fetch;
+    });
+    afterAll(() => {
+      globalThis.fetch = realFetch;
+      delete process.env.LIBERIDE_API_ORIGIN;
+    });
+    beforeEach(() => { calls.length = 0; });
+
+    test("posts the conversation path and opens the returned link", async () => {
+      respond = () => Response.json({ url: handoff });
+      expect(await resolveContinueInBrowserUrl(plain, "abc", createAuthHandoff)).toBe(handoff);
+      expect(calls).toEqual([expect.objectContaining({ url: "http://127.0.0.1:3999/api/auth/handoff", method: "POST", body: { next: "/c/abc" } })]);
+    });
+
+    test("an older server (404) or a network error falls back to the plain link", async () => {
+      respond = () => new Response("not found", { status: 404 });
+      expect(await resolveContinueInBrowserUrl(plain, "abc", createAuthHandoff)).toBe(plain);
+      respond = () => { throw new TypeError("fetch failed"); };
+      expect(await resolveContinueInBrowserUrl(plain, "abc", createAuthHandoff)).toBe(plain);
+    });
   });
 });
 

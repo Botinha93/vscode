@@ -398,6 +398,11 @@ async function readNothing(res) {
 async function fetchConfig() {
   return readJson(await apiFetch("/api/config"));
 }
+async function createAuthHandoff(next) {
+  return readJson(
+    await apiFetch("/api/auth/handoff", { method: "POST", body: JSON.stringify({ next }), signal: AbortSignal.timeout(5e3) })
+  );
+}
 async function listConversations() {
   return readJson(await apiFetch("/api/conversations"));
 }
@@ -574,6 +579,24 @@ function continueInBrowserUrl(webOrigin, conversationId) {
     return void 0;
   }
   return `${base}/c/${encodeURIComponent(conversationId)}`;
+}
+function acceptHandoffUrl(value, plainUrl) {
+  if (typeof value !== "string") return void 0;
+  try {
+    const url2 = new URL(value);
+    if (url2.origin !== new URL(plainUrl).origin || url2.pathname !== "/auth/handoff" || url2.search) return void 0;
+    return new URLSearchParams(url2.hash.slice(1)).get("code") ? url2.toString() : void 0;
+  } catch {
+    return void 0;
+  }
+}
+async function resolveContinueInBrowserUrl(plainUrl, conversationId, mint) {
+  try {
+    const minted = await mint(`/c/${encodeURIComponent(conversationId)}`);
+    return acceptHandoffUrl(minted?.url, plainUrl) ?? plainUrl;
+  } catch {
+    return plainUrl;
+  }
 }
 function samePath(a, b) {
   const norm = (p) => (0, import_node_path2.resolve)(p).replace(/[\\/]+$/, "");
@@ -21633,12 +21656,13 @@ function continuation(output) {
     { dispose: offRequests },
     { dispose: offFile },
     vscode36.commands.registerCommand("liberide.continueInBrowser", async () => {
-      const url2 = continueInBrowserUrl(getWebOrigin(), chat.activeConversationId());
-      if (!url2) {
+      const conversationId = chat.activeConversationId();
+      const url2 = continueInBrowserUrl(getWebOrigin(), conversationId);
+      if (!url2 || !conversationId) {
         void vscode36.window.showInformationMessage(getWebOrigin() ? "Open a saved conversation first." : "No web app address is known. Pair with the server (LiberIDE: Pair with Server\u2026) or open LiberIDE from the desktop app.");
         return;
       }
-      await vscode36.env.openExternal(vscode36.Uri.parse(url2));
+      await vscode36.env.openExternal(vscode36.Uri.parse(await resolveContinueInBrowserUrl(url2, conversationId, createAuthHandoff)));
     }),
     vscode36.commands.registerCommand("liberide.openConversation", async () => {
       try {

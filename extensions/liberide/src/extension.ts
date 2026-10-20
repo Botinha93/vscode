@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
-import { getIntegrationSnapshot, getWebOrigin, initApiFromContext, listConversations, onIntegrationFileChanged } from "./api";
-import { continueInBrowserUrl, onConversationOpenRequest, takeStartupConversationRequest } from "./chat/continuation";
+import { createAuthHandoff, getIntegrationSnapshot, getWebOrigin, initApiFromContext, listConversations, onIntegrationFileChanged } from "./api";
+import { continueInBrowserUrl, onConversationOpenRequest, resolveContinueInBrowserUrl, takeStartupConversationRequest } from "./chat/continuation";
 import { LiberidePipelineController } from "./panel/panel";
 import { LiberideChatPanelController } from "./chat/chat-panel";
 import { scaffoldFeature, regenerateTasksIndex, updateTaskStatus, writeTextFile } from "./spec/writer";
@@ -98,14 +98,16 @@ function continuation(output: vscode.OutputChannel): vscode.Disposable[] {
     { dispose: offRequests },
     { dispose: offFile },
     vscode.commands.registerCommand("liberide.continueInBrowser", async () => {
-      const url = continueInBrowserUrl(getWebOrigin(), chat.activeConversationId());
-      if (!url) {
+      const conversationId = chat.activeConversationId();
+      const url = continueInBrowserUrl(getWebOrigin(), conversationId);
+      if (!url || !conversationId) {
         void vscode.window.showInformationMessage(getWebOrigin()
           ? "Open a saved conversation first."
           : "No web app address is known. Pair with the server (LiberIDE: Pair with Server…) or open LiberIDE from the desktop app.");
         return;
       }
-      await vscode.env.openExternal(vscode.Uri.parse(url));
+      // A one-time sign-in link, so a browser without a session lands in the conversation.
+      await vscode.env.openExternal(vscode.Uri.parse(await resolveContinueInBrowserUrl(url, conversationId, createAuthHandoff)));
     }),
     vscode.commands.registerCommand("liberide.openConversation", async () => {
       try {

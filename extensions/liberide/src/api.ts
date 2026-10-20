@@ -399,6 +399,13 @@ export async function fetchConfig(): Promise<AppConfig> {
   return readJson<AppConfig>(await apiFetch("/api/config"));
 }
 
+/** A one-time browser sign-in link landing on `next` (`POST /api/auth/handoff`). */
+export async function createAuthHandoff(next: string): Promise<{ url?: unknown }> {
+  return readJson<{ url?: unknown }>(
+    await apiFetch("/api/auth/handoff", { method: "POST", body: JSON.stringify({ next }), signal: AbortSignal.timeout(5_000) }),
+  );
+}
+
 export async function listConversations(): Promise<Conversation[]> {
   return readJson<Conversation[]>(await apiFetch("/api/conversations"));
 }
