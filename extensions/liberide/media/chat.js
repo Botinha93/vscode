@@ -14713,9 +14713,11 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
       sizeBytes: external_exports.number().optional()
     }))
   });
+  var verificationHandoffStatusSchema = external_exports.enum(["passed", "failed", "inconclusive", "not_applicable"]);
   var verificationReportHandoffSchema = baseHandoffSchema.extend({
     kind: external_exports.literal("VerificationReport"),
     passed: external_exports.boolean(),
+    status: verificationHandoffStatusSchema.optional(),
     stages: external_exports.array(external_exports.object({
       stageId: external_exports.string(),
       passed: external_exports.boolean(),
@@ -14733,6 +14735,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
   var testReportHandoffSchema = baseHandoffSchema.extend({
     kind: external_exports.literal("TestReport"),
     passed: external_exports.boolean(),
+    status: verificationHandoffStatusSchema.optional(),
     failures: external_exports.array(external_exports.object({
       test: external_exports.string(),
       message: external_exports.string().optional()
