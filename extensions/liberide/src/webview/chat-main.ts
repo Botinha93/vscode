@@ -183,6 +183,7 @@ function shellHtml(): string {
         <section class="chat-transcript" id="transcript"></section>
         <footer class="chat-composer">
           <div class="composer-card">
+            <div class="composer-hints" id="composer-hints" role="listbox" aria-label="Commands" hidden></div>
             <div class="composer-attachments" id="composer-attachments" hidden></div>
             <textarea id="composer" placeholder="Ask for follow-up changes\u2026" rows="1"></textarea>
             <div class="composer-toolbar" id="chip-row"></div>
@@ -193,7 +194,6 @@ function shellHtml(): string {
               <span class="chip-dot"></span>
               <span id="chip-rag-label">Work locally</span>
             </button>
-            <div class="composer-hints" id="composer-hints"></div>
           </div>
         </footer>
       </div>
@@ -239,6 +239,7 @@ function bindShell(): void {
     renderComposerHints();
   });
   composer.addEventListener("keydown", (event) => {
+    if (handleHintKey(event)) return;
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
       submit();
@@ -1118,6 +1119,11 @@ function renderComposerAttachments(): void {
   }
 }
 
+/** Slash-command popover state: the highlighted row, and a draft the user dismissed it for. */
+let hintIndex = 0;
+let visibleHints: string[] = [];
+let hintsDismissedFor: string | null = null;
+
 function renderComposerHints(): void {
   const hints = root.querySelector<HTMLDivElement>("#composer-hints");
   if (!hints) return;
@@ -1127,38 +1133,75 @@ function renderComposerHints(): void {
     return;
   }
 
-  const commands = buildChatSlashCommands({
+  const commands = hintsDismissedFor === state.draft ? [] : buildChatSlashCommands({
     surface: "ide",
     agents: state.catalog.agents,
     slashQuery: parseSlashQuery(state.draft),
   });
+  visibleHints = commands.slice(0, 50).map((command) => command.insert);
   if (!commands.length) {
     hints.innerHTML = "";
+    hints.hidden = true;
+    hintIndex = 0;
     return;
   }
-
+  hintIndex = Math.min(hintIndex, visibleHints.length - 1);
+  hints.hidden = false;
   hints.innerHTML = commands
-    .slice(0, 8)
+    .slice(0, 50)
     .map(
-      (command) => `
-        <button class="hint" data-insert="${escapeAttr(command.insert)}" title="${escapeAttr(command.description)}">
+      (command, index) => `
+        <button class="hint${index === hintIndex ? " active" : ""}" role="option" aria-selected="${index === hintIndex}" data-index="${index}" data-insert="${escapeAttr(command.insert)}" title="${escapeAttr(command.description)}">
           <span class="hint-label">${escapeHtml(command.label)}</span>
           <span class="hint-description">${escapeHtml(command.description)}</span>
         </button>
       `,
     )
     .join("");
+  hints.querySelector(".hint.active")?.scrollIntoView({ block: "nearest" });
 
   for (const button of hints.querySelectorAll<HTMLButtonElement>(".hint")) {
-    button.addEventListener("click", () => {
-      const composer = root.querySelector<HTMLTextAreaElement>("#composer")!;
-      composer.value = button.dataset.insert ?? "";
-      composer.focus();
-      state.draft = composer.value;
-      autosize(composer);
-      renderComposerHints();
-    });
+    // mousedown keeps focus in the composer.
+    button.addEventListener("mousedown", (event) => event.preventDefault());
+    button.addEventListener("click", () => applyHint(button.dataset.insert ?? ""));
   }
+}
+
+function applyHint(insert: string): void {
+  const composer = root.querySelector<HTMLTextAreaElement>("#composer")!;
+  composer.value = insert;
+  composer.focus();
+  state.draft = composer.value;
+  hintIndex = 0;
+  autosize(composer);
+  renderComposerHints();
+}
+
+/** Keyboard control of the open command popover; true when the key was handled. */
+function handleHintKey(event: KeyboardEvent): boolean {
+  if (visibleHints.length === 0) return false;
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    const step = event.key === "ArrowDown" ? 1 : -1;
+    hintIndex = (hintIndex + step + visibleHints.length) % visibleHints.length;
+    renderComposerHints();
+    return true;
+  }
+  if ((event.key === "Tab" || (event.key === "Enter" && !event.shiftKey)) && !event.isComposing) {
+    const insert = visibleHints[hintIndex];
+    // Enter on a command that is already fully typed sends it.
+    if (event.key === "Enter" && insert?.trim() === state.draft.trim()) return false;
+    event.preventDefault();
+    if (insert !== undefined) applyHint(insert);
+    return true;
+  }
+  if (event.key === "Escape") {
+    event.preventDefault();
+    hintsDismissedFor = state.draft;
+    renderComposerHints();
+    return true;
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------

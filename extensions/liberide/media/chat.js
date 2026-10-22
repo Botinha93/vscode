@@ -15624,6 +15624,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
         <section class="chat-transcript" id="transcript"></section>
         <footer class="chat-composer">
           <div class="composer-card">
+            <div class="composer-hints" id="composer-hints" role="listbox" aria-label="Commands" hidden></div>
             <div class="composer-attachments" id="composer-attachments" hidden></div>
             <textarea id="composer" placeholder="Ask for follow-up changes\u2026" rows="1"></textarea>
             <div class="composer-toolbar" id="chip-row"></div>
@@ -15634,7 +15635,6 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
               <span class="chip-dot"></span>
               <span id="chip-rag-label">Work locally</span>
             </button>
-            <div class="composer-hints" id="composer-hints"></div>
           </div>
         </footer>
       </div>
@@ -15687,6 +15687,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
       renderComposerHints();
     });
     composer.addEventListener("keydown", (event) => {
+      if (handleHintKey(event)) return;
       if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
         event.preventDefault();
         submit();
@@ -16457,6 +16458,9 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
       });
     }
   }
+  var hintIndex = 0;
+  var visibleHints = [];
+  var hintsDismissedFor = null;
   function renderComposerHints() {
     const hints = root.querySelector("#composer-hints");
     if (!hints) return;
@@ -16465,33 +16469,66 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
       hints.innerHTML = "";
       return;
     }
-    const commands = buildChatSlashCommands({
+    const commands = hintsDismissedFor === state.draft ? [] : buildChatSlashCommands({
       surface: "ide",
       agents: state.catalog.agents,
       slashQuery: parseSlashQuery(state.draft)
     });
+    visibleHints = commands.slice(0, 50).map((command) => command.insert);
     if (!commands.length) {
       hints.innerHTML = "";
+      hints.hidden = true;
+      hintIndex = 0;
       return;
     }
-    hints.innerHTML = commands.slice(0, 8).map(
-      (command) => `
-        <button class="hint" data-insert="${escapeAttr(command.insert)}" title="${escapeAttr(command.description)}">
+    hintIndex = Math.min(hintIndex, visibleHints.length - 1);
+    hints.hidden = false;
+    hints.innerHTML = commands.slice(0, 50).map(
+      (command, index) => `
+        <button class="hint${index === hintIndex ? " active" : ""}" role="option" aria-selected="${index === hintIndex}" data-index="${index}" data-insert="${escapeAttr(command.insert)}" title="${escapeAttr(command.description)}">
           <span class="hint-label">${escapeHtml2(command.label)}</span>
           <span class="hint-description">${escapeHtml2(command.description)}</span>
         </button>
       `
     ).join("");
+    hints.querySelector(".hint.active")?.scrollIntoView({ block: "nearest" });
     for (const button of hints.querySelectorAll(".hint")) {
-      button.addEventListener("click", () => {
-        const composer = root.querySelector("#composer");
-        composer.value = button.dataset.insert ?? "";
-        composer.focus();
-        state.draft = composer.value;
-        autosize(composer);
-        renderComposerHints();
-      });
+      button.addEventListener("mousedown", (event) => event.preventDefault());
+      button.addEventListener("click", () => applyHint(button.dataset.insert ?? ""));
     }
+  }
+  function applyHint(insert) {
+    const composer = root.querySelector("#composer");
+    composer.value = insert;
+    composer.focus();
+    state.draft = composer.value;
+    hintIndex = 0;
+    autosize(composer);
+    renderComposerHints();
+  }
+  function handleHintKey(event) {
+    if (visibleHints.length === 0) return false;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const step = event.key === "ArrowDown" ? 1 : -1;
+      hintIndex = (hintIndex + step + visibleHints.length) % visibleHints.length;
+      renderComposerHints();
+      return true;
+    }
+    if ((event.key === "Tab" || event.key === "Enter" && !event.shiftKey) && !event.isComposing) {
+      const insert = visibleHints[hintIndex];
+      if (event.key === "Enter" && insert?.trim() === state.draft.trim()) return false;
+      event.preventDefault();
+      if (insert !== void 0) applyHint(insert);
+      return true;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      hintsDismissedFor = state.draft;
+      renderComposerHints();
+      return true;
+    }
+    return false;
   }
   function renderModelPicker() {
     const el = root.querySelector("#model-picker");
