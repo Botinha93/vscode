@@ -104,6 +104,8 @@ export interface ConversationMessage {
   conversationId: string;
   role: Role;
   content: string;
+  /** What to show for a user message whose `content` is app-built text. */
+  displayContent?: string;
   provider?: Provider;
   model?: string;
   /** Set when an execution graph produces (or will produce) this message's content. */
@@ -158,6 +160,10 @@ export interface ChatRequest {
   chatMode?: ConversationChatMode;
   content: string;
   systemPrompt?: string;
+  /** `turn`: the system prompt applies to this turn only (not saved on the conversation). */
+  systemPromptScope?: "turn";
+  /** What the user sees for this message when `content` differs (e.g. the typed `/tasks …`). */
+  displayContent?: string;
   skillIds: string[];
   documentIds: string[];
   useRag: boolean;

@@ -41,6 +41,75 @@
     return [...model.capabilities ?? []];
   }
 
+  // ../../../packages/shared/src/task-contract.ts
+  function unquoteScalar(value) {
+    const trimmed = value.trim();
+    if (trimmed.length >= 2) {
+      const first = trimmed[0];
+      const last = trimmed[trimmed.length - 1];
+      if (first === '"' && last === '"' || first === "'" && last === "'") return trimmed.slice(1, -1);
+    }
+    return trimmed;
+  }
+  function parseInlineArray(value) {
+    const trimmed = value.trim();
+    if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) return [];
+    const inner = trimmed.slice(1, -1).trim();
+    if (!inner) return [];
+    return inner.split(",").map(unquoteScalar).filter((item) => item.length > 0);
+  }
+  function parseFields(source) {
+    const fenced = source.match(/^---\r?\n([\s\S]*?)\r?\n---\s*$/);
+    const lines = (fenced ? fenced[1] : source).split(/\r?\n/);
+    const data = {};
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (!line.trim() || /^\s/.test(line)) continue;
+      const colon = line.indexOf(":");
+      if (colon < 0) continue;
+      const key = line.slice(0, colon).trim();
+      const rawValue = line.slice(colon + 1).trim();
+      if (rawValue === "|") {
+        const block = [];
+        while (lines[i + 1]?.startsWith("  ")) block.push(lines[++i].slice(2));
+        data[key] = block.join("\n");
+      } else if (rawValue.startsWith("[")) {
+        data[key] = parseInlineArray(rawValue);
+      } else if (rawValue === "") {
+        const items = [];
+        while (i + 1 < lines.length) {
+          const dash = lines[i + 1].match(/^\s+-\s+(.*)$/);
+          if (!dash) break;
+          items.push(unquoteScalar(dash[1]));
+          i += 1;
+        }
+        data[key] = items.length > 0 ? items : "";
+      } else {
+        data[key] = unquoteScalar(rawValue);
+      }
+    }
+    return data;
+  }
+  var list = (value) => Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
+  function parseTaskContractBlock(source) {
+    const data = parseFields(source.trim());
+    const id = String(data.id ?? "").trim();
+    const title = String(data.title ?? "").trim();
+    if (!id || !title) return void 0;
+    return {
+      id,
+      title,
+      status: String(data.status ?? "pending").trim() || "pending",
+      agent: String(data.agent ?? "coding").trim() || "coding",
+      requirementRefs: list(data.requirement_refs),
+      designRefs: list(data.design_refs),
+      dependsOn: list(data.depends_on),
+      expectedFiles: list(data.expected_files),
+      architectureHints: String(data.architecture_hints ?? "").trim(),
+      acceptance: list(data.acceptance)
+    };
+  }
+
   // ../../../packages/shared/src/chat-commands.ts
   var CHAT_SLASH_COMMAND_DEFINITIONS = [
     {
@@ -15688,11 +15757,11 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
   `;
   }
   function renderSidebar() {
-    const list = root.querySelector("#session-list");
-    if (!list) return;
-    list.innerHTML = "";
+    const list2 = root.querySelector("#session-list");
+    if (!list2) return;
+    list2.innerHTML = "";
     if (state.sessions.length === 0) {
-      list.innerHTML = `<div class="sidebar-empty">No chats yet for this project.</div>`;
+      list2.innerHTML = `<div class="sidebar-empty">No chats yet for this project.</div>`;
       return;
     }
     for (const s of state.sessions) {
@@ -15718,7 +15787,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
         event.stopPropagation();
         send({ type: "deleteSession", sessionId: s.id });
       });
-      list.appendChild(row);
+      list2.appendChild(row);
     }
   }
   function renderBackendBanner() {
@@ -16311,11 +16380,11 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     return parts.length ? parts.join(" ") : "+0";
   }
   function upsertTool(tools, entry) {
-    const list = tools ? [...tools] : [];
-    const idx = list.findIndex((t) => t.id === entry.id);
-    if (idx >= 0) list[idx] = { ...list[idx], ...entry };
-    else list.push(entry);
-    return list;
+    const list2 = tools ? [...tools] : [];
+    const idx = list2.findIndex((t) => t.id === entry.id);
+    if (idx >= 0) list2[idx] = { ...list2[idx], ...entry };
+    else list2.push(entry);
+    return list2;
   }
   function renderComposer() {
     const toolbar = root.querySelector("#chip-row");
@@ -16596,9 +16665,9 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
   function groupModels(models) {
     const map2 = /* @__PURE__ */ new Map();
     for (const m of models) {
-      const list = map2.get(m.provider) ?? [];
-      list.push(m);
-      map2.set(m.provider, list);
+      const list2 = map2.get(m.provider) ?? [];
+      list2.push(m);
+      map2.set(m.provider, list2);
     }
     return Array.from(map2.entries()).map(([provider, group]) => ({
       provider,
@@ -16757,12 +16826,34 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
       <pre class="md-pre" data-source-block="${idx}" hidden><code class="language-mermaid">${escapeHtml2(code)}</code></pre>
     </div>`;
     }
+    if (lang === "task") {
+      const task = parseTaskContractBlock(code);
+      if (task) return renderTaskCard(task, code);
+    }
     const cls = lang ? ` language-${escapeAttr(lang)}` : "";
     const langLabel = lang || "text";
     const highlighted = highlightCode(code, lang);
     return `<div class="md-codeblock">
     <div class="md-codeblock-head"><span class="md-codeblock-lang">${escapeHtml2(langLabel)}</span><button class="md-codeblock-copy" data-copy>${"Copy"}</button></div>
     <pre class="md-pre"><code class="${cls.trim()}">${highlighted}</code></pre>
+  </div>`;
+  }
+  function renderTaskCard(task, source) {
+    const chips = (label, items) => items.length ? `<div class="md-task-row"><span class="md-task-label">${escapeHtml2(label)}</span>${items.map((item) => `<span class="md-task-chip">${escapeHtml2(item)}</span>`).join("")}</div>` : "";
+    const section = (label, body) => `<div class="md-task-section"><div class="md-task-heading">${escapeHtml2(label)}</div>${body}</div>`;
+    return `<div class="md-codeblock md-task">
+    <div class="md-codeblock-head">
+      <span class="md-task-meta"><span class="md-codeblock-lang">${escapeHtml2(task.id)}</span><span class="md-task-pill">${escapeHtml2(task.status)}</span><span class="md-task-pill">${escapeHtml2(task.agent)}</span></span>
+      <span><button class="md-codeblock-copy" data-task-toggle>Source</button><button class="md-codeblock-copy" data-copy>Copy</button></span>
+    </div>
+    <pre class="md-pre md-pre-wrap" data-task-source hidden><code class="language-yaml">${escapeHtml2(source)}</code></pre>
+    <div class="md-task-body" data-task-body>
+      <div class="md-task-title">${escapeHtml2(task.title)}</div>
+      ${chips("Requirements", task.requirementRefs)}${chips("Design", task.designRefs)}${chips("Depends on", task.dependsOn)}
+      ${task.expectedFiles.length ? section("Expected files", `<ul class="md-task-files">${task.expectedFiles.map((file2) => `<li><code>${escapeHtml2(file2)}</code></li>`).join("")}</ul>`) : ""}
+      ${task.architectureHints ? section("Architecture hints", `<div class="md-task-hints">${escapeHtml2(task.architectureHints)}</div>`) : ""}
+      ${task.acceptance.length ? section("Acceptance", `<ul class="md-task-acceptance">${task.acceptance.map((item) => `<li>${escapeHtml2(item)}</li>`).join("")}</ul>`) : ""}
+    </div>
   </div>`;
   }
   function isSafeLinkHref(href) {
@@ -16893,11 +16984,26 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     return mermaidLoader;
   }
   function bindMarkdownExtras(scope) {
+    for (const btn of scope.querySelectorAll("[data-task-toggle]")) {
+      if (btn.dataset.bound === "1") continue;
+      btn.dataset.bound = "1";
+      btn.addEventListener("click", () => {
+        const card = btn.closest(".md-task");
+        const source = card?.querySelector("[data-task-source]");
+        const body = card?.querySelector("[data-task-body]");
+        if (!source || !body) return;
+        const showSource = source.hidden;
+        source.hidden = !showSource;
+        body.hidden = showSource;
+        btn.textContent = showSource ? "Card" : "Source";
+      });
+    }
     for (const btn of scope.querySelectorAll("[data-copy]")) {
       if (btn.dataset.bound === "1") continue;
       btn.dataset.bound = "1";
       btn.addEventListener("click", async () => {
-        const code = btn.parentElement?.nextElementSibling?.textContent ?? "";
+        const head = btn.closest(".md-codeblock-head") ?? btn.parentElement;
+        const code = head?.nextElementSibling?.textContent ?? "";
         try {
           await navigator.clipboard.writeText(code);
           const prev = btn.textContent;

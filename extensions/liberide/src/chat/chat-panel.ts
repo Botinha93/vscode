@@ -801,7 +801,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
         const base: ChatMessage = {
           id: m.id,
           role: m.role as "user" | "assistant",
-          content: m.content,
+          content: m.role === "user" ? m.displayContent ?? m.content : m.content,
           createdAt: new Date(m.createdAt).getTime() || Date.now(),
           status: streaming?.messageId === m.id ? "streaming" : turnStatus === "failed" ? "error" : "complete",
         };
@@ -1233,6 +1233,10 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       chatMode,
       content: rest || content,
       systemPrompt,
+      // Spec/pipeline prompts steer this turn only; the chat keeps its own prompt.
+      ...(command || pipelineMode ? { systemPromptScope: "turn" as const } : {}),
+      // The model gets the command's argument; the chat shows the typed command.
+      ...(command && (rest || content) !== content ? { displayContent: content } : {}),
       skillIds: pipelineMode ? [] : (overrides.skillIds ?? []),
       documentIds: pipelineMode ? [] : (overrides.documentIds ?? []),
       useRag: pipelineMode ? false : useRag,
@@ -2075,6 +2079,8 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     const conversationId = session.conversationId;
     const messages = this.messagesCache.get(conversationId) ?? [];
     const userPrompt = `Generate the requirements, design, and task contracts for the feature "${featureName}". Emit the marker [[FEATURE_NAME: ${slug}]] on the first line.`;
+    // The prompt above is app-built; the chat shows (and stores) this label instead.
+    const userLabel = `Generate pipeline: ${slug}`;
 
     for (let i = messages.length - 1; i >= 0; i--) {
       const candidate = messages[i];
@@ -2089,6 +2095,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       conversationId,
       role: "user",
       content: userPrompt,
+      displayContent: userLabel,
       createdAt: new Date().toISOString(),
     };
     messages.push(userMessage);
@@ -2111,7 +2118,9 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       modelSelection: readSettings().modelSelection,
       chatMode: "agent",
       content: userPrompt,
+      displayContent: userLabel,
       systemPrompt: PIPELINE_GENERATE_SYSTEM_PROMPT,
+      systemPromptScope: "turn",
       skillIds: [],
       documentIds: [],
       useRag: false,

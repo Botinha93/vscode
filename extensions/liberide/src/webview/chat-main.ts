@@ -17,7 +17,7 @@ import type {
 } from "../chat/chat-protocol";
 import type { ConfiguredProvider, DocumentRecord } from "../chat/types";
 import { modelCapabilityBadges, providerLabel } from "../chat/models";
-import { buildChatSlashCommands, parseSlashQuery } from "@nexus/shared";
+import { buildChatSlashCommands, parseSlashQuery, parseTaskContractBlock, type TaskContractView } from "@nexus/shared";
 import { highlightCode } from "./highlight";
 
 interface VsCodeApi {
@@ -1549,6 +1549,10 @@ function renderFenced(lang: string, code: string): string {
       <pre class="md-pre" data-source-block="${idx}" hidden><code class="language-mermaid">${escapeHtml(code)}</code></pre>
     </div>`;
   }
+  if (lang === "task") {
+    const task = parseTaskContractBlock(code);
+    if (task) return renderTaskCard(task, code);
+  }
   const cls = lang ? ` language-${escapeAttr(lang)}` : "";
   const langLabel = lang || "text";
   // `highlightCode` outputs sanitised HTML composed of `<span class="tok-…">`
@@ -1559,6 +1563,31 @@ function renderFenced(lang: string, code: string): string {
   return `<div class="md-codeblock">
     <div class="md-codeblock-head"><span class="md-codeblock-lang">${escapeHtml(langLabel)}</span><button class="md-codeblock-copy" data-copy>${"Copy"}</button></div>
     <pre class="md-pre"><code class="${cls.trim()}">${highlighted}</code></pre>
+  </div>`;
+}
+
+/**
+ * A ```task block (task contract) as a readable card, like VoxChat's. The raw
+ * block stays right after the header so Copy copies it, and Source shows it.
+ */
+function renderTaskCard(task: TaskContractView, source: string): string {
+  const chips = (label: string, items: string[]) => items.length
+    ? `<div class="md-task-row"><span class="md-task-label">${escapeHtml(label)}</span>${items.map((item) => `<span class="md-task-chip">${escapeHtml(item)}</span>`).join("")}</div>`
+    : "";
+  const section = (label: string, body: string) => `<div class="md-task-section"><div class="md-task-heading">${escapeHtml(label)}</div>${body}</div>`;
+  return `<div class="md-codeblock md-task">
+    <div class="md-codeblock-head">
+      <span class="md-task-meta"><span class="md-codeblock-lang">${escapeHtml(task.id)}</span><span class="md-task-pill">${escapeHtml(task.status)}</span><span class="md-task-pill">${escapeHtml(task.agent)}</span></span>
+      <span><button class="md-codeblock-copy" data-task-toggle>Source</button><button class="md-codeblock-copy" data-copy>Copy</button></span>
+    </div>
+    <pre class="md-pre md-pre-wrap" data-task-source hidden><code class="language-yaml">${escapeHtml(source)}</code></pre>
+    <div class="md-task-body" data-task-body>
+      <div class="md-task-title">${escapeHtml(task.title)}</div>
+      ${chips("Requirements", task.requirementRefs)}${chips("Design", task.designRefs)}${chips("Depends on", task.dependsOn)}
+      ${task.expectedFiles.length ? section("Expected files", `<ul class="md-task-files">${task.expectedFiles.map((file) => `<li><code>${escapeHtml(file)}</code></li>`).join("")}</ul>`) : ""}
+      ${task.architectureHints ? section("Architecture hints", `<div class="md-task-hints">${escapeHtml(task.architectureHints)}</div>`) : ""}
+      ${task.acceptance.length ? section("Acceptance", `<ul class="md-task-acceptance">${task.acceptance.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`) : ""}
+    </div>
   </div>`;
 }
 
@@ -1698,11 +1727,26 @@ function loadMermaid(): Promise<{ render: (source: string) => Promise<string> } 
 }
 
 function bindMarkdownExtras(scope: HTMLElement): void {
+  for (const btn of scope.querySelectorAll<HTMLButtonElement>("[data-task-toggle]")) {
+    if (btn.dataset.bound === "1") continue;
+    btn.dataset.bound = "1";
+    btn.addEventListener("click", () => {
+      const card = btn.closest(".md-task");
+      const source = card?.querySelector<HTMLElement>("[data-task-source]");
+      const body = card?.querySelector<HTMLElement>("[data-task-body]");
+      if (!source || !body) return;
+      const showSource = source.hidden;
+      source.hidden = !showSource;
+      body.hidden = showSource;
+      btn.textContent = showSource ? "Card" : "Source";
+    });
+  }
   for (const btn of scope.querySelectorAll<HTMLButtonElement>("[data-copy]")) {
     if (btn.dataset.bound === "1") continue;
     btn.dataset.bound = "1";
     btn.addEventListener("click", async () => {
-      const code = btn.parentElement?.nextElementSibling?.textContent ?? "";
+      const head = btn.closest(".md-codeblock-head") ?? btn.parentElement;
+      const code = head?.nextElementSibling?.textContent ?? "";
       try {
         await navigator.clipboard.writeText(code);
         const prev = btn.textContent;

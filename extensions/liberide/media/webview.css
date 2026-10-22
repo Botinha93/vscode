@@ -1760,3 +1760,19 @@ section.liberide-tab.active { display: flex; flex-direction: column; }
 .plan-mark { width: 1em; text-align: center; flex-shrink: 0; }
 .plan-completed, .plan-cancelled { color: var(--chatllm-muted); text-decoration: line-through; }
 .plan-in_progress { font-weight: 600; }
+
+/* ```task blocks (task contracts) as cards; mirrors VoxChat's TaskContractCard. */
+.md-pre-wrap { white-space: pre-wrap; word-break: break-word; overflow-x: hidden; }
+.md-task .md-codeblock-head { gap: 8px; }
+.md-task-meta { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.md-task-pill { border: 1px solid var(--chatllm-border); border-radius: 999px; padding: 0 6px; font-size: 0.75em; color: var(--chatllm-muted); }
+.md-task-body { padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; font-size: 0.92em; }
+.md-task-body[hidden] { display: none; }
+.md-task-title { font-weight: 600; }
+.md-task-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.md-task-label, .md-task-heading { color: var(--chatllm-muted); font-size: 0.85em; }
+.md-task-heading { text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; margin-bottom: 2px; }
+.md-task-chip { border: 1px solid var(--chatllm-border); background: var(--chatllm-bg-soft); border-radius: 6px; padding: 0 5px; font-family: var(--vscode-editor-font-family, monospace); font-size: 0.85em; }
+.md-task-files, .md-task-acceptance { margin: 0; padding-left: 18px; }
+.md-task-files code { word-break: break-all; }
+.md-task-hints { white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
