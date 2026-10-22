@@ -1,6 +1,7 @@
 import type { LiberideSettings } from "../settings";
 import type { WorkspaceIntelligence } from "../workspace/intelligence";
 import type { ContextBlockChip } from "./context-blocks";
+import type { ApprovalMode } from "./approval-mode";
 import type {
   AgentDefinition,
   ConfiguredModel,
@@ -50,7 +51,7 @@ export interface ApprovalCardView {
   details?: string;
   risk?: string;
   kind?: string;
-  status: "pending" | "approved" | "rejected";
+  status: "pending" | "approved" | "rejected" | "auto_approved";
   /** True while the PATCH / resume stream is in flight. */
   busy?: boolean;
   error?: string;
@@ -118,6 +119,20 @@ export interface ChatOverrides {
   skillIds?: string[];
   mcpServerIds?: string[];
   documentIds?: string[];
+  /**
+   * Per-chat approval mode. For a saved chat it mirrors the server's
+   * conversation (changing it PATCHes the conversation); a draft keeps it
+   * until its conversation is created.
+   */
+  approvalMode?: ApprovalMode;
+}
+
+/** Offered after switching to a looser approval mode: pending approvals it would auto-approve. */
+export interface ApprovalModeOfferView {
+  sessionId: string;
+  mode: ApprovalMode;
+  approvals: Array<{ id: string; action: string; reason?: string; risk?: string }>;
+  busy?: boolean;
 }
 
 export type ChatSessionKind = "vibe" | "pipeline";
@@ -168,6 +183,8 @@ export interface BackendCatalog {
   chatModes?: ConversationChatMode[];
   permissionPolicies?: Array<{ id: string; scope: string; autopilot?: boolean }>;
   sessionOrigins?: Array<"web" | "cli" | "cloud" | "extension" | "webhook">;
+  /** Most permissive approval mode the admin allows; options above it are disabled. */
+  maxApprovalMode?: ApprovalMode;
 }
 
 export type BackendStatus = "ok" | "unauthorized" | "unreachable" | "unconfigured";
@@ -201,6 +218,8 @@ export type ChatHostToWebview =
   | { type: "project"; project: ProjectInfo }
   | { type: "openSidebar" }
   | { type: "contextBlocks"; blocks: ContextBlockChip[] }
+  /** Pending approvals the new approval mode would auto-approve (null clears the offer). */
+  | { type: "approvalModeOffer"; offer: ApprovalModeOfferView | null }
   | { type: "log"; message: string; severity?: "info" | "warning" | "error" };
 
 export type ChatWebviewToHost =
@@ -228,4 +247,6 @@ export type ChatWebviewToHost =
   | { type: "resolveApproval"; sessionId: string; messageId: string; approvalId: string; decision: "approved" | "rejected"; response?: string }
   | { type: "cancelGraph"; sessionId: string; messageId: string; graphId: string }
   | { type: "retryWithModel"; sessionId: string; messageId: string; provider: Provider; model: string; content: string }
-  | { type: "removeContextBlock"; id: string };
+  | { type: "removeContextBlock"; id: string }
+  | { type: "autoResolveApprovals"; sessionId: string; ids: string[] }
+  | { type: "dismissApprovalModeOffer"; sessionId: string };

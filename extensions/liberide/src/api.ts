@@ -5,7 +5,7 @@ import type {
   DocumentRecord,
   SharingFolder,
 } from "./chat/types";
-import type { ApprovalGrant, ExecutionGraph, McpServer, PermissionPolicy } from "@nexus/shared";
+import type { AgentApprovalRequest, ApprovalGrant, ApprovalMode, ExecutionGraph, McpServer, PermissionPolicy } from "@nexus/shared";
 import { existsSync, mkdirSync, readFileSync, statSync, unwatchFile, watchFile, writeFileSync, chmodSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { backoffDelay, readSseStream } from "./sse";
@@ -483,6 +483,7 @@ export async function patchConversation(
       | "model"
       | "modelSelection"
       | "chatMode"
+      | "approvalMode"
       | "agentId"
       | "allowedAgentIds"
       | "folder"
@@ -496,6 +497,26 @@ export async function patchConversation(
     await apiFetch(`/api/conversations/${encodeURIComponent(id)}`, {
       method: "PATCH",
       body: JSON.stringify(partial),
+    }),
+  );
+}
+
+/** Pending approvals of the conversation its current approval mode would auto-approve. */
+export async function listAutoResolvableApprovals(conversationId: string): Promise<{ mode: ApprovalMode; approvals: AgentApprovalRequest[] }> {
+  return readJson<{ mode: ApprovalMode; approvals: AgentApprovalRequest[] }>(
+    await apiFetch(`/api/conversations/${encodeURIComponent(conversationId)}/approvals/auto-resolvable`),
+  );
+}
+
+/** Resolve those approvals (`ids` narrows them); staged edits are applied, paused runs resume. */
+export async function autoResolveApprovals(
+  conversationId: string,
+  ids?: string[],
+): Promise<{ mode: ApprovalMode; resolved: string[]; skipped: Array<{ id: string; reason: string }> }> {
+  return readJson<{ mode: ApprovalMode; resolved: string[]; skipped: Array<{ id: string; reason: string }> }>(
+    await apiFetch(`/api/conversations/${encodeURIComponent(conversationId)}/approvals/auto-resolve`, {
+      method: "POST",
+      body: JSON.stringify(ids ? { ids } : {}),
     }),
   );
 }

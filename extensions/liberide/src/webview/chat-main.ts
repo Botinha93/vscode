@@ -1,6 +1,7 @@
 import type { LiberideSettings } from "../settings";
 import type {
   ApprovalCardView,
+  ApprovalModeOfferView,
   FallbackProposalView,
   GraphProgressView,
   BackendCatalog,
@@ -21,6 +22,7 @@ import type { ContextBlockChip } from "../chat/context-blocks";
 import type { WorkspaceIntelligence } from "../workspace/intelligence";
 import { buildChatSlashCommands, parseSlashQuery, parseTaskContractBlock, type TaskContractView } from "@nexus/shared";
 import { highlightCode } from "./highlight";
+import { APPROVAL_MODE_OPTIONS, approvalModeAllowed, approvalModeLabel, DEFAULT_APPROVAL_MODE, type ApprovalMode } from "../chat/approval-mode";
 
 interface VsCodeApi {
   postMessage(message: ChatWebviewToHost): void;
@@ -45,6 +47,9 @@ interface AppState {
   settingsOpen: boolean;
   modelPickerOpen: boolean;
   agentPickerOpen: boolean;
+  approvalPickerOpen: boolean;
+  /** Pending approvals the newly chosen approval mode would auto-approve. */
+  approvalModeOffer: ApprovalModeOfferView | null;
   draft: string;
   streaming: boolean;
   /** messageId -> whether the "Worked for" timeline is expanded */
@@ -70,6 +75,8 @@ const state: AppState = {
   settingsOpen: false,
   modelPickerOpen: false,
   agentPickerOpen: false,
+  approvalPickerOpen: false,
+  approvalModeOffer: null,
   draft: "",
   streaming: false,
   expandedTimelines: new Set(),
@@ -99,6 +106,7 @@ interface ResolvedSelections {
   skillIds: string[];
   mcpServerIds: string[];
   documentIds: string[];
+  approvalMode: ApprovalMode;
 }
 
 function invokableAgents(agents: BackendCatalog["agents"]) {
@@ -123,6 +131,7 @@ function effective(): ResolvedSelections {
     skillIds: o.skillIds ?? [],
     mcpServerIds: o.mcpServerIds ?? [],
     documentIds: o.documentIds ?? [],
+    approvalMode: o.approvalMode ?? DEFAULT_APPROVAL_MODE,
   };
 }
 
@@ -160,6 +169,8 @@ function render(): void {
   applySettings();
   applyModelPicker();
   applyAgentPicker();
+  applyApprovalPicker();
+  renderApprovalModeOffer();
   renderBackendBanner();
 }
 
@@ -185,6 +196,7 @@ function shellHtml(): string {
         <div class="project-bar" id="project-bar"></div>
         <div class="backend-banner" id="backend-banner" hidden></div>
         <div class="notice-stack" id="notice-stack"></div>
+        <div class="approval-mode-offer" id="approval-mode-offer" hidden></div>
         <section class="chat-transcript" id="transcript"></section>
         <footer class="chat-composer">
           <div class="composer-card">
@@ -206,6 +218,7 @@ function shellHtml(): string {
       <div class="modal-backdrop" id="modal-backdrop" hidden></div>
       <div class="popover" id="model-picker" hidden></div>
       <div class="popover" id="agent-picker" hidden></div>
+      <div class="popover" id="approval-picker" hidden></div>
       <aside class="settings-overlay" id="settings-overlay" hidden>
         <header class="settings-overlay-header">
           <span>LiberIDE Settings</span>
@@ -235,6 +248,7 @@ function bindShell(): void {
   root.querySelector<HTMLButtonElement>("#modal-backdrop")?.addEventListener("click", () => {
     if (state.modelPickerOpen) { state.modelPickerOpen = false; applyModelPicker(); }
     if (state.agentPickerOpen) { state.agentPickerOpen = false; applyAgentPicker(); }
+    if (state.approvalPickerOpen) { state.approvalPickerOpen = false; applyApprovalPicker(); }
     if (state.settingsOpen)   { state.settingsOpen = false;   applySettings(); }
   });
 
@@ -284,7 +298,7 @@ function applySettings(): void {
   const el = root.querySelector<HTMLElement>("#settings-overlay");
   const backdrop = root.querySelector<HTMLElement>("#modal-backdrop");
   if (el) el.toggleAttribute("hidden", !state.settingsOpen);
-  if (backdrop) backdrop.toggleAttribute("hidden", !(state.settingsOpen || state.modelPickerOpen || state.agentPickerOpen));
+  if (backdrop) backdrop.toggleAttribute("hidden", !anyPopoverOpen());
   if (state.settingsOpen) renderSettings();
 }
 
@@ -292,15 +306,96 @@ function applyModelPicker(): void {
   const el = root.querySelector<HTMLElement>("#model-picker");
   const backdrop = root.querySelector<HTMLElement>("#modal-backdrop");
   if (el) el.toggleAttribute("hidden", !state.modelPickerOpen);
-  if (backdrop) backdrop.toggleAttribute("hidden", !(state.settingsOpen || state.modelPickerOpen || state.agentPickerOpen));
+  if (backdrop) backdrop.toggleAttribute("hidden", !anyPopoverOpen());
   if (state.modelPickerOpen) renderModelPicker();
+}
+
+function anyPopoverOpen(): boolean {
+  return state.settingsOpen || state.modelPickerOpen || state.agentPickerOpen || state.approvalPickerOpen;
+}
+
+function applyApprovalPicker(): void {
+  const el = root.querySelector<HTMLElement>("#approval-picker");
+  const backdrop = root.querySelector<HTMLElement>("#modal-backdrop");
+  if (el) el.toggleAttribute("hidden", !state.approvalPickerOpen);
+  if (backdrop) backdrop.toggleAttribute("hidden", !anyPopoverOpen());
+  if (state.approvalPickerOpen) renderApprovalPicker();
+}
+
+function renderApprovalPicker(): void {
+  const el = root.querySelector<HTMLElement>("#approval-picker");
+  if (!el || !state.approvalPickerOpen) return;
+  const current = effective().approvalMode;
+  const max = state.catalog.maxApprovalMode;
+  el.innerHTML = `
+    <header class="popover-header">
+      <span>Approval mode</span>
+      <button class="icon-btn" id="approval-close">\u2715</button>
+    </header>
+    <div class="popover-body">
+      <ul>
+        ${APPROVAL_MODE_OPTIONS.map((option) => {
+          const allowed = approvalModeAllowed(option.id, max);
+          const classes = ["popover-row", `approval-mode-${option.id}`];
+          if (option.id === current) classes.push("selected");
+          if (!allowed) classes.push("disabled");
+          return `<li class="${classes.join(" ")}" data-mode="${escapeAttr(option.id)}" aria-disabled="${!allowed}">
+            <div class="popover-row-title">${escapeHtml(option.label)}</div>
+            <div class="popover-row-detail">${escapeHtml(allowed ? option.description : `${option.description} Not allowed by your administrator.`)}</div>
+          </li>`;
+        }).join("")}
+      </ul>
+    </div>
+  `;
+  el.querySelector<HTMLButtonElement>("#approval-close")?.addEventListener("click", () => {
+    state.approvalPickerOpen = false;
+    applyApprovalPicker();
+  });
+  for (const li of el.querySelectorAll<HTMLLIElement>(".popover-row")) {
+    li.addEventListener("click", () => {
+      const mode = li.dataset.mode as ApprovalMode | undefined;
+      if (!mode || li.classList.contains("disabled")) return;
+      state.approvalPickerOpen = false;
+      applyApprovalPicker();
+      if (mode !== current) setOverrides({ approvalMode: mode });
+    });
+  }
+}
+
+function renderApprovalModeOffer(): void {
+  const el = root.querySelector<HTMLElement>("#approval-mode-offer");
+  if (!el) return;
+  const offer = state.approvalModeOffer;
+  if (!offer || offer.sessionId !== state.activeSession?.id || offer.approvals.length === 0) {
+    el.hidden = true;
+    el.innerHTML = "";
+    return;
+  }
+  const count = offer.approvals.length;
+  el.hidden = false;
+  el.innerHTML = `
+    <div class="approval-mode-offer-text">
+      ${escapeHtml(`${count} pending approval${count === 1 ? "" : "s"} would be auto-approved in ${approvalModeLabel(offer.mode)} mode.`)}
+      <ul>${offer.approvals.slice(0, 5).map((a) => `<li>${escapeHtml(a.action)}</li>`).join("")}${count > 5 ? `<li>\u2026</li>` : ""}</ul>
+    </div>
+    <div class="approval-mode-offer-actions">
+      <button class="btn-primary" id="approval-offer-approve" ${offer.busy ? "disabled" : ""}>${offer.busy ? "Approving\u2026" : `Approve ${count}`}</button>
+      <button class="btn-secondary small" id="approval-offer-dismiss" ${offer.busy ? "disabled" : ""}>Keep pending</button>
+    </div>
+  `;
+  el.querySelector<HTMLButtonElement>("#approval-offer-approve")?.addEventListener("click", () => {
+    send({ type: "autoResolveApprovals", sessionId: offer.sessionId, ids: offer.approvals.map((a) => a.id) });
+  });
+  el.querySelector<HTMLButtonElement>("#approval-offer-dismiss")?.addEventListener("click", () => {
+    send({ type: "dismissApprovalModeOffer", sessionId: offer.sessionId });
+  });
 }
 
 function applyAgentPicker(): void {
   const el = root.querySelector<HTMLElement>("#agent-picker");
   const backdrop = root.querySelector<HTMLElement>("#modal-backdrop");
   if (el) el.toggleAttribute("hidden", !state.agentPickerOpen);
-  if (backdrop) backdrop.toggleAttribute("hidden", !(state.settingsOpen || state.modelPickerOpen || state.agentPickerOpen));
+  if (backdrop) backdrop.toggleAttribute("hidden", !anyPopoverOpen());
   if (state.agentPickerOpen) renderAgentPicker();
 }
 
@@ -611,7 +706,7 @@ function renderApprovalCard(card: ApprovalCardView): string {
   const pending = card.status === "pending";
   const statusText = card.busy
     ? (pending ? "Submitting\u2026" : "Continuing\u2026")
-    : pending ? "Waiting for your decision" : card.status === "approved" ? "Approved" : "Rejected";
+    : pending ? "Waiting for your decision" : card.status === "approved" ? "Approved" : card.status === "auto_approved" ? "Auto-approved by the chat's approval mode" : "Rejected";
   return `<div class="approval-card status-${escapeAttr(card.status)}" data-approval-id="${escapeAttr(card.id)}">
     <div class="approval-head">
       <span class="approval-title">${escapeHtml(card.action)}</span>
@@ -1074,6 +1169,10 @@ function renderComposer(): void {
       \u269B ${escapeHtml(agentLabel)}
     </button>
     <span class="composer-spacer"></span>
+    <button class="chip chip-approval chip-approval-${escapeAttr(eff.approvalMode)}" id="chip-approval" title="${escapeAttr(`Approval mode: ${approvalModeLabel(eff.approvalMode)} \u2014 ${APPROVAL_MODE_OPTIONS.find((o) => o.id === eff.approvalMode)?.description ?? ""}`)}">
+      <span>${eff.approvalMode === "full" ? "\u26A0 " : ""}${escapeHtml(approvalModeLabel(eff.approvalMode))}</span>
+      <span class="chip-caret">\u25BE</span>
+    </button>
     <button class="chip chip-model" id="chip-model" title="Pick model for this chat" ${state.catalog.models.length === 0 ? "disabled" : ""}>
       <span>${escapeHtml(modelLabel)}</span>
       <span class="chip-caret">\u25BE</span>
@@ -1083,6 +1182,10 @@ function renderComposer(): void {
   toolbar.querySelector<HTMLButtonElement>("#chip-model")?.addEventListener("click", () => {
     state.modelPickerOpen = !state.modelPickerOpen;
     applyModelPicker();
+  });
+  toolbar.querySelector<HTMLButtonElement>("#chip-approval")?.addEventListener("click", () => {
+    state.approvalPickerOpen = !state.approvalPickerOpen;
+    applyApprovalPicker();
   });
   toolbar.querySelector<HTMLButtonElement>("#chip-agents")?.addEventListener("click", () => {
     state.agentPickerOpen = !state.agentPickerOpen;
@@ -1955,6 +2058,7 @@ function handleMessage(msg: ChatHostToWebview): void {
       renderBackendBanner();
       if (state.modelPickerOpen) renderModelPicker();
       if (state.agentPickerOpen) renderAgentPicker();
+      if (state.approvalPickerOpen) renderApprovalPicker();
       break;
     case "project":
       state.project = msg.project;
@@ -1972,6 +2076,10 @@ function handleMessage(msg: ChatHostToWebview): void {
       state.contextBlocks = msg.blocks;
       renderContextBlocks();
       break;
+    case "approvalModeOffer":
+      state.approvalModeOffer = msg.offer;
+      renderApprovalModeOffer();
+      break;
     case "sessions":
       state.sessions = msg.sessions;
       state.activeSessionId = msg.activeSessionId;
@@ -1984,6 +2092,8 @@ function handleMessage(msg: ChatHostToWebview): void {
       renderTranscript();
       renderComposer();
       renderComposerAttachments();
+      if (state.approvalPickerOpen) renderApprovalPicker();
+      renderApprovalModeOffer();
       break;
     case "messageStart":
       if (state.activeSession && state.activeSession.id === msg.sessionId) {
