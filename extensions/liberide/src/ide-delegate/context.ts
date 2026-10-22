@@ -1,6 +1,8 @@
 import * as vscode from "vscode";
 import type { IdeToolContextPayload } from "../chat/types";
 import { currentMachineId, workspaceIdFor } from "./machine";
+import { currentIdeUserId } from "./identity";
+import { getWorkspaceIntelligence } from "../workspace/intelligence";
 
 /** The folder the user is working in: the active editor's, else the first. */
 export function activeWorkspaceFolder(): vscode.WorkspaceFolder | undefined {
@@ -13,8 +15,10 @@ export function buildIdeContextPayload(conversationId?: string): IdeToolContextP
   if (!folder) return undefined;
   return {
     sessionId: `vscode-${folder.name}`,
-    // Ignored by the server (it uses the authenticated user); kept for the payload type.
-    userId: "",
+    // The server authorizes with the authenticated user; these are informational.
+    userId: currentIdeUserId(),
+    ideUserId: currentIdeUserId(),
+    ideSessionId: `vscode-${folder.name}`,
     projectPath: folder.uri.fsPath,
     mode: "desktop",
     terminalExecutor: "client",
@@ -22,5 +26,6 @@ export function buildIdeContextPayload(conversationId?: string): IdeToolContextP
     // Lets the server pin tool calls to this machine's window for the folder.
     machineId: currentMachineId(),
     workspaceId: workspaceIdFor(folder.uri.fsPath),
+    workspaceIntelligence: getWorkspaceIntelligence(folder.uri.fsPath),
   };
 }

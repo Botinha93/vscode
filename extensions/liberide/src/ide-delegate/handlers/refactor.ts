@@ -2,11 +2,28 @@ import * as vscode from "vscode";
 import { positionFromPayload, rangeFromPayload, relativePath, resolveFileUri } from "./helpers";
 import { applyTrackedEdit, saveDocuments, touchedByEdit } from "./edit-apply";
 import { countRedactionPlaceholders } from "./redaction";
+import { readSettings } from "../../settings";
 
 /** Lazy code actions only carry `edit`/`command` once resolved; resolve this many per request. */
 const CODE_ACTION_RESOLVE_COUNT = 50;
 
 const codeActionCache = new Map<string, vscode.CodeAction>();
+
+/**
+ * Provider-built WorkspaceEdits can't carry per-entry `needsConfirmation`
+ * metadata (the native refactor-preview path used by applyWorkspaceEdit), so
+ * gate rename/code-action behind a modal confirm when `confirmEdits` is on.
+ * Returns true when the mutation may proceed.
+ */
+async function confirmMutation(summary: string): Promise<boolean> {
+  if (readSettings().confirmEdits === "off") return true;
+  const choice = await vscode.window.showWarningMessage(
+    `Apply agent change?\n\n${summary}`,
+    { modal: true },
+    "Apply",
+  );
+  return choice === "Apply";
+}
 
 function cacheAction(action: vscode.CodeAction): string {
   const id = crypto.randomUUID();
@@ -54,6 +71,9 @@ export async function handleApplyCodeAction(payload: Record<string, unknown>): P
     throw new Error(`Code action '${action.title}' has nothing to apply (no edit or command after resolving)`);
   }
   const touched = action.edit ? touchedByEdit(action.edit) : [];
+  if (!(await confirmMutation(`Code action: ${action.title}`))) {
+    return { applied: false, title: action.title, cancelled: true };
+  }
   if (action.edit) {
     const { applied } = await applyTrackedEdit(action.edit, touched);
     if (!applied) throw new Error("Failed to apply code action edit");
@@ -80,6 +100,9 @@ export async function handleRenameSymbol(payload: Record<string, unknown>): Prom
     newName
   );
   if (!edit) throw new Error("Rename provider returned no edit");
+  if (!(await confirmMutation(`Rename symbol to "${newName}"`))) {
+    return { applied: false, newName, cancelled: true };
+  }
   const touched = touchedByEdit(edit);
   const { applied, saved } = await applyTrackedEdit(edit, touched);
   return { applied, newName, changedFiles: touched.filter((r) => r.uri.scheme === "file").map((r) => relativePath(r.uri.fsPath)), saved };

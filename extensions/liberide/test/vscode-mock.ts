@@ -94,6 +94,11 @@ export class WorkspaceEdit {
   set(uri: Uri, edits: TextEdit[]) {
     this.textEdits.set(uri.fsPath, { uri, edits });
   }
+  replace(uri: Uri, range: Range, newText: string, _metadata?: unknown) {
+    const entry = this.textEdits.get(uri.fsPath) ?? { uri, edits: [] };
+    entry.edits.push(new TextEdit(range, newText));
+    this.textEdits.set(uri.fsPath, entry);
+  }
   renameFile(uri: Uri, newUri: Uri, options?: unknown) {
     this.fileOps.push({ kind: "rename", uri, newUri, options });
   }
@@ -136,6 +141,12 @@ export const workspace = {
   workspaceFolders: [] as Array<{ name: string; uri: Uri }>,
   isTrusted: true,
   getWorkspaceFolder: (_uri: Uri) => workspace.workspaceFolders[0],
+  /** Settings: every key reads as its default (`liberide.confirmEdits` → "off"). */
+  getConfiguration: (_section?: string) => ({
+    get: <T>(_key: string, defaultValue?: T) => defaultValue,
+    inspect: (_key: string) => undefined,
+    update: async () => undefined,
+  }),
   textDocuments: [] as Array<{ uri: Uri; isDirty: boolean; save: () => Promise<boolean>; getText: (range?: Range) => string }>,
   async applyEdit(edit: WorkspaceEdit) {
     appliedEdits.push(edit);
