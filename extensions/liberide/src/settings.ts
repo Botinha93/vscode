@@ -14,6 +14,10 @@ export interface LiberideSettings {
   swarm: boolean;
   /** Isolation for parallel branches: `worktree` (one git worktree per branch, merged at the end) or `shared` working tree. */
   isolation: "worktree" | "shared";
+  /** Gate agent file edits behind VS Code's refactor-preview: `off` (apply directly), `always`, or `multiFileAndDeletes`. */
+  confirmEdits: "off" | "always" | "multiFileAndDeletes";
+  /** When true, dispatch queues immediately without showing the plan-preview confirmation. */
+  dispatchSkipPreview: boolean;
 }
 
 const SECTION = "liberide";
@@ -31,6 +35,8 @@ export function readSettings(): LiberideSettings {
     defaultAllowedAgentIds: cfg.get<string[]>("defaultAllowedAgentIds") ?? [],
     swarm: cfg.get<boolean>("swarm") ?? false,
     isolation: cfg.get<"worktree" | "shared">("isolation") ?? "shared",
+    confirmEdits: cfg.get<"off" | "always" | "multiFileAndDeletes">("confirmEdits") ?? "off",
+    dispatchSkipPreview: cfg.get<boolean>("dispatch.skipPreview") ?? false,
   };
 }
 

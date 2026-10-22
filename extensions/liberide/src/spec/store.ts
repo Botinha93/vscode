@@ -2,6 +2,8 @@ import * as vscode from "vscode";
 import { extractSectionIds, parseBlockerItems, parseDocumentationItems, parseFeatureStatus, parseTaskContract, type BlockerItem, type DocumentationItem, type FeatureSpec, type TaskContract } from "./schema";
 import { readTextFile } from "./writer";
 
+const REFRESH_TIMEOUT_MS = 15_000;
+
 /**
  * Everything under `.liberide/specs` in any workspace folder. Directories are
  * matched too: when a whole feature folder is created or deleted at once
@@ -57,26 +59,41 @@ export class SpecStore implements vscode.Disposable {
     }
     this.refreshInProgress = true;
     try {
-      this.features.clear();
-      for (const folder of vscode.workspace.workspaceFolders ?? []) {
-        const root = vscode.Uri.joinPath(folder.uri, ".liberide", "specs");
-        try {
-          for (const [name, type] of await vscode.workspace.fs.readDirectory(root)) {
-            if (type === vscode.FileType.Directory) {
-              const feature = await this.loadFeature(root, name);
-              if (feature) this.features.set(feature.id, feature);
-            }
-          }
-        } catch {
-          // Workspace has no spec directory yet.
-        }
-      }
+      await Promise.race([
+        this.runRefreshBody(),
+        new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error("refresh timeout")), REFRESH_TIMEOUT_MS);
+        }),
+      ]);
       this.changeEmitter.fire();
+    } catch (err) {
+      if (err instanceof Error && err.message === "refresh timeout") {
+        this.output.appendLine(`[spec.refresh] timed out after ${REFRESH_TIMEOUT_MS}ms; refreshInProgress reset`);
+      } else {
+        this.output.appendLine(`[spec.refresh] error: ${err instanceof Error ? err.message : String(err)}`);
+      }
     } finally {
       this.refreshInProgress = false;
       if (this.refreshQueued) {
         this.refreshQueued = false;
         void this.refresh();
+      }
+    }
+  }
+
+  private async runRefreshBody(): Promise<void> {
+    this.features.clear();
+    for (const folder of vscode.workspace.workspaceFolders ?? []) {
+      const root = vscode.Uri.joinPath(folder.uri, ".liberide", "specs");
+      try {
+        for (const [name, type] of await vscode.workspace.fs.readDirectory(root)) {
+          if (type === vscode.FileType.Directory) {
+            const feature = await this.loadFeature(root, name);
+            if (feature) this.features.set(feature.id, feature);
+          }
+        }
+      } catch {
+        // Workspace has no spec directory yet.
       }
     }
   }

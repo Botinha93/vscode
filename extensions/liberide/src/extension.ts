@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { createAuthHandoff, getIntegrationSnapshot, getWebOrigin, initApiFromContext, listConversations, onIntegrationFileChanged } from "./api";
+import { createAuthHandoff, getIntegrationSnapshot, getWebOrigin, initApiFromContext, listConversations, onIntegrationFileChanged, probeBackend, type BackendReachability } from "./api";
 import { continueInBrowserUrl, onConversationOpenRequest, resolveContinueInBrowserUrl, takeStartupConversationRequest } from "./chat/continuation";
 import { LiberidePipelineController } from "./panel/panel";
 import { LiberideChatPanelController } from "./chat/chat-panel";
@@ -9,11 +9,18 @@ import { createThemeBridge } from "./theme-bridge";
 import { RunsTreeProvider } from "./views/runsTree";
 import { SpecsTreeProvider } from "./views/specsTree";
 import { TasksTreeProvider } from "./views/tasksTree";
+import { ApprovalsTreeProvider } from "./views/approvalsTree";
+import { McpTreeProvider } from "./views/mcpTree";
+import { revokeApprovalGrant, setMcpServerEnabledForUser } from "./api";
 import { startIdeDelegateStream } from "./ide-delegate/stream";
 import { disposeAgentTerminals } from "./terminal/agent-terminals";
 import { runIdeWorkflowCommand } from "./workflows/ide-triggers";
 import { initMachineIdentity } from "./ide-delegate/machine";
 import { pairWithServerCommand } from "./pairing";
+import { IdeNotificationCenter } from "./ide-delegate/notifications";
+import { setActiveProjectFolder } from "./project/identity";
+import { refreshIdeIdentity } from "./ide-delegate/identity";
+import { refreshWorkspaceIntelligence } from "./workspace/intelligence";
 
 let store: SpecStore;
 let pipeline: LiberidePipelineController;
@@ -23,6 +30,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(initApiFromContext(context));
   initMachineIdentity(context);
   const output = vscode.window.createOutputChannel("LiberIDE");
+  void refreshIdeIdentity((message) => output.appendLine(`[identity] ${message}`));
+  void refreshWorkspaceIntelligence(output);
   store = new SpecStore(output);
   await store.initialize(context);
 
@@ -36,14 +45,29 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
   });
 
+  const approvalsTree = new ApprovalsTreeProvider((message) => output.appendLine(message));
+  const mcpTree = new McpTreeProvider((message) => output.appendLine(message));
+
   pipeline = new LiberidePipelineController(context, store, output, runsTree);
   chat = new LiberideChatPanelController(context, store, output);
+
+  const notificationCenter = new IdeNotificationCenter(output, {
+    onApprovalPending: ({ graphId, nodeId }) => {
+      if (graphId && nodeId) void pipeline.resolveApprovalForRun(graphId, nodeId);
+      approvalsTree.refresh();
+    },
+    onRunStatus: () => {
+      runsTree.refresh();
+      approvalsTree.refresh();
+    },
+  });
 
   context.subscriptions.push(
     output,
     store,
     pipeline,
     chat,
+    notificationCenter,
     vscode.window.registerWebviewViewProvider(LiberidePipelineController.viewType, pipeline, {
       webviewOptions: { retainContextWhenHidden: true },
     }),
@@ -53,10 +77,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.window.registerTreeDataProvider("liberide.specs", specsTree),
     vscode.window.registerTreeDataProvider("liberide.tasks", tasksTree),
     vscode.window.registerTreeDataProvider("liberide.runs", runsTree),
+    vscode.window.registerTreeDataProvider("liberide.approvals", approvalsTree),
+    vscode.window.registerTreeDataProvider("liberide.mcp", mcpTree),
     createThemeBridge(output),
-    statusBar(),
-    startIdeDelegateStream(output),
-    ...commands(context, specsTree, tasksTree, runsTree),
+    connectionStatus(output),
+    startIdeDelegateStream(output, notificationCenter.handler),
+    ...commands(context, specsTree, tasksTree, runsTree, approvalsTree, mcpTree),
     vscode.commands.registerCommand("liberide.pairWithServer", () => {
       pairWithServerCommand(output).catch((err: unknown) => {
         void vscode.window.showErrorMessage(err instanceof Error ? err.message : String(err));
@@ -69,6 +95,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     ...continuation(output),
   );
+
+  approvalsTree.refresh();
+  mcpTree.refresh();
+  runsTree.refresh();
 }
 
 /** Conversations opened from the web app, and back: "Continue in Browser", "Open Conversation…". */
@@ -134,6 +164,8 @@ function commands(
   specsTree: SpecsTreeProvider,
   tasksTree: TasksTreeProvider,
   runsTree: RunsTreeProvider,
+  approvalsTree: ApprovalsTreeProvider,
+  mcpTree: McpTreeProvider,
 ): vscode.Disposable[] {
   /** Wrap an async command handler so uncaught errors show a VS Code notification. */
   function safe<T extends unknown[]>(fn: (...args: T) => Promise<void>): (...args: T) => void {
@@ -146,6 +178,11 @@ function commands(
 
   return [
     vscode.commands.registerCommand("liberide.openChat", () => chat.show()),
+    vscode.commands.registerCommand("liberide.attachSelection", safe(async () => { chat.show(); await chat.attachSelection(); })),
+    vscode.commands.registerCommand("liberide.attachActiveFile", safe(async () => { chat.show(); await chat.attachActiveFile(); })),
+    vscode.commands.registerCommand("liberide.attachFileToChat", safe(async () => { chat.show(); await chat.attachFilePick(); })),
+    vscode.commands.registerCommand("liberide.attachTerminalOutput", safe(async () => { chat.show(); await chat.attachTerminalOutput(); })),
+    vscode.commands.registerCommand("liberide.attachGitDiff", safe(async () => { chat.show(); await chat.attachGitDiff(); })),
     vscode.commands.registerCommand("liberide.newChat", safe(async () => {
       chat.show();
       await chat.newSession();
@@ -159,6 +196,44 @@ function commands(
     vscode.commands.registerCommand("liberide.refreshSpecs", safe(async () => { await store.refresh(); specsTree.refresh(); })),
     vscode.commands.registerCommand("liberide.refreshTasks", safe(async () => { await store.refresh(); tasksTree.refresh(); })),
     vscode.commands.registerCommand("liberide.refreshRuns", () => runsTree.refresh()),
+    vscode.commands.registerCommand("liberide.refreshApprovals", () => approvalsTree.refresh()),
+    vscode.commands.registerCommand("liberide.revokeApprovalGrant", safe(async (arg?: unknown) => {
+      const grantId = ApprovalsTreeProvider.grantIdOf(arg);
+      if (!grantId) {
+        void vscode.window.showInformationMessage("Select an active grant in the Approvals view to revoke it.");
+        return;
+      }
+      await revokeApprovalGrant(grantId);
+      approvalsTree.refresh();
+    })),
+    vscode.commands.registerCommand("liberide.selectActiveProject", safe(async () => {
+      const folders = vscode.workspace.workspaceFolders ?? [];
+      if (folders.length < 2) {
+        void vscode.window.showInformationMessage("Open a multi-root workspace to switch the active LiberIDE project.");
+        return;
+      }
+      const pick = await vscode.window.showQuickPick(
+        folders.map((f) => ({ label: f.name, description: f.uri.fsPath, folder: f })),
+        { title: "Select active LiberIDE project", placeHolder: "Chat, specs, and dispatch bind to this folder" },
+      );
+      if (!pick) return;
+      setActiveProjectFolder(pick.folder);
+      await chat.reloadProject();
+      void vscode.window.showInformationMessage(`LiberIDE active project: ${pick.label}`);
+    })),
+    vscode.commands.registerCommand("liberide.refreshMcpServers", () => mcpTree.refresh()),
+    vscode.commands.registerCommand("liberide.enableMcpServer", safe(async (arg?: unknown) => {
+      const server = McpTreeProvider.serverOf(arg);
+      if (!server) return;
+      await setMcpServerEnabledForUser(server.id, true);
+      mcpTree.refresh();
+    })),
+    vscode.commands.registerCommand("liberide.disableMcpServer", safe(async (arg?: unknown) => {
+      const server = McpTreeProvider.serverOf(arg);
+      if (!server) return;
+      await setMcpServerEnabledForUser(server.id, false);
+      mcpTree.refresh();
+    })),
     vscode.commands.registerCommand("liberide.scaffoldFeature", safe(async () => {
       const folder = vscode.workspace.workspaceFolders?.[0];
       const name = await vscode.window.showInputBox({ prompt: "Feature name" });
@@ -206,16 +281,126 @@ function commands(
       }
       await pipeline.cancel(graphId);
     })),
+    vscode.commands.registerCommand("liberide.resolveApproval", safe(async (arg?: { run?: { graphId?: string } } | string) => {
+      const graphId = typeof arg === "string" ? arg : arg?.run?.graphId;
+      if (!graphId) {
+        void vscode.window.showInformationMessage("Select a run awaiting approval from the Agent Runs view.");
+        return;
+      }
+      const nodeId = runsTree.getWaitingNodeId(graphId);
+      if (!nodeId) {
+        void vscode.window.showInformationMessage("That run is not awaiting approval.");
+        return;
+      }
+      await pipeline.resolveApprovalForRun(graphId, nodeId);
+    })),
+    vscode.commands.registerCommand("liberide.retryRun", safe(async (arg?: { run?: { graphId?: string } } | string) => {
+      const graphId = typeof arg === "string" ? arg : arg?.run?.graphId;
+      if (!graphId) {
+        void vscode.window.showInformationMessage("Select a finished run from the Agent Runs view to retry.");
+        return;
+      }
+      await pipeline.retryRun(graphId);
+    })),
+    vscode.commands.registerCommand("liberide.replayFromNode", safe(async (arg?: { graphId?: string; nodeId?: string }) => {
+      if (!arg?.graphId || !arg?.nodeId) {
+        void vscode.window.showInformationMessage("Select a node in the Agent Runs view to replay from.");
+        return;
+      }
+      await pipeline.replayFromNode(arg.graphId, arg.nodeId);
+    })),
+    vscode.commands.registerCommand("liberide.showNodeDetail", safe(async (arg?: { graphId?: string; nodeId?: string }) => {
+      if (!arg?.graphId || !arg?.nodeId) return;
+      await pipeline.showNodeDetail(arg.graphId, arg.nodeId);
+    })),
+    vscode.commands.registerCommand("liberide.viewArtifacts", safe(async (arg?: { run?: { graphId?: string } } | string) => {
+      const graphId = typeof arg === "string" ? arg : arg?.run?.graphId;
+      if (!graphId) {
+        void vscode.window.showInformationMessage("Select a run from the Agent Runs view to view its artifacts.");
+        return;
+      }
+      await pipeline.viewArtifacts(graphId);
+    })),
+    vscode.commands.registerCommand("liberide.viewWorkingMemory", safe(async (arg?: { run?: { graphId?: string } } | string) => {
+      const graphId = typeof arg === "string" ? arg : arg?.run?.graphId;
+      if (!graphId) {
+        void vscode.window.showInformationMessage("Select a run from the Agent Runs view to inspect its working memory.");
+        return;
+      }
+      await pipeline.viewWorkingMemory(graphId);
+    })),
+    vscode.commands.registerCommand("liberide.addWorkingMemoryNote", safe(async (arg?: { run?: { graphId?: string } } | string) => {
+      const graphId = typeof arg === "string" ? arg : arg?.run?.graphId;
+      if (graphId) await pipeline.addWorkingMemoryNote(graphId);
+    })),
+    vscode.commands.registerCommand("liberide.addFollowUp", safe(async (arg?: { run?: { graphId?: string } } | string) => {
+      const graphId = typeof arg === "string" ? arg : arg?.run?.graphId;
+      if (graphId) await pipeline.addFollowUp(graphId);
+    })),
+    vscode.commands.registerCommand("liberide.viewRunCost", safe(async (arg?: { run?: { graphId?: string } } | string) => {
+      const graphId = typeof arg === "string" ? arg : arg?.run?.graphId;
+      if (!graphId) {
+        void vscode.window.showInformationMessage("Select a run from the Agent Runs view to view its cost.");
+        return;
+      }
+      await pipeline.viewRunCost(graphId);
+    })),
   ];
 }
 
-function statusBar(): vscode.StatusBarItem {
+/**
+ * Status-bar connection indicator. Probes the backend on activation and on
+ * demand, surfaces unconfigured/unauthorized/unreachable states (instead of
+ * letting the first chat fail with a generic error), and offers an actionable
+ * re-check command.
+ */
+function connectionStatus(output: vscode.OutputChannel): vscode.Disposable {
   const item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
-  item.text = "$(comment-discussion) LiberIDE";
-  item.tooltip = "Open LiberIDE chat";
-  item.command = "liberide.openChat";
-  item.show();
-  return item;
+  const warningBg = new vscode.ThemeColor("statusBarItem.warningBackground");
+  let warned = false;
+
+  const apply = (state: BackendReachability): void => {
+    if (state === "ok") {
+      item.text = "$(comment-discussion) LiberIDE";
+      item.tooltip = "LiberIDE connected — open chat";
+      item.command = "liberide.openChat";
+      item.backgroundColor = undefined;
+    } else {
+      const label = state === "unconfigured" ? "not connected" : state === "unauthorized" ? "sign in" : "offline";
+      const icon = state === "unauthorized" ? "$(key)" : "$(debug-disconnect)";
+      item.text = `${icon} LiberIDE: ${label}`;
+      item.tooltip = "LiberIDE backend unavailable — click to check connection";
+      item.command = "liberide.checkConnection";
+      item.backgroundColor = warningBg;
+    }
+    item.show();
+  };
+
+  const refresh = async (notify: boolean): Promise<void> => {
+    item.text = "$(loading~spin) LiberIDE";
+    item.show();
+    const state = await probeBackend();
+    apply(state);
+    if (state === "ok" || !notify || warned) return;
+    warned = true;
+    const message =
+      state === "unconfigured"
+        ? "LiberIDE backend is not configured. Set LIBERIDE_API_ORIGIN + LIBERIDE_AUTH_TOKEN (or a libervox-integration.json)."
+        : state === "unauthorized"
+          ? "LiberIDE could not authenticate with the backend (token missing or expired)."
+          : "LiberIDE backend is unreachable.";
+    const pick = await vscode.window.showWarningMessage(message, "Details", "Retry");
+    if (pick === "Details") output.show(true);
+    else if (pick === "Retry") void refresh(true);
+  };
+
+  const cmd = vscode.commands.registerCommand("liberide.checkConnection", () => {
+    warned = false;
+    void refresh(true);
+  });
+
+  void refresh(true);
+  return vscode.Disposable.from(item, cmd);
 }
 
 export function deactivate(): void {

@@ -32,6 +32,7 @@ import {
   type ProjectIdentity,
 } from "../project/identity";
 import { detectIdeSpecSlashCommand } from "@nexus/shared";
+import { enrichMessageWithContext, toChips, type ContextBlock } from "./context-blocks";
 import {
   PIPELINE_GENERATE_SYSTEM_PROMPT,
   PIPELINE_INTERVIEW_SYSTEM_PROMPT,
@@ -89,6 +90,11 @@ import { parseTaskContract } from "../spec/schema";
 import type { SpecStore } from "../spec/store";
 import { regenerateTasksIndex, scaffoldFeature, writeTaskContract, writeTextFile } from "../spec/writer";
 import { activeWorkspaceFolder, buildIdeContextPayload } from "../ide-delegate/context";
+import { getWorkspaceIntelligence } from "../workspace/intelligence";
+import {
+  buildKeptConversationIds,
+  pruneConversationCaches,
+} from "./cache-prune";
 
 const OVERRIDES_STORAGE_KEY = "liberide.chat.overrides";
 const ACTIVE_SESSION_STORAGE_KEY = "liberide.chat.activeSession";
@@ -173,6 +179,7 @@ function toolActivityKind(name: string): ToolTimelineEntry["activityKind"] {
     name === "ide_test_list" ||
     name === "ide_test_status" ||
     name === "ide_tasks_list" ||
+    name === "ide_tasks_status" ||
     name === "ide_debug_list" ||
     name === "ide_debug_stacktrace" ||
     name === "ide_notebook_read" ||
@@ -226,6 +233,8 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
   private messagesCache = new Map<string, ConversationMessage[]>();
   private static readonly MAX_CACHED_CONVERSATIONS = 20;
   private attachmentBytes = new Map<string, { data: Uint8Array; mimeType: string; name: string }>();
+  /** Inline context chips applied to the next message in the active chat. */
+  private pendingContextBlocks: ContextBlock[] = [];
   private overrides: OverridesCache = {};
   private sessionKinds = new Map<string, ChatSession["kind"]>();
   /** conversationId -> set of message ids whose pipeline-ready card has been consumed. */
@@ -257,6 +266,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
   private readonly attaching = new Set<string>();
   private draftSession: ChatSession | null = null;
   private activeSessionId: string | null = null;
+  private disposed = false;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -275,15 +285,18 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       }),
     );
     this.conversationSyncDispose = subscribeConversationListSync((event) => {
+      if (this.disposed) return;
       void this.onConversationListEvent(event);
     });
     const offAuth = onAuthChanged(() => {
+      if (this.disposed) return;
       void this.refreshCatalog().then(() => this.refreshConversations());
     });
     this.disposables.push({ dispose: offAuth });
   }
 
   private async onConversationListEvent(event: ConversationListEvent): Promise<void> {
+    if (this.disposed) return;
     if (event.type === "message_updated" && event.conversationId) {
       // A resumed sub-agent posted its result: the placeholder has served its purpose.
       this.agentResumeNotes.delete(event.conversationId);
@@ -300,10 +313,16 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
   }
 
   private async onWorkspaceFoldersChanged(): Promise<void> {
+    if (this.disposed) return;
     this.project = await detectProjectIdentity();
     await this.ensureProjectFolder();
     await this.refreshConversations();
     this.broadcast({ type: "project", project: this.projectInfo() });
+  }
+
+  /** Re-detect the active project (e.g. after the user picks a different root). */
+  async reloadProject(): Promise<void> {
+    await this.onWorkspaceFoldersChanged();
   }
 
   resolveWebviewView(view: vscode.WebviewView): void {
@@ -368,6 +387,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
   }
 
   dispose(): void {
+    this.disposed = true;
     this.conversationSyncDispose?.();
     for (const d of this.disposables) d.dispose();
     for (const s of this.streams.values()) s.abort.abort();
@@ -403,6 +423,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
   }
 
   private broadcast(message: ChatHostToWebview): void {
+    if (this.disposed) return;
     this.view?.webview.postMessage(message);
   }
 
@@ -449,6 +470,10 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
           break;
         case "removeAttachment":
           await this.removeAttachment(message.sessionId, message.documentId);
+          break;
+        case "removeContextBlock":
+          this.pendingContextBlocks = this.pendingContextBlocks.filter((b) => b.id !== message.id);
+          this.broadcastContextBlocks();
           break;
         case "cancelMessage":
           await this.cancelTurn(message.sessionId);
@@ -641,16 +666,34 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
   }
 
   private async refreshConversations(): Promise<void> {
+    if (this.disposed) return;
     if (this.backendStatus !== "ok") {
       this.broadcastSessions();
       return;
     }
     try {
       const all = await listConversations();
+      if (this.disposed) return;
       await this.syncProjectConversations(all);
       const owned = all.filter((c) => this.conversationBelongsToProject(c) || this.openedConversations.has(c.id));
       this.conversations.clear();
       for (const c of owned) this.conversations.set(c.id, c);
+
+      const keptIds = buildKeptConversationIds(
+        owned.map((c) => c.id),
+        this.activeSessionId,
+        this.draftSession?.id,
+      );
+      pruneConversationCaches(keptIds, {
+        messagesCache: this.messagesCache,
+        overrides: this.overrides,
+        sessionKinds: this.sessionKinds,
+        consumedPipelineCards: this.consumedPipelineCards,
+        attachmentBytes: this.attachmentBytes,
+      });
+      void this.persistSessionKinds();
+      void this.context.workspaceState.update(OVERRIDES_STORAGE_KEY, this.overrides);
+
       if (this.activeSessionId && this.activeSessionId.startsWith("draft:")) {
         // keep current draft
       } else if (!this.activeSessionId || !this.conversations.has(this.activeSessionId)) {
@@ -900,6 +943,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       branch: this.project.branch,
       rootPath: this.project.rootPath,
       folderName: projectFolderName(this.project),
+      workspaceIntelligence: this.project.rootPath ? getWorkspaceIntelligence(this.project.rootPath) : undefined,
     };
   }
 
@@ -1013,6 +1057,112 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     await this.persistSessionKinds();
     this.broadcastSessions();
     this.broadcastActiveSession();
+  }
+
+  private broadcastContextBlocks(): void {
+    this.broadcast({ type: "contextBlocks", blocks: toChips(this.pendingContextBlocks) });
+  }
+
+  private addContextBlock(block: ContextBlock): void {
+    this.pendingContextBlocks.push(block);
+    this.broadcastContextBlocks();
+    this.show();
+  }
+
+  /** Attach the active editor selection (or whole line at cursor) as chat context. */
+  async attachSelection(): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+      void vscode.window.showInformationMessage("No active editor to attach a selection from.");
+      return;
+    }
+    const sel = editor.selection;
+    const range = sel.isEmpty ? editor.document.lineAt(sel.active.line).range : sel;
+    const text = editor.document.getText(range);
+    const rel = vscode.workspace.asRelativePath(editor.document.uri);
+    this.addContextBlock({
+      id: randomId(),
+      kind: "selection",
+      label: `${rel}:${range.start.line + 1}-${range.end.line + 1}`,
+      content: text,
+      language: editor.document.languageId,
+    });
+  }
+
+  /** Attach the active file's full contents as chat context. */
+  async attachActiveFile(): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+      void vscode.window.showInformationMessage("No active editor to attach.");
+      return;
+    }
+    const rel = vscode.workspace.asRelativePath(editor.document.uri);
+    this.addContextBlock({
+      id: randomId(),
+      kind: "file",
+      label: rel,
+      content: editor.document.getText(),
+      language: editor.document.languageId,
+    });
+  }
+
+  /** Pick a workspace file (the @-file mention) and attach its contents. */
+  async attachFilePick(): Promise<void> {
+    const uris = await vscode.workspace.findFiles("**/*", "**/{node_modules,.git,dist,out}/**", 2000);
+    const pick = await vscode.window.showQuickPick(
+      uris.map((u) => ({ label: vscode.workspace.asRelativePath(u), uri: u })),
+      { placeHolder: "Attach a file as chat context" },
+    );
+    if (!pick) return;
+    try {
+      const bytes = await vscode.workspace.fs.readFile(pick.uri);
+      this.addContextBlock({
+        id: randomId(),
+        kind: "file",
+        label: pick.label,
+        content: new TextDecoder().decode(bytes),
+        language: pick.label.split(".").pop(),
+      });
+    } catch (err) {
+      void vscode.window.showErrorMessage(`Failed to read ${pick.label}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /** Attach the output of the active terminal's last shell execution. */
+  async attachTerminalOutput(): Promise<void> {
+    const terminal = vscode.window.activeTerminal;
+    if (!terminal) {
+      void vscode.window.showInformationMessage("No active terminal.");
+      return;
+    }
+    // Shell integration doesn't expose history synchronously; capture the next
+    // execution's output. Prompt the user to re-run their command.
+    const note = await vscode.window.showInputBox({
+      prompt: "Paste the terminal output to attach (shell history isn't readable via API)",
+    });
+    if (!note?.trim()) return;
+    this.addContextBlock({ id: randomId(), kind: "terminal", label: terminal.name, content: note, language: "shell" });
+  }
+
+  /** Attach the working-tree git diff as chat context. */
+  async attachGitDiff(): Promise<void> {
+    try {
+      const root = this.project.rootPath ?? activeWorkspaceFolder()?.uri.fsPath;
+      if (!root) {
+        void vscode.window.showInformationMessage("Open a workspace folder to attach its git diff.");
+        return;
+      }
+      const { handleGitDiff } = await import("../ide-delegate/handlers/git");
+      const result = (await handleGitDiff(root, {})) as { diff?: string };
+      const diff = result.diff?.trim();
+      if (!diff) {
+        void vscode.window.showInformationMessage("No working-tree changes to attach.");
+        return;
+      }
+      this.addContextBlock({ id: randomId(), kind: "diff", label: "working tree diff", content: diff, language: "diff" });
+    } catch (err) {
+      void vscode.window.showErrorMessage(`Failed to read git diff: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   private async attachFiles(sessionId: string): Promise<void> {
@@ -1224,6 +1374,17 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
         ? PIPELINE_INTERVIEW_SYSTEM_PROMPT
         : (settings.systemPrompt || undefined);
 
+    // Inline context chips are prepended to the backend content (the visible
+    // user message stays clean); cleared once consumed.
+    const baseContent = rest || content;
+    const outgoingContent = !command && !pipelineMode
+      ? enrichMessageWithContext(baseContent, this.pendingContextBlocks)
+      : baseContent;
+    if (!command && !pipelineMode && this.pendingContextBlocks.length > 0) {
+      this.pendingContextBlocks = [];
+      this.broadcastContextBlocks();
+    }
+
     const body: ChatRequest = {
       conversationId,
       provider: resolved.provider,
@@ -1231,12 +1392,13 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       // An explicit retry with a chosen alternative is a pin, not a routing hint.
       modelSelection: forced ? "manual" : settings.modelSelection,
       chatMode,
-      content: rest || content,
+      content: outgoingContent,
       systemPrompt,
       // Spec/pipeline prompts steer this turn only; the chat keeps its own prompt.
       ...(command || pipelineMode ? { systemPromptScope: "turn" as const } : {}),
-      // The model gets the command's argument; the chat shows the typed command.
-      ...(command && (rest || content) !== content ? { displayContent: content } : {}),
+      // The model gets the command's argument (or the message plus attached
+      // context chips); the chat shows what the user typed.
+      ...(outgoingContent !== content ? { displayContent: content } : {}),
       skillIds: pipelineMode ? [] : (overrides.skillIds ?? []),
       documentIds: pipelineMode ? [] : (overrides.documentIds ?? []),
       useRag: pipelineMode ? false : useRag,
@@ -1587,6 +1749,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     try {
       await cancelExecutionGraph(graphId);
     } catch (err) {
+      if (this.disposed) return;
       const msg = err instanceof Error ? err.message : String(err);
       if (view) {
         view.cancelling = false;
@@ -1864,6 +2027,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
   }
 
   private async refreshSingleConversation(id: string): Promise<void> {
+    if (this.disposed) return;
     if (this.streams.has(id)) {
       // Replacing the cache now would drop the optimistic turn; do it when the stream ends.
       this.pendingRefresh.add(id);

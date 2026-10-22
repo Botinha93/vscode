@@ -45,12 +45,31 @@ function shortHash(input: string): string {
   return createHash("sha1").update(input).digest("hex").slice(0, 24);
 }
 
-export async function detectProjectIdentity(): Promise<ProjectIdentity> {
-  const folder = vscode.workspace.workspaceFolders?.[0];
-  if (!folder || folder.uri.scheme !== "file") {
+let activeProjectFolderPath: string | undefined;
+
+/**
+ * The currently active workspace folder for multi-root workspaces. Falls back to
+ * the first folder when no explicit selection is active or it no longer exists.
+ */
+export function getActiveProjectFolder(): vscode.WorkspaceFolder | undefined {
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  if (activeProjectFolderPath) {
+    const match = folders.find((f) => f.uri.fsPath === activeProjectFolderPath);
+    if (match) return match;
+  }
+  return folders[0];
+}
+
+export function setActiveProjectFolder(folder: vscode.WorkspaceFolder): void {
+  activeProjectFolderPath = folder.uri.fsPath;
+}
+
+export async function detectProjectIdentity(folder?: vscode.WorkspaceFolder): Promise<ProjectIdentity> {
+  const target = folder ?? getActiveProjectFolder();
+  if (!target || target.uri.scheme !== "file") {
     return { id: "none", source: "none", name: "No workspace" };
   }
-  const cwd = folder.uri.fsPath;
+  const cwd = target.uri.fsPath;
   const [remoteRaw, firstCommit, branch] = await Promise.all([
     gitExec(["config", "--get", "remote.origin.url"], cwd),
     gitExec(["rev-list", "--max-parents=0", "HEAD"], cwd),
@@ -62,7 +81,7 @@ export async function detectProjectIdentity(): Promise<ProjectIdentity> {
     return {
       id: `git:${shortHash(composite)}`,
       source: "git",
-      name: folder.name,
+      name: target.name,
       remoteUrl: remote,
       firstCommit: firstCommit ?? undefined,
       branch: branch ?? undefined,
@@ -72,7 +91,7 @@ export async function detectProjectIdentity(): Promise<ProjectIdentity> {
   return {
     id: `folder:${shortHash(cwd)}`,
     source: "folder",
-    name: folder.name,
+    name: target.name,
     rootPath: cwd,
   };
 }

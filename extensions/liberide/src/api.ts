@@ -5,7 +5,8 @@ import type {
   DocumentRecord,
   SharingFolder,
 } from "./chat/types";
-import { existsSync, mkdirSync, readFileSync, unwatchFile, watchFile, writeFileSync, chmodSync } from "node:fs";
+import type { ApprovalGrant, ExecutionGraph, McpServer, PermissionPolicy } from "@nexus/shared";
+import { existsSync, mkdirSync, readFileSync, statSync, unwatchFile, watchFile, writeFileSync, chmodSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { backoffDelay, readSseStream } from "./sse";
 
@@ -16,6 +17,10 @@ type IntegrationSnapshot = {
   expiresAt?: string;
   /** LiberIDE machine id (written by the desktop app, or by pairing). */
   machineId?: string;
+  /** Signed-in user, when the desktop app wrote it (informational; the server trusts the token). */
+  userId?: string;
+  userEmail?: string;
+  userName?: string;
   [key: string]: unknown;
 };
 
@@ -23,6 +28,10 @@ let integrationPath: string | undefined;
 let cachedIntegration: IntegrationSnapshot | null | undefined;
 /** Path the cached snapshot was read from (written back after a token refresh). */
 let cachedIntegrationSource: string | undefined;
+/** mtime of `cachedIntegrationSource` when read, so a rewrite is picked up even before the watcher fires. */
+let cachedIntegrationMtimeMs: number | undefined;
+/** The token listeners last heard about (see {@link reloadAuth}). */
+let announcedToken: string | undefined;
 /** Token issued by `/api/auth/integrations/vscode` after the file's token was refreshed. */
 let refreshedAuth: { token: string; expiresAt?: string } | undefined;
 let refreshTimer: ReturnType<typeof setTimeout> | undefined;
@@ -50,7 +59,8 @@ function integrationCandidates(): string[] {
  */
 export function initApiFromContext(context: { globalStorageUri: { fsPath: string } }): { dispose(): void } {
   integrationPath = join(context.globalStorageUri.fsPath, "../../../libervox-integration.json");
-  cachedIntegration = undefined;
+  clearIntegrationCache();
+  announcedToken = getAuthToken();
   const watched = [...new Set(integrationCandidates())];
   for (const path of watched) {
     watchFile(path, { interval: WATCH_INTERVAL_MS, persistent: false }, (curr, prev) => {
@@ -95,6 +105,7 @@ export function getWebOrigin(): string | undefined {
 }
 
 function notifyAuthChanged(): void {
+  announcedToken = getAuthToken();
   for (const listener of [...authListeners]) {
     try {
       listener();
@@ -106,7 +117,9 @@ function notifyAuthChanged(): void {
 
 /** Drop cached credentials and re-read the integration file. Returns true when the token changed. */
 export function reloadAuth(): boolean {
-  const before = getAuthToken();
+  // Compare with what listeners last heard: a lazy re-read (mtime changed) may
+  // already have picked the new token up before the watcher fired.
+  const before = announcedToken ?? getAuthToken();
   cachedIntegration = undefined;
   const next = loadIntegrationFile();
   // A token written by the desktop app supersedes one we refreshed ourselves.
@@ -118,12 +131,14 @@ export function reloadAuth(): boolean {
 }
 
 function loadIntegrationFile(): IntegrationSnapshot | null {
-  if (cachedIntegration !== undefined) return cachedIntegration;
+  if (cachedIntegration !== undefined && cachedSnapshotFresh()) return cachedIntegration;
   for (const path of integrationCandidates()) {
     try {
       if (existsSync(path)) {
+        const mtimeMs = statSync(path).mtimeMs;
         cachedIntegration = JSON.parse(readFileSync(path, "utf8")) as IntegrationSnapshot;
         cachedIntegrationSource = path;
+        cachedIntegrationMtimeMs = mtimeMs;
         return cachedIntegration;
       }
     } catch {
@@ -132,7 +147,24 @@ function loadIntegrationFile(): IntegrationSnapshot | null {
   }
   cachedIntegration = null;
   cachedIntegrationSource = undefined;
+  cachedIntegrationMtimeMs = undefined;
   return null;
+}
+
+/** Whether the cached snapshot's file is unchanged on disk (a missing file is left to the watcher). */
+function cachedSnapshotFresh(): boolean {
+  if (!cachedIntegrationSource) return true;
+  try {
+    return statSync(cachedIntegrationSource).mtimeMs === cachedIntegrationMtimeMs;
+  } catch {
+    return false;
+  }
+}
+
+export function clearIntegrationCache(): void {
+  cachedIntegration = undefined;
+  cachedIntegrationSource = undefined;
+  cachedIntegrationMtimeMs = undefined;
 }
 
 export function getApiOrigin(): string {
@@ -263,6 +295,7 @@ function writeIntegrationFile(path: string, snapshot: IntegrationSnapshot): void
   chmodSync(path, 0o600);
   cachedIntegration = next;
   cachedIntegrationSource = path;
+  cachedIntegrationMtimeMs = statSync(path).mtimeMs;
 }
 
 export const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -335,6 +368,23 @@ export async function recoverFromUnauthorized(): Promise<boolean> {
   return refreshAuthToken();
 }
 
+export interface AuthenticatedUserSnapshot {
+  id: string;
+  email?: string;
+  name?: string;
+  role?: string;
+}
+
+export function getIntegrationIdentity(): AuthenticatedUserSnapshot | undefined {
+  const snapshot = loadIntegrationFile();
+  if (!snapshot?.userId) return undefined;
+  return {
+    id: snapshot.userId,
+    email: snapshot.userEmail,
+    name: snapshot.userName,
+  };
+}
+
 export function authHeaders(extra?: Record<string, string>): Record<string, string> {
   const headers: Record<string, string> = { "Content-Type": "application/json", ...(extra ?? {}) };
   const token = getAuthToken();
@@ -404,6 +454,12 @@ export async function createAuthHandoff(next: string): Promise<{ url?: unknown }
   return readJson<{ url?: unknown }>(
     await apiFetch("/api/auth/handoff", { method: "POST", body: JSON.stringify({ next }), signal: AbortSignal.timeout(5_000) }),
   );
+}
+
+export async function fetchAuthenticatedUser(): Promise<AuthenticatedUserSnapshot> {
+  const payload = await readJson<{ user?: AuthenticatedUserSnapshot }>(await apiFetch("/api/auth/me"));
+  if (!payload.user?.id) throw new Error("Authenticated user response did not include an id.");
+  return payload.user;
 }
 
 export async function listConversations(): Promise<Conversation[]> {
@@ -601,5 +657,211 @@ export function subscribeConversationListSync(onChange: (event: ConversationList
     abort?.abort();
     stopPoll();
     if (retryTimer) clearTimeout(retryTimer);
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Approval grants & permission policies (read + revoke for the Approvals view)
+// ---------------------------------------------------------------------------
+
+export async function listApprovalGrants(options?: {
+  conversationId?: string;
+  scope?: string;
+  activeOnly?: boolean;
+}): Promise<ApprovalGrant[]> {
+  const params = new URLSearchParams();
+  if (options?.conversationId) params.set("conversationId", options.conversationId);
+  if (options?.scope) params.set("scope", options.scope);
+  if (options?.activeOnly) params.set("activeOnly", "true");
+  const qs = params.toString();
+  return readJson<ApprovalGrant[]>(await apiFetch(`/api/approval-grants${qs ? `?${qs}` : ""}`));
+}
+
+export async function revokeApprovalGrant(id: string): Promise<void> {
+  await readNothing(
+    await apiFetch(`/api/approval-grants/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  );
+}
+
+export interface PermissionPoliciesResult {
+  /** Policies when readable, or undefined when the backend denied access (manager-only). */
+  policies?: PermissionPolicy[];
+  /** True when the caller lacks the manager role required to read policies. */
+  forbidden?: boolean;
+}
+
+/**
+ * Read the workspace permission policies. The backend gates this behind the
+ * manager role, so a 401/403 is surfaced as `forbidden` (the view then offers a
+ * deep-link to the web app) rather than thrown.
+ */
+export async function listPermissionPolicies(): Promise<PermissionPoliciesResult> {
+  const res = await apiFetch("/api/permission-policies");
+  if (res.status === 401 || res.status === 403) return { forbidden: true };
+  return { policies: await readJson<PermissionPolicy[]>(res) };
+}
+
+// ---------------------------------------------------------------------------
+// MCP servers (list + per-user enable toggle)
+// ---------------------------------------------------------------------------
+
+export async function listMcpServers(): Promise<McpServer[]> {
+  return readJson<McpServer[]>(await apiFetch("/api/mcp/servers"));
+}
+
+export async function setMcpServerEnabledForUser(id: string, enabled: boolean): Promise<void> {
+  await readNothing(
+    await apiFetch(`/api/mcp/servers/${encodeURIComponent(id)}/user`, {
+      method: "PATCH",
+      body: JSON.stringify({ enabled }),
+    }),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Execution graphs (background run surfacing)
+// ---------------------------------------------------------------------------
+
+export async function listExecutionGraphs(options?: {
+  status?: string;
+  limit?: number;
+}): Promise<ExecutionGraph[]> {
+  const params = new URLSearchParams();
+  if (options?.status) params.set("status", options.status);
+  if (options?.limit) params.set("limit", String(options.limit));
+  const qs = params.toString();
+  return readJson<ExecutionGraph[]>(await apiFetch(`/api/execution-graphs${qs ? `?${qs}` : ""}`));
+}
+
+// ---------------------------------------------------------------------------
+// Resilient Server-Sent Events
+// ---------------------------------------------------------------------------
+
+const SSE_RECONNECT_BASE_MS = 2_000;
+const SSE_RECONNECT_MAX_MS = 30_000;
+const SSE_MAX_BUFFER_BYTES = 1_000_000; // 1 MB cap against malformed/stuck streams
+
+/** Exponential backoff delay for reconnect attempt `n` (0-based), capped. */
+export function sseBackoffDelay(
+  attempt: number,
+  baseMs = SSE_RECONNECT_BASE_MS,
+  maxMs = SSE_RECONNECT_MAX_MS,
+): number {
+  return Math.min(baseMs * 2 ** Math.max(0, attempt), maxMs);
+}
+
+/**
+ * Parse a single SSE frame (text between `\n\n` separators) into its event type
+ * and concatenated data payload. Returns undefined when the frame carries no
+ * `data:` line. Pure and dependency-free for unit testing.
+ */
+export function parseSseFrame(raw: string): { type?: string; data: string } | undefined {
+  let type: string | undefined;
+  const dataLines: string[] = [];
+  for (const line of raw.split(/\r?\n/)) {
+    if (line.startsWith("event:")) type = line.slice(6).trim();
+    else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
+  }
+  if (dataLines.length === 0) return undefined;
+  return { type, data: dataLines.join("\n") };
+}
+
+export interface SseStreamOptions {
+  /** Fires for each parsed frame that carries data. */
+  onEvent: (event: { type?: string; data: string }) => void;
+  /** Fires on every successful (re)connect. */
+  onConnect?: () => void;
+  /** Fires when a connect attempt fails or the stream drops; `gaveUp` is true once retries are exhausted. */
+  onError?: (info: { attempt: number; gaveUp: boolean; error?: unknown }) => void;
+  /** Extra request headers (Accept: text/event-stream and auth are added automatically). */
+  headers?: Record<string, string>;
+  method?: string;
+  body?: string;
+  /** Max consecutive reconnect attempts before giving up. Default Infinity (persistent subscription). */
+  maxRetries?: number;
+  /** Optional logger (kept vscode-free here; caller passes output channel's appendLine). */
+  log?: (message: string) => void;
+}
+
+/**
+ * Open a resilient SSE subscription: parses frames with a buffer cap, and
+ * reconnects with exponential backoff on drop/failure until cancelled or
+ * `maxRetries` is exhausted. Returns a cancel function.
+ */
+export function sseStream(path: string, options: SseStreamOptions): () => void {
+  const { onEvent, onConnect, onError, headers, method, body, maxRetries = Infinity, log } = options;
+  let closed = false;
+  let attempt = 0;
+  let controller: AbortController | undefined;
+  let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const scheduleReconnect = (error?: unknown) => {
+    if (closed) return;
+    const gaveUp = attempt >= maxRetries;
+    onError?.({ attempt, gaveUp, error });
+    if (gaveUp) {
+      log?.(`SSE ${path} gave up after ${attempt} attempt(s)`);
+      return;
+    }
+    const delay = sseBackoffDelay(attempt);
+    attempt += 1;
+    reconnectTimer = setTimeout(() => void connect(), delay);
+  };
+
+  const connect = async (): Promise<void> => {
+    if (closed) return;
+    const origin = getApiOrigin();
+    if (!origin) {
+      scheduleReconnect(new Error("API origin not configured"));
+      return;
+    }
+    controller = new AbortController();
+    try {
+      const response = await fetch(path.startsWith("http") ? path : `${origin}${path}`, {
+        method,
+        body,
+        headers: authHeaders({ Accept: "text/event-stream", ...(headers ?? {}) }),
+        signal: controller.signal,
+      });
+      if (!response.ok || !response.body) {
+        scheduleReconnect(new Error(`SSE ${path} responded ${response.status}`));
+        return;
+      }
+      attempt = 0;
+      onConnect?.();
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (!closed) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        if (buffer.length > SSE_MAX_BUFFER_BYTES) {
+          log?.(`SSE ${path} buffer exceeded ${SSE_MAX_BUFFER_BYTES} bytes — reconnecting`);
+          await reader.cancel().catch(() => undefined);
+          scheduleReconnect(new Error("buffer overflow"));
+          return;
+        }
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() ?? "";
+        for (const part of parts) {
+          const frame = parseSseFrame(part);
+          if (frame) onEvent(frame);
+        }
+      }
+      // Clean end (server closed): reconnect for a persistent subscription.
+      if (!closed) scheduleReconnect();
+    } catch (error) {
+      if (closed || (error instanceof DOMException && error.name === "AbortError")) return;
+      scheduleReconnect(error);
+    }
+  };
+
+  void connect();
+
+  return () => {
+    closed = true;
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    controller?.abort();
   };
 }

@@ -1,6 +1,7 @@
 import { apiFetch, getApiOrigin } from "../api";
 import { backoffDelay, readSseStream } from "../sse";
 import type { FeatureSpec, TaskContract } from "../spec/schema";
+import type { IdeToolContextPayload } from "../chat/types";
 import { validateDag } from "../spec/dag";
 
 export interface SpecDispatchResult {
@@ -24,7 +25,7 @@ function taskInput(feature: FeatureSpec, task: TaskContract): string {
   ].join("\n").slice(0, 2000);
 }
 
-export async function dispatchFeature(feature: FeatureSpec, options: { conversationId?: string; taskIds?: string[]; ideContext?: Record<string, unknown>; swarm?: boolean; isolation?: "worktree" | "shared" } = {}): Promise<SpecDispatchResult> {
+export async function dispatchFeature(feature: FeatureSpec, options: { conversationId?: string; taskIds?: string[]; ideContext?: IdeToolContextPayload; swarm?: boolean; isolation?: "worktree" | "shared" } = {}): Promise<SpecDispatchResult> {
   const tasks = options.taskIds?.length ? feature.tasks.filter((task) => options.taskIds!.includes(task.id)) : feature.tasks;
   const validation = validateDag(tasks);
   if (!validation.ok) throw new Error(validation.error);
@@ -123,6 +124,10 @@ export interface GraphSubscriptionOptions {
   onError?: (message: string, willRetry: boolean) => void;
   /** Fired when a (re)connection succeeds. */
   onConnected?: () => void;
+  /** Fired once when the subscription gives up (retries exhausted, 401/403/404). */
+  onDisconnect?: () => void;
+  /** Optional logger for connection diagnostics. */
+  log?: (message: string) => void;
 }
 
 /** Backup poll of the graph row, since the event stream may go quiet. */
@@ -175,7 +180,9 @@ export function subscribeExecutionGraphEvents(
 
   const fail = (message: string) => {
     if (closed) return;
+    options.log?.(`graph ${graphId}: ${message}`);
     options.onError?.(message, false);
+    options.onDisconnect?.();
     stop();
   };
 
@@ -185,6 +192,7 @@ export function subscribeExecutionGraphEvents(
       fail(`Lost the graph event stream: ${reason}`);
       return;
     }
+    options.log?.(`graph ${graphId}: reconnecting (${reason})`);
     options.onError?.(reason, true);
     retryTimer = setTimeout(() => {
       retryTimer = null;
@@ -265,5 +273,181 @@ export async function cancelExecutionGraph(graphId: string): Promise<void> {
   if (!response.ok && response.status !== 404) {
     const err = (await response.json().catch(() => ({ error: response.statusText }))) as { error?: string };
     throw new Error(err.error ?? response.statusText);
+  }
+}
+
+export interface GraphNodeSummary {
+  id: string;
+  type: string;
+  title: string;
+  status: string;
+  inputSummary?: string;
+  error?: string;
+}
+
+export interface GraphApprovalSummary {
+  id: string;
+  action: string;
+  reason: string;
+  details?: string;
+  risk: string;
+  status: string;
+}
+
+/** Fetch graph detail (nodes + agent-run approvals) — used to resolve approval prompts. */
+export async function fetchGraphDetail(
+  graphId: string,
+): Promise<{ nodes: GraphNodeSummary[]; approvals: GraphApprovalSummary[] }> {
+  const res = await apiFetch(`/api/execution-graphs/${graphId}/detail`);
+  if (!res.ok) throw new Error(`Failed to load graph detail: ${res.status} ${res.statusText}`);
+  const detail = (await res.json()) as { nodes?: GraphNodeSummary[]; approvals?: GraphApprovalSummary[] };
+  return { nodes: detail.nodes ?? [], approvals: detail.approvals ?? [] };
+}
+
+/** Approve/reject a graph-native APPROVAL node (e.g. the swarm blocker gate). */
+export async function resolveNodeApproval(
+  graphId: string,
+  nodeId: string,
+  decision: "approved" | "rejected",
+  note?: string,
+): Promise<void> {
+  const res = await apiFetch(`/api/execution-graphs/${graphId}/nodes/${encodeURIComponent(nodeId)}/approval`, {
+    method: "POST",
+    body: JSON.stringify({ decision, note }),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({ error: res.statusText }))) as { error?: string };
+    throw new Error(body.error ?? `Approval failed: ${res.status}`);
+  }
+}
+
+export interface WorkingMemorySnapshot {
+  executionGraphId: string;
+  activeGoal: string;
+  activeFiles: string[];
+  activeTasks: string[];
+  blockers: string[];
+  assumptions: string[];
+  nextActions: string[];
+  currentPlan?: string;
+  verificationHistory: Array<{ nodeTitle?: string; passed?: boolean } & Record<string, unknown>>;
+  recentFailures: Array<{ nodeTitle?: string; error?: string } & Record<string, unknown>>;
+  updatedAt: string;
+}
+
+/** Read a run's working memory (accumulated agent context). 404 → null. */
+export async function getWorkingMemory(graphId: string): Promise<WorkingMemorySnapshot | null> {
+  const res = await apiFetch(`/api/execution-graphs/${graphId}/working-memory`);
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({ error: res.statusText }))) as { error?: string };
+    throw new Error(body.error ?? `Failed to load working memory: ${res.status}`);
+  }
+  return (await res.json()) as WorkingMemorySnapshot;
+}
+
+/** Merge a partial patch into a run's working memory (e.g. append assumptions). */
+export async function patchWorkingMemory(
+  graphId: string,
+  patch: Partial<WorkingMemorySnapshot>,
+): Promise<void> {
+  const res = await apiFetch(`/api/execution-graphs/${graphId}/working-memory`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({ error: res.statusText }))) as { error?: string };
+    throw new Error(body.error ?? `Failed to update working memory: ${res.status}`);
+  }
+}
+
+/** Add a follow-up goal node to a run. */
+export async function addFollowUp(graphId: string, additionalGoal: string): Promise<void> {
+  const res = await apiFetch(`/api/execution-graphs/${graphId}/follow-up`, {
+    method: "POST",
+    body: JSON.stringify({ additionalGoal }),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({ error: res.statusText }))) as { error?: string };
+    throw new Error(body.error ?? `Follow-up failed: ${res.status}`);
+  }
+}
+
+export interface GraphMetrics {
+  inputTokens: number;
+  outputTokens: number;
+  estimatedCostUsd: number;
+  callCount: number;
+  perNode: Array<{ nodeId: string; title: string; inputTokens: number; outputTokens: number; estimatedCostUsd: number }>;
+}
+
+/** Aggregated token/cost usage for a run. 404 → null. */
+export async function getGraphMetrics(graphId: string): Promise<GraphMetrics | null> {
+  const res = await apiFetch(`/api/execution-graphs/${graphId}/metrics`);
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({ error: res.statusText }))) as { error?: string };
+    throw new Error(body.error ?? `Failed to load metrics: ${res.status}`);
+  }
+  return (await res.json()) as GraphMetrics;
+}
+
+export interface GraphArtifact {
+  id: string;
+  path: string;
+  title: string;
+  kind: string;
+  content: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+/** List artifacts produced by a run's nodes (content included inline). */
+export async function listGraphArtifacts(graphId: string): Promise<GraphArtifact[]> {
+  const res = await apiFetch(`/api/execution-graphs/${graphId}/artifacts`);
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({ error: res.statusText }))) as { error?: string };
+    throw new Error(body.error ?? `Failed to list artifacts: ${res.status}`);
+  }
+  return (await res.json()) as GraphArtifact[];
+}
+
+/** Retry a failed/cancelled run (re-queues failed/cancelled nodes). */
+export async function retryGraph(graphId: string): Promise<void> {
+  const res = await apiFetch(`/api/execution-graphs/${graphId}/retry`, { method: "POST" });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({ error: res.statusText }))) as { error?: string };
+    throw new Error(body.error ?? `Retry failed: ${res.status}`);
+  }
+}
+
+/** Replay a node and its downstream dependents; returns the number of nodes re-queued. */
+export async function replayFromNode(graphId: string, nodeId: string, reason?: string): Promise<number> {
+  const res = await apiFetch(`/api/execution-graphs/${graphId}/replay-from/${encodeURIComponent(nodeId)}`, {
+    method: "POST",
+    body: JSON.stringify({ reason: reason ?? "manual_replay" }),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({ error: res.statusText }))) as { error?: string };
+    throw new Error(body.error ?? `Replay failed: ${res.status}`);
+  }
+  const out = (await res.json()) as { replayed?: number };
+  return out.replayed ?? 0;
+}
+
+/** Resolve an agent-run approval record (PATCH) — for operational tool approvals. */
+export async function resolveGraphApproval(
+  graphId: string,
+  approvalId: string,
+  status: "approved" | "rejected",
+  response?: string,
+): Promise<void> {
+  const res = await apiFetch(`/api/execution-graphs/${graphId}/approvals/${encodeURIComponent(approvalId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ status, response }),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({ error: res.statusText }))) as { error?: string };
+    throw new Error(body.error ?? `Approval failed: ${res.status}`);
   }
 }

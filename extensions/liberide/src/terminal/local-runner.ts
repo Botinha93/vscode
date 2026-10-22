@@ -4,12 +4,17 @@ import type { TerminalDelegateEvent } from "../chat/types";
 import { childProcessEnv } from "../api";
 
 export interface LocalTerminalResult {
+  status: "completed" | "failed" | "timed_out" | "cancelled";
   exitCode: number | null;
   stdout: string;
   stderr: string;
   timedOut: boolean;
   cancelled?: boolean;
   signal?: string | null;
+  durationMs: number;
+  /** True when stdout or stderr was cut to the output cap. */
+  truncated: boolean;
+  stillRunning?: boolean;
 }
 
 const MAX_OUTPUT = 100_000;
@@ -39,6 +44,10 @@ class OutputBuffer {
       this.dropped += excess;
       this.tail = this.tail.slice(excess);
     }
+  }
+
+  get truncated(): boolean {
+    return this.dropped > 0;
   }
 
   toString(): string {
@@ -119,10 +128,11 @@ export function runLocalTerminal(
   const cwd = path.resolve(delegate.cwd || delegate.projectPath);
   const argv = shellArgv(delegate.command);
   const timeoutMs = delegate.timeoutMs > 0 ? delegate.timeoutMs : 120_000;
+  const startedAt = Date.now();
 
   return new Promise((resolve) => {
     if (signal?.aborted) {
-      resolve({ exitCode: null, stdout: "", stderr: "Cancelled before start", timedOut: false, cancelled: true });
+      resolve({ status: "cancelled", exitCode: null, stdout: "", stderr: "Cancelled before start", timedOut: false, cancelled: true, durationMs: 0, truncated: false, stillRunning: false });
       return;
     }
     const proc = spawn(argv[0]!, argv.slice(1), {
@@ -170,17 +180,21 @@ export function runLocalTerminal(
 
     proc.on("close", (code, killSignal) => {
       finish({
+        status: cancelled ? "cancelled" : timedOut ? "timed_out" : code === 0 ? "completed" : "failed",
         exitCode: code,
         stdout: stdout.toString(),
         stderr: stderr.toString(),
         timedOut,
+        durationMs: Date.now() - startedAt,
+        truncated: stdout.truncated || stderr.truncated,
+        stillRunning: false,
         ...(cancelled ? { cancelled } : {}),
         ...(killSignal ? { signal: killSignal } : {}),
       });
     });
 
     proc.on("error", (err) => {
-      finish({ exitCode: 1, stdout: "", stderr: err.message, timedOut: false });
+      finish({ status: "failed", exitCode: 1, stdout: "", stderr: err.message, timedOut: false, durationMs: Date.now() - startedAt, truncated: false, stillRunning: false });
     });
   });
 }

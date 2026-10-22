@@ -1555,6 +1555,78 @@ section.liberide-tab.active { display: flex; flex-direction: column; }
 .node-chip[data-status="blocked"]   { background: rgba(200, 160, 0, 0.18); }
 .node-chip[data-status="queued"]    { background: rgba(150, 150, 150, 0.18); }
 
+.inspector-section {
+  min-height: 180px;
+}
+
+.run-inspector {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.inspector-title {
+  font-weight: 700;
+}
+
+.inspector-card,
+.inspector-grid section {
+  border: 1px solid var(--chatllm-border);
+  border-radius: 6px;
+  padding: 8px;
+  background: var(--chatllm-bg-soft);
+}
+
+.inspector-card p,
+.inspector-grid p {
+  margin: 6px 0 0;
+}
+
+.inspector-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+}
+
+.inspector-grid h4 {
+  margin: 0 0 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  color: var(--chatllm-muted);
+}
+
+.inspector-wide {
+  grid-column: 1 / -1;
+}
+
+.artifact-row,
+.approval-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--vscode-foreground);
+  text-align: left;
+}
+
+.artifact-row:hover,
+.mini-btn:hover {
+  background: var(--vscode-toolbar-hoverBackground, var(--chatllm-bg-soft-2));
+}
+
+.mini-btn {
+  border: 1px solid var(--chatllm-border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+}
+
 .empty-row {
   padding: 8px;
 }

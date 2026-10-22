@@ -10,16 +10,13 @@
     "vscode": "^1.90.0"
   },
   "categories": ["AI", "Other"],
-  "activationEvents": [
-    "onStartupFinished"
-  ],
+  "activationEvents": ["onStartupFinished"],
   "main": "./extension.js",
-  "enabledApiProposals": [
-    "testObserver"
-  ],
+  "enabledApiProposals": ["testObserver"],
   "scripts": {
     "build": "node esbuild.mjs",
-    "test": "bun test test"
+    "test": "bun test test src",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "capabilities": {
     "virtualWorkspaces": true,
@@ -36,7 +33,7 @@
           "type": "string",
           "enum": ["auto", "manual"],
           "default": "auto",
-          "description": "Local override for model selection mode. When 'auto' (default), the backend routes each request to a suitable model; 'manual' always uses the model picked for the chat. Configure models under Settings \u2192 Providers in the VoxChat app."
+          "description": "Local override for model selection mode. When 'auto' (default), the backend routes each request to a suitable model; 'manual' always uses the model picked for the chat. Configure models under Settings → Providers in the VoxChat app."
         },
         "liberide.useRag": {
           "type": "boolean",
@@ -60,7 +57,9 @@
         },
         "liberide.defaultAllowedAgentIds": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "description": "Default agents the model may spawn via the agent tool for new LiberIDE chats. Empty means all callable agents. Per-conversation values sync with VoxChat."
         },
@@ -78,6 +77,22 @@
           ],
           "default": "shared",
           "description": "Isolation strategy for parallel implementation branches when swarm is enabled."
+        },
+        "liberide.confirmEdits": {
+          "type": "string",
+          "enum": ["off", "always", "multiFileAndDeletes"],
+          "enumDescriptions": [
+            "Apply agent edits directly without a preview.",
+            "Open VS Code's refactor-preview (diff + per-change checkboxes) for every agent edit.",
+            "Preview only multi-file edits and file creates/renames/deletes; apply single-file text edits directly."
+          ],
+          "default": "off",
+          "description": "Whether agent file edits open VS Code's refactor-preview for confirmation before applying."
+        },
+        "liberide.dispatch.skipPreview": {
+          "type": "boolean",
+          "default": false,
+          "description": "When enabled, Dispatch Feature queues immediately without showing the plan-preview confirmation (task list with deselect/confirm/cancel)."
         }
       }
     },
@@ -171,12 +186,12 @@
       },
       {
         "command": "liberide.runWorkflow",
-        "title": "Run Workflow\u2026",
+        "title": "Run Workflow…",
         "category": "LiberIDE"
       },
       {
         "command": "liberide.pairWithServer",
-        "title": "Pair with Server\u2026",
+        "title": "Pair with Server…",
         "category": "LiberIDE"
       },
       {
@@ -193,6 +208,117 @@
         "command": "liberide.refreshRuns",
         "title": "Refresh Runs",
         "category": "LiberIDE"
+      },
+      {
+        "command": "liberide.attachSelection",
+        "title": "Attach Selection to LiberIDE Chat",
+        "category": "LiberIDE"
+      },
+      {
+        "command": "liberide.attachActiveFile",
+        "title": "Attach Active File to LiberIDE Chat",
+        "category": "LiberIDE"
+      },
+      {
+        "command": "liberide.attachFileToChat",
+        "title": "Attach File to LiberIDE Chat (@file)",
+        "category": "LiberIDE"
+      },
+      {
+        "command": "liberide.attachTerminalOutput",
+        "title": "Attach Terminal Output to LiberIDE Chat",
+        "category": "LiberIDE"
+      },
+      {
+        "command": "liberide.attachGitDiff",
+        "title": "Attach Git Diff to LiberIDE Chat",
+        "category": "LiberIDE"
+      },
+      {
+        "command": "liberide.resolveApproval",
+        "title": "Resolve Approval",
+        "category": "LiberIDE",
+        "icon": "$(person)"
+      },
+      {
+        "command": "liberide.retryRun",
+        "title": "Retry Run",
+        "category": "LiberIDE",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "liberide.replayFromNode",
+        "title": "Replay From Node",
+        "category": "LiberIDE",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "liberide.showNodeDetail",
+        "title": "Show Node Detail",
+        "category": "LiberIDE"
+      },
+      {
+        "command": "liberide.viewArtifacts",
+        "title": "View Artifacts",
+        "category": "LiberIDE",
+        "icon": "$(file-code)"
+      },
+      {
+        "command": "liberide.viewWorkingMemory",
+        "title": "View Working Memory",
+        "category": "LiberIDE",
+        "icon": "$(database)"
+      },
+      {
+        "command": "liberide.addWorkingMemoryNote",
+        "title": "Add Context to Working Memory",
+        "category": "LiberIDE"
+      },
+      {
+        "command": "liberide.addFollowUp",
+        "title": "Add Follow-up Goal",
+        "category": "LiberIDE"
+      },
+      {
+        "command": "liberide.viewRunCost",
+        "title": "View Run Cost",
+        "category": "LiberIDE",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "liberide.refreshApprovals",
+        "title": "Refresh Approvals",
+        "category": "LiberIDE",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "liberide.revokeApprovalGrant",
+        "title": "Revoke Grant",
+        "category": "LiberIDE",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "liberide.selectActiveProject",
+        "title": "Select Active Project",
+        "category": "LiberIDE"
+      },
+      {
+        "command": "liberide.refreshMcpServers",
+        "title": "Refresh MCP Servers",
+        "category": "LiberIDE",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "liberide.enableMcpServer",
+        "title": "Enable MCP Server",
+        "category": "LiberIDE",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "liberide.disableMcpServer",
+        "title": "Disable MCP Server",
+        "category": "LiberIDE",
+        "icon": "$(circle-slash)"
       }
     ],
     "viewsContainers": {
@@ -247,6 +373,14 @@
         {
           "id": "liberide.runs",
           "name": "Agent Runs"
+        },
+        {
+          "id": "liberide.approvals",
+          "name": "Approvals & Permissions"
+        },
+        {
+          "id": "liberide.mcp",
+          "name": "MCP Servers"
         }
       ]
     },
@@ -281,6 +415,21 @@
         },
         {
           "command": "liberide.dispatchFeature"
+        },
+        {
+          "command": "liberide.attachSelection"
+        },
+        {
+          "command": "liberide.attachActiveFile"
+        },
+        {
+          "command": "liberide.attachFileToChat"
+        },
+        {
+          "command": "liberide.attachTerminalOutput"
+        },
+        {
+          "command": "liberide.attachGitDiff"
         }
       ],
       "view/title": [
@@ -343,6 +492,16 @@
           "command": "liberide.refreshRuns",
           "when": "view == liberide.runs",
           "group": "navigation"
+        },
+        {
+          "command": "liberide.refreshApprovals",
+          "when": "view == liberide.approvals",
+          "group": "navigation"
+        },
+        {
+          "command": "liberide.refreshMcpServers",
+          "when": "view == liberide.mcp",
+          "group": "navigation"
         }
       ],
       "view/item/context": [
@@ -370,6 +529,78 @@
           "command": "liberide.cancelRun",
           "when": "view == liberide.runs && viewItem == run",
           "group": "inline"
+        },
+        {
+          "command": "liberide.resolveApproval",
+          "when": "view == liberide.runs && viewItem == run-waiting",
+          "group": "inline"
+        },
+        {
+          "command": "liberide.cancelRun",
+          "when": "view == liberide.runs && viewItem == run-waiting",
+          "group": "inline"
+        },
+        {
+          "command": "liberide.retryRun",
+          "when": "view == liberide.runs && viewItem == run-terminal",
+          "group": "inline"
+        },
+        {
+          "command": "liberide.replayFromNode",
+          "when": "view == liberide.runs && viewItem == node",
+          "group": "inline"
+        },
+        {
+          "command": "liberide.viewArtifacts",
+          "when": "view == liberide.runs && viewItem == run-terminal",
+          "group": "inline"
+        },
+        {
+          "command": "liberide.viewArtifacts",
+          "when": "view == liberide.runs && viewItem == run",
+          "group": "inline"
+        },
+        {
+          "command": "liberide.viewWorkingMemory",
+          "when": "view == liberide.runs && viewItem =~ /^run/",
+          "group": "inspect@1"
+        },
+        {
+          "command": "liberide.addWorkingMemoryNote",
+          "when": "view == liberide.runs && viewItem =~ /^run/",
+          "group": "inspect@2"
+        },
+        {
+          "command": "liberide.addFollowUp",
+          "when": "view == liberide.runs && viewItem == run-terminal",
+          "group": "inspect@3"
+        },
+        {
+          "command": "liberide.viewRunCost",
+          "when": "view == liberide.runs && viewItem =~ /^run/",
+          "group": "inspect@4"
+        },
+        {
+          "command": "liberide.revokeApprovalGrant",
+          "when": "view == liberide.approvals && viewItem == approval-grant-active",
+          "group": "inline"
+        },
+        {
+          "command": "liberide.enableMcpServer",
+          "when": "view == liberide.mcp && viewItem == mcp-server-disabled",
+          "group": "inline"
+        },
+        {
+          "command": "liberide.disableMcpServer",
+          "when": "view == liberide.mcp && viewItem == mcp-server-enabled",
+          "group": "inline"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "liberide.attachSelection",
+          "when": "editorHasSelection",
+          "group": "liberide@1"
         }
       ]
     },

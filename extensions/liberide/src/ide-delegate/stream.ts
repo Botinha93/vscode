@@ -1,11 +1,12 @@
 import * as vscode from "vscode";
 import { hostname } from "node:os";
 import { bearerSubprotocols, getApiOrigin, getAuthToken, onAuthChanged, probeBackend, wsOrigin } from "../api";
-import type { IdeHelloParams, JsonRpcRequest } from "@nexus/shared";
-import { isJsonRpcRequest } from "@nexus/shared";
+import type { IdeHelloParams, IdeNotificationMethod, JsonRpcRequest } from "@nexus/shared";
+import { isJsonRpcNotification, isJsonRpcRequest } from "@nexus/shared";
 import type { IdeDelegateKind, IdeDelegatePayload } from "./types";
 import { dispatchIdeDelegate } from "./handlers";
 import { currentExtensionVersion, currentMachineId, setWorkspaceId } from "./machine";
+import { currentIdeUserId } from "./identity";
 import { OpLedger, type OpOutcome } from "./op-ledger";
 import { parseConversationOpenParams, requestConversationOpen } from "../chat/continuation";
 
@@ -15,6 +16,19 @@ const OUTBOX_LIMIT = 100;
 /** Server close codes: bad hello, revoked token/machine, machine revoked or token bound elsewhere. */
 const CLOSE_BAD_HELLO = 4400;
 const CLOSE_FORBIDDEN = 4403;
+
+/** Context attached to every server→IDE notification dispatched to handlers. */
+export interface IdeNotificationContext {
+  userId: string;
+  projectPath: string;
+  sessionId: string;
+}
+
+export type IdeNotificationHandler = (
+  method: IdeNotificationMethod,
+  params: Record<string, unknown>,
+  context: IdeNotificationContext,
+) => void;
 
 type StreamTarget = { userId: string; projectPath: string; sessionId: string; folderName: string };
 
@@ -43,6 +57,7 @@ export class IdeDelegateStream implements vscode.Disposable {
   constructor(
     private readonly target: StreamTarget,
     private readonly output?: vscode.OutputChannel,
+    private readonly onNotification?: IdeNotificationHandler,
   ) {
     this.offAuth = onAuthChanged(() => {
       if (this.closed) return;
@@ -233,9 +248,7 @@ export class IdeDelegateStream implements vscode.Disposable {
 
     if (!isJsonRpcRequest(parsed)) {
       const method = typeof parsed === "object" && parsed && "method" in parsed ? (parsed as { method?: string }).method : undefined;
-      if (method === "connected") {
-        this.log("IDE RPC handshake received");
-      } else if (method === "hello.ack") {
+      if (method === "hello.ack") {
         const workspaceId = (parsed as { params?: { workspaceId?: unknown } }).params?.workspaceId;
         if (typeof workspaceId === "string") {
           setWorkspaceId(this.target.projectPath, workspaceId);
@@ -255,10 +268,31 @@ export class IdeDelegateStream implements vscode.Disposable {
           controller.abort();
         }
       }
+      // Every notification (connected, tool.fallback, approval.pending, run.status, ...) also reaches the hooks.
+      if (isJsonRpcNotification(parsed)) {
+        this.dispatchNotification(parsed.method, parsed.params);
+      }
       return;
     }
 
     await this.handleRpcRequest(parsed);
+  }
+
+  private dispatchNotification(method: IdeNotificationMethod, rawParams: unknown): void {
+    const params = (rawParams && typeof rawParams === "object")
+      ? (rawParams as Record<string, unknown>)
+      : {};
+    if (method === "connected") {
+      this.log("IDE RPC handshake received");
+    } else if (method !== "hello.ack" && method !== "$/cancelRequest" && method !== "conversation.open") {
+      this.log(`notification: ${method}`);
+    }
+    try {
+      const { userId, projectPath, sessionId } = this.target;
+      this.onNotification?.(method, params, { userId, projectPath, sessionId });
+    } catch (err) {
+      this.log(`notification handler error: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   private async handleRpcRequest(request: JsonRpcRequest): Promise<void> {
@@ -311,7 +345,8 @@ export class IdeDelegateStream implements vscode.Disposable {
 
 function streamTarget(folder: vscode.WorkspaceFolder): StreamTarget {
   return {
-    userId: "default",
+    // Informational: the server authorizes with the authenticated token.
+    userId: currentIdeUserId(),
     projectPath: folder.uri.fsPath,
     sessionId: `vscode-${folder.name}`,
     folderName: folder.name,
@@ -320,9 +355,10 @@ function streamTarget(folder: vscode.WorkspaceFolder): StreamTarget {
 
 /**
  * Serve IDE delegate RPC for every workspace folder: one socket per folder,
- * added and disposed as folders come and go.
+ * added and disposed as folders come and go. Server→IDE notifications are
+ * forwarded to `onNotification`.
  */
-export function startIdeDelegateStream(output?: vscode.OutputChannel): vscode.Disposable {
+export function startIdeDelegateStream(output?: vscode.OutputChannel, onNotification?: IdeNotificationHandler): vscode.Disposable {
   const streams = new Map<string, IdeDelegateStream>();
 
   const sync = () => {
@@ -335,7 +371,7 @@ export function startIdeDelegateStream(output?: vscode.OutputChannel): vscode.Di
     }
     for (const [path, folder] of wanted) {
       if (streams.has(path)) continue;
-      const stream = new IdeDelegateStream(streamTarget(folder), output);
+      const stream = new IdeDelegateStream(streamTarget(folder), output, onNotification);
       streams.set(path, stream);
       stream.start();
     }

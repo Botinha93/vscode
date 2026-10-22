@@ -6,6 +6,7 @@ export type RoutingUnsatisfiedResolution = Extract<ModelRoutingResolution, { sta
 /** Server-side turn state persisted on assistant messages. */
 export type MessageTurnStatus = "failed" | "cancelled" | "awaiting_approval" | "resolved";
 export type { ModelCapability, ModelFeature, ModelOperation, ModelProfileV1, ModelSupport, Provider } from "@nexus/shared";
+import type { WorkspaceIntelligence } from "../workspace/intelligence";
 export type ConfiguredProvider = Provider | "ollama-internal";
 export type Role = "system" | "user" | "assistant" | "tool";
 export type ChatModelSelectionMode = "auto" | "manual";
@@ -132,6 +133,8 @@ export interface AppConfig {
 export interface IdeToolContextPayload {
   sessionId: string;
   userId: string;
+  ideUserId?: string;
+  ideSessionId?: string;
   projectPath: string;
   mode: "web" | "desktop";
   terminalExecutor?: "server" | "client";
@@ -140,6 +143,7 @@ export interface IdeToolContextPayload {
   delegateAvailable?: boolean;
   machineId?: string;
   workspaceId?: string;
+  workspaceIntelligence?: WorkspaceIntelligence;
 }
 
 export interface TerminalDelegateEvent {

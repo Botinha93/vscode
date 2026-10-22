@@ -5,6 +5,9 @@ var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __esm = (fn, res) => function __init() {
+  return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
+};
 var __export = (target, all) => {
   for (var name in all)
     __defProp(target, name, { get: all[name], enumerable: true });
@@ -27,6 +30,318 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
+// src/ide-delegate/handlers/path-containment.ts
+function isPathInside(root, candidate) {
+  const rel2 = path.relative(root, candidate);
+  return rel2 === "" || rel2 !== ".." && !rel2.startsWith(`..${path.sep}`) && !path.isAbsolute(rel2);
+}
+function resolveInsideRootSync(root, relative9, options = {}) {
+  if (relative9.includes("\0")) throw new Error("Path contains invalid characters");
+  if (path.isAbsolute(relative9) || /^[a-zA-Z]:[\\/]/.test(relative9)) {
+    throw new Error("Path must be relative to the workspace folder");
+  }
+  const base = path.resolve(root);
+  const full = path.resolve(base, relative9);
+  if (!isPathInside(base, full)) throw new Error("Path escapes the workspace folder");
+  assertNoSymlinkEscape(base, full, options);
+  return full;
+}
+function assertNoSymlinkEscape(base, full, options) {
+  if (!(0, import_node_fs3.existsSync)(base)) return;
+  const realBase = (0, import_node_fs3.realpathSync)(base);
+  const segments = path.relative(base, full).split(path.sep).filter(Boolean);
+  let current = base;
+  for (let i = 0; i < segments.length; i++) {
+    current = path.join(current, segments[i]);
+    let info;
+    try {
+      info = (0, import_node_fs3.lstatSync)(current, { throwIfNoEntry: false });
+    } catch {
+      break;
+    }
+    if (!info) break;
+    if (!info.isSymbolicLink()) continue;
+    if (options.forWrite && i === segments.length - 1) throw new Error("Refusing to write through a symbolic link");
+    let target;
+    try {
+      target = (0, import_node_fs3.realpathSync)(current);
+    } catch {
+      throw new Error("Path goes through a dangling symbolic link");
+    }
+    if (!isPathInside(realBase, target)) throw new Error("Path escapes the workspace folder");
+  }
+}
+function resolveContainedRelativePath(root, relative9) {
+  if (!root) throw new Error("No workspace folder open");
+  if (!relative9) throw new Error("Path is required");
+  if (relative9.includes("\0")) throw new Error("Path contains invalid characters");
+  if (path.isAbsolute(relative9) || /^[a-zA-Z]:[\\/]/.test(relative9)) {
+    throw new Error("Path must be relative to the project directory");
+  }
+  const rootPath = path.resolve(root);
+  const fullPath = path.resolve(rootPath, relative9);
+  const prefix = rootPath.endsWith(path.sep) ? rootPath : `${rootPath}${path.sep}`;
+  if (fullPath !== rootPath && !fullPath.startsWith(prefix)) {
+    throw new Error("Path escapes the allowed boundary");
+  }
+  assertNoSymlinkEscape(rootPath, fullPath, {});
+  return fullPath;
+}
+function assertContainedGlobPattern(pattern) {
+  if (pattern.includes("\0")) throw new Error("Path contains invalid characters");
+  if (path.isAbsolute(pattern) || /^[a-zA-Z]:[\\/]/.test(pattern)) {
+    throw new Error("Path must be relative to the project directory");
+  }
+  if (pattern.split(/[\\/]/).includes("..")) {
+    throw new Error("Path escapes the allowed boundary");
+  }
+  return pattern;
+}
+var path, import_node_fs3;
+var init_path_containment = __esm({
+  "src/ide-delegate/handlers/path-containment.ts"() {
+    "use strict";
+    path = __toESM(require("node:path"));
+    import_node_fs3 = require("node:fs");
+  }
+});
+
+// src/ide-delegate/handlers/delegate-context.ts
+function getDelegateRoot() {
+  return delegateContext.getStore()?.root;
+}
+function getDelegateConversationId() {
+  return delegateContext.getStore()?.conversationId;
+}
+var import_node_async_hooks, delegateContext;
+var init_delegate_context = __esm({
+  "src/ide-delegate/handlers/delegate-context.ts"() {
+    "use strict";
+    import_node_async_hooks = require("node:async_hooks");
+    delegateContext = new import_node_async_hooks.AsyncLocalStorage();
+  }
+});
+
+// src/ide-delegate/handlers/helpers.ts
+function withRequestRoot(root, run, conversationId) {
+  return delegateContext.run({ root, conversationId }, run);
+}
+function requestConversationId() {
+  return getDelegateConversationId();
+}
+function workspaceFolder() {
+  const folders = vscode6.workspace.workspaceFolders ?? [];
+  const root = getDelegateRoot();
+  if (root) {
+    const target = path2.resolve(root);
+    const match = folders.find((folder) => path2.resolve(folder.uri.fsPath) === target);
+    if (match) return match;
+  }
+  return folders[0];
+}
+function isInWorkspace(fsPath) {
+  const root = workspaceFolder()?.uri.fsPath;
+  if (!root) return false;
+  return isPathInside(root, fsPath);
+}
+function relativePath(fsPath) {
+  const root = workspaceFolder()?.uri.fsPath;
+  if (!root) return fsPath;
+  return path2.relative(root, fsPath).replace(/\\/g, "/") || fsPath;
+}
+async function resolveInsideRoot(root, relative9, options = {}) {
+  return resolveInsideRootSync(root, relative9, options);
+}
+function resolveFileUri(relative9) {
+  const folder = workspaceFolder();
+  if (!folder) throw new Error("No workspace folder open");
+  if (folder.uri.scheme !== "file") {
+    const normalized = path2.posix.normalize(relative9.replace(/\\/g, "/"));
+    if (normalized.startsWith("../") || normalized === ".." || path2.posix.isAbsolute(normalized)) {
+      throw new Error("Path escapes the workspace folder");
+    }
+    return vscode6.Uri.joinPath(folder.uri, normalized);
+  }
+  return vscode6.Uri.file(resolveInsideRootSync(folder.uri.fsPath, relative9));
+}
+function rangeFromPayload(payload) {
+  const startLine = Number(payload.startLine ?? payload.line ?? 1) - 1;
+  const startChar = Number(payload.startChar ?? payload.startCharacter ?? payload.character ?? 0);
+  const endLine = Number(payload.endLine ?? payload.line ?? 1) - 1;
+  const endChar = Number(payload.endChar ?? payload.endCharacter ?? payload.character ?? 0);
+  return new vscode6.Range(startLine, startChar, endLine, endChar);
+}
+function positionFromPayload(payload) {
+  return new vscode6.Position(Number(payload.line ?? 1) - 1, Number(payload.character ?? 0));
+}
+var vscode6, path2;
+var init_helpers = __esm({
+  "src/ide-delegate/handlers/helpers.ts"() {
+    "use strict";
+    vscode6 = __toESM(require("vscode"));
+    path2 = __toESM(require("node:path"));
+    init_delegate_context();
+    init_path_containment();
+    init_path_containment();
+    init_path_containment();
+  }
+});
+
+// src/ide-delegate/handlers/redaction.ts
+function isSecretFile(filePath) {
+  const base = path3.basename(filePath);
+  return SECRET_FILE_NAME.test(base) && !/\.(example|sample|template|dist)$/i.test(base);
+}
+function redactSecretFile(filePath, text) {
+  const base = path3.basename(filePath).toLowerCase();
+  let values = base.startsWith(".env") || base.endsWith(".npmrc") || base.endsWith(".pypirc") ? text.replace(/^(\s*(?:export\s+)?[\w.-]+\s*[=:]\s*)(\S.*)$/gm, "$1[REDACTED]") : text;
+  if (/\.(pem|key|p12|pfx|keystore|jks)$/.test(base) || /^id_/.test(base)) {
+    values = values.split("\n").map((line) => KEY_MATERIAL.test(line.trim()) ? "[REDACTED]" : line).join("\n");
+  }
+  for (const { pattern, replacement } of SENSITIVE_PATTERNS) values = values.replace(pattern, replacement);
+  return values;
+}
+function redactIfSecret(filePath, text) {
+  if (!isSecretFile(filePath)) return { text, redacted: false };
+  return { text: redactSecretFile(filePath, text), redacted: true };
+}
+function redactUnifiedDiff(diff, filePath) {
+  let secretPath = filePath && isSecretFile(filePath) ? filePath : void 0;
+  return diff.split("\n").map((line) => {
+    const header = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
+    if (header) {
+      secretPath = isSecretFile(header[2]) || isSecretFile(header[1]) ? header[2] : void 0;
+      return line;
+    }
+    if (!secretPath) return line;
+    if (/^(---|\+\+\+|@@|index |new file|deleted file|similarity|rename |old mode|new mode|Binary)/.test(line)) return line;
+    const prefix = line.slice(0, 1);
+    if (prefix !== "+" && prefix !== "-" && prefix !== " ") return line;
+    return prefix + redactSecretFile(secretPath, line.slice(1));
+  }).join("\n");
+}
+function countRedactionPlaceholders(text) {
+  return text.split("[REDACTED]").length - 1;
+}
+function assertNoRedactionPlaceholders(before, after, filePath) {
+  if (countRedactionPlaceholders(after) > countRedactionPlaceholders(before)) {
+    throw new Error(`Refusing to write '${filePath}': the new content contains [REDACTED] placeholders from a redacted read. Edit only the lines you need instead of rewriting redacted values.`);
+  }
+}
+var path3, SECRET_FILE_NAME, SENSITIVE_PATTERNS, KEY_MATERIAL;
+var init_redaction = __esm({
+  "src/ide-delegate/handlers/redaction.ts"() {
+    "use strict";
+    path3 = __toESM(require("node:path"));
+    SECRET_FILE_NAME = /^(\.env(\..*)?|\.npmrc|\.pypirc|\.netrc|\.git-credentials|credentials(\.json)?|secrets?\.(json|ya?ml|toml)|id_(rsa|dsa|ecdsa|ed25519)|.*\.(pem|key|p12|pfx|keystore|jks))$/i;
+    SENSITIVE_PATTERNS = [
+      { pattern: /((?:api[_-]?key|token|secret|password|passwd|pwd|credential))[=:][ ]*[\x27\x22]?([\w\-/=]+)[\x27\x22]?/gi, replacement: "$1=[REDACTED]" },
+      { pattern: /x-api-key[=:][ ]*[\x27\x22]?([^\s,\x27\x22]+)[\x27\x22]?/gi, replacement: "x-api-key=[REDACTED]" },
+      { pattern: /"(?:api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|password|secret|private[_-]?key)"\s*:\s*"[^"]+"/gi, replacement: '"[REDACTED]":"[REDACTED]"' },
+      { pattern: /Bearer[ ]+([\w.-]+)/gi, replacement: "Bearer [REDACTED]" },
+      { pattern: /Basic[ ]+([\w+/=]+)/gi, replacement: "Basic [REDACTED]" },
+      { pattern: /(?:https?|git):\/\/[^:]+:[^@]+@/gi, replacement: "https://[REDACTED]@" },
+      { pattern: /(-----BEGIN[ ]+(?:RSA|DSA|EC|OPENSSH)[ ]+PRIVATE[ ]+KEY-----)[\s\S]*?(-----END[ ]+(?:RSA|DSA|EC|OPENSSH)[ ]+PRIVATE[ ]+KEY-----)/gi, replacement: "$1 [REDACTED] $2" },
+      { pattern: /((?:aws_access_key_id|aws_secret_access_key))[=:][ ]*[\x27\x22]?([\w/+ =]+)[\x27\x22]?/gi, replacement: "$1=[REDACTED]" },
+      { pattern: /(postgresql|mysql|mongodb|redis):\/\/([^:]+):([^@]+)@/gi, replacement: "$1://$2:[REDACTED]@" }
+    ];
+    KEY_MATERIAL = /^[A-Za-z0-9+/=]{16,}$/;
+  }
+});
+
+// src/ide-delegate/handlers/git.ts
+var git_exports = {};
+__export(git_exports, {
+  handleGitBlame: () => handleGitBlame,
+  handleGitDiff: () => handleGitDiff,
+  handleGitLog: () => handleGitLog,
+  handleGitStatus: () => handleGitStatus
+});
+function isInside(root, candidate) {
+  const rel2 = path5.relative(root, candidate);
+  return rel2 === "" || rel2 !== ".." && !rel2.startsWith(`..${path5.sep}`) && !path5.isAbsolute(rel2);
+}
+async function getGitRepo(root) {
+  const ext = vscode10.extensions.getExtension("vscode.git");
+  if (!ext) throw new Error("vscode.git extension is not available");
+  if (!ext.isActive) await ext.activate();
+  const repos = ext.exports.getAPI(1).repositories.filter((r) => isInside(r.rootUri.fsPath, root) || isInside(root, r.rootUri.fsPath)).sort((a, b) => b.rootUri.fsPath.length - a.rootUri.fsPath.length);
+  const repo = repos.find((r) => isInside(r.rootUri.fsPath, root)) ?? repos[0];
+  if (!repo) throw new Error("No git repository found in workspace");
+  return repo;
+}
+function rel(fsPath, root) {
+  return path5.relative(root, fsPath).replace(/\\/g, "/");
+}
+function truncate(text, maxBytes) {
+  return text.length > maxBytes ? `${text.slice(0, maxBytes)}
+... [truncated]` : text;
+}
+async function handleGitStatus(root) {
+  const repo = await getGitRepo(root);
+  const repoRoot = repo.rootUri.fsPath;
+  const { state } = repo;
+  return {
+    branch: state.HEAD?.name ?? null,
+    commit: state.HEAD?.commit ?? null,
+    ahead: state.HEAD?.ahead ?? 0,
+    behind: state.HEAD?.behind ?? 0,
+    indexChanges: state.indexChanges.map((c) => ({ path: rel(c.uri.fsPath, repoRoot), status: c.status })),
+    workingTreeChanges: state.workingTreeChanges.map((c) => ({ path: rel(c.uri.fsPath, repoRoot), status: c.status })),
+    mergeChanges: state.mergeChanges.map((c) => ({ path: rel(c.uri.fsPath, repoRoot), status: c.status }))
+  };
+}
+async function handleGitLog(root, payload) {
+  const repo = await getGitRepo(root);
+  const maxCount = Math.max(1, Math.min(Number(payload.maxCount ?? 20), 200));
+  const relPath2 = payload.path ? String(payload.path) : void 0;
+  const commits = await repo.log({
+    maxEntries: maxCount,
+    ...relPath2 ? { path: resolveInsideRootSync(root, relPath2) } : {}
+  });
+  return {
+    commits: commits.map((c) => ({
+      hash: c.hash,
+      message: c.message,
+      author: c.authorName,
+      email: c.authorEmail,
+      date: c.authorDate ? new Date(c.authorDate).toISOString() : void 0
+    }))
+  };
+}
+async function handleGitDiff(root, payload) {
+  const repo = await getGitRepo(root);
+  const relPath2 = payload.path ? String(payload.path) : void 0;
+  const staged = payload.staged === true;
+  const maxBytes = Number(payload.maxBytes ?? 8e4);
+  let text;
+  if (relPath2) {
+    const full = resolveInsideRootSync(root, relPath2);
+    text = staged ? await repo.diffIndexWithHEAD(full) : await repo.diffWithHEAD(full);
+  } else {
+    text = await repo.diff(staged);
+  }
+  return { path: relPath2 ?? ".", staged, diff: truncate(redactUnifiedDiff(text ?? "", relPath2), maxBytes) };
+}
+async function handleGitBlame(root, payload) {
+  const repo = await getGitRepo(root);
+  const relPath2 = String(payload.path ?? "");
+  if (!relPath2) throw new Error("path is required");
+  const blame = await repo.blame(resolveInsideRootSync(root, relPath2));
+  const lines = (blame ?? "").split("\n").slice(0, 500);
+  return { path: relPath2, blame: lines.join("\n"), lineCount: lines.length };
+}
+var vscode10, path5;
+var init_git = __esm({
+  "src/ide-delegate/handlers/git.ts"() {
+    "use strict";
+    vscode10 = __toESM(require("vscode"));
+    path5 = __toESM(require("node:path"));
+    init_helpers();
+    init_redaction();
+  }
+});
+
 // src/extension.ts
 var extension_exports = {};
 __export(extension_exports, {
@@ -34,7 +349,7 @@ __export(extension_exports, {
   deactivate: () => deactivate
 });
 module.exports = __toCommonJS(extension_exports);
-var vscode36 = __toESM(require("vscode"));
+var vscode40 = __toESM(require("vscode"));
 
 // src/api.ts
 var import_node_fs = require("node:fs");
@@ -123,6 +438,8 @@ function backoffDelay(attempt, baseMs = 1e3, maxMs = 3e4) {
 var integrationPath;
 var cachedIntegration;
 var cachedIntegrationSource;
+var cachedIntegrationMtimeMs;
+var announcedToken;
 var refreshedAuth;
 var refreshTimer;
 var refreshInFlight;
@@ -140,10 +457,11 @@ function integrationCandidates() {
 }
 function initApiFromContext(context) {
   integrationPath = (0, import_node_path.join)(context.globalStorageUri.fsPath, "../../../libervox-integration.json");
-  cachedIntegration = void 0;
+  clearIntegrationCache();
+  announcedToken = getAuthToken();
   const watched = [...new Set(integrationCandidates())];
-  for (const path10 of watched) {
-    (0, import_node_fs.watchFile)(path10, { interval: WATCH_INTERVAL_MS, persistent: false }, (curr, prev) => {
+  for (const path11 of watched) {
+    (0, import_node_fs.watchFile)(path11, { interval: WATCH_INTERVAL_MS, persistent: false }, (curr, prev) => {
       if (curr.mtimeMs === prev.mtimeMs && curr.size === prev.size) return;
       reloadAuth();
       for (const listener of [...integrationListeners]) listener();
@@ -152,7 +470,7 @@ function initApiFromContext(context) {
   scheduleTokenRefresh();
   return {
     dispose: () => {
-      for (const path10 of watched) (0, import_node_fs.unwatchFile)(path10);
+      for (const path11 of watched) (0, import_node_fs.unwatchFile)(path11);
       if (refreshTimer) clearTimeout(refreshTimer);
       refreshTimer = void 0;
       authListeners.clear();
@@ -176,6 +494,7 @@ function getWebOrigin() {
   return typeof value === "string" && value ? value : void 0;
 }
 function notifyAuthChanged() {
+  announcedToken = getAuthToken();
   for (const listener of [...authListeners]) {
     try {
       listener();
@@ -185,7 +504,7 @@ function notifyAuthChanged() {
   }
 }
 function reloadAuth() {
-  const before = getAuthToken();
+  const before = announcedToken ?? getAuthToken();
   cachedIntegration = void 0;
   const next = loadIntegrationFile();
   if (refreshedAuth && next?.authToken && next.authToken !== refreshedAuth.token) refreshedAuth = void 0;
@@ -195,12 +514,14 @@ function reloadAuth() {
   return changed;
 }
 function loadIntegrationFile() {
-  if (cachedIntegration !== void 0) return cachedIntegration;
-  for (const path10 of integrationCandidates()) {
+  if (cachedIntegration !== void 0 && cachedSnapshotFresh()) return cachedIntegration;
+  for (const path11 of integrationCandidates()) {
     try {
-      if ((0, import_node_fs.existsSync)(path10)) {
-        cachedIntegration = JSON.parse((0, import_node_fs.readFileSync)(path10, "utf8"));
-        cachedIntegrationSource = path10;
+      if ((0, import_node_fs.existsSync)(path11)) {
+        const mtimeMs = (0, import_node_fs.statSync)(path11).mtimeMs;
+        cachedIntegration = JSON.parse((0, import_node_fs.readFileSync)(path11, "utf8"));
+        cachedIntegrationSource = path11;
+        cachedIntegrationMtimeMs = mtimeMs;
         return cachedIntegration;
       }
     } catch {
@@ -208,7 +529,21 @@ function loadIntegrationFile() {
   }
   cachedIntegration = null;
   cachedIntegrationSource = void 0;
+  cachedIntegrationMtimeMs = void 0;
   return null;
+}
+function cachedSnapshotFresh() {
+  if (!cachedIntegrationSource) return true;
+  try {
+    return (0, import_node_fs.statSync)(cachedIntegrationSource).mtimeMs === cachedIntegrationMtimeMs;
+  } catch {
+    return false;
+  }
+}
+function clearIntegrationCache() {
+  cachedIntegration = void 0;
+  cachedIntegrationSource = void 0;
+  cachedIntegrationMtimeMs = void 0;
 }
 function getApiOrigin() {
   const fromEnv = process.env.LIBERIDE_API_ORIGIN ?? process.env.CHATLLM_API_ORIGIN;
@@ -293,13 +628,14 @@ function refreshAuthToken() {
   })();
   return refreshInFlight;
 }
-function writeIntegrationFile(path10, snapshot) {
+function writeIntegrationFile(path11, snapshot) {
   const next = { ...snapshot, updatedAt: (/* @__PURE__ */ new Date()).toISOString() };
-  (0, import_node_fs.mkdirSync)((0, import_node_path.dirname)(path10), { recursive: true });
-  (0, import_node_fs.writeFileSync)(path10, JSON.stringify(next), { mode: 384 });
-  (0, import_node_fs.chmodSync)(path10, 384);
+  (0, import_node_fs.mkdirSync)((0, import_node_path.dirname)(path11), { recursive: true });
+  (0, import_node_fs.writeFileSync)(path11, JSON.stringify(next), { mode: 384 });
+  (0, import_node_fs.chmodSync)(path11, 384);
   cachedIntegration = next;
-  cachedIntegrationSource = path10;
+  cachedIntegrationSource = path11;
+  cachedIntegrationMtimeMs = (0, import_node_fs.statSync)(path11).mtimeMs;
 }
 var UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function getIntegrationMachineId() {
@@ -348,16 +684,25 @@ async function recoverFromUnauthorized() {
   if (reloadAuth()) return true;
   return refreshAuthToken();
 }
+function getIntegrationIdentity() {
+  const snapshot = loadIntegrationFile();
+  if (!snapshot?.userId) return void 0;
+  return {
+    id: snapshot.userId,
+    email: snapshot.userEmail,
+    name: snapshot.userName
+  };
+}
 function authHeaders(extra) {
   const headers = { "Content-Type": "application/json", ...extra ?? {} };
   const token = getAuthToken();
   if (token) headers.Authorization = `Bearer ${token}`;
   return headers;
 }
-async function apiFetch(path10, init) {
+async function apiFetch(path11, init) {
   const origin = getApiOrigin();
   if (!origin) throw new Error("LIBERIDE_API_ORIGIN is not set.");
-  const url2 = path10.startsWith("http") ? path10 : `${origin}${path10}`;
+  const url2 = path11.startsWith("http") ? path11 : `${origin}${path11}`;
   const isForm = typeof FormData !== "undefined" && init?.body instanceof FormData;
   const send = () => {
     const headers = { ...authHeaders(), ...init?.headers };
@@ -402,6 +747,11 @@ async function createAuthHandoff(next) {
   return readJson(
     await apiFetch("/api/auth/handoff", { method: "POST", body: JSON.stringify({ next }), signal: AbortSignal.timeout(5e3) })
   );
+}
+async function fetchAuthenticatedUser() {
+  const payload = await readJson(await apiFetch("/api/auth/me"));
+  if (!payload.user?.id) throw new Error("Authenticated user response did not include an id.");
+  return payload.user;
 }
 async function listConversations() {
   return readJson(await apiFetch("/api/conversations"));
@@ -541,6 +891,42 @@ function subscribeConversationListSync(onChange) {
     if (retryTimer) clearTimeout(retryTimer);
   };
 }
+async function listApprovalGrants(options) {
+  const params = new URLSearchParams();
+  if (options?.conversationId) params.set("conversationId", options.conversationId);
+  if (options?.scope) params.set("scope", options.scope);
+  if (options?.activeOnly) params.set("activeOnly", "true");
+  const qs = params.toString();
+  return readJson(await apiFetch(`/api/approval-grants${qs ? `?${qs}` : ""}`));
+}
+async function revokeApprovalGrant(id) {
+  await readNothing(
+    await apiFetch(`/api/approval-grants/${encodeURIComponent(id)}`, { method: "DELETE" })
+  );
+}
+async function listPermissionPolicies() {
+  const res = await apiFetch("/api/permission-policies");
+  if (res.status === 401 || res.status === 403) return { forbidden: true };
+  return { policies: await readJson(res) };
+}
+async function listMcpServers() {
+  return readJson(await apiFetch("/api/mcp/servers"));
+}
+async function setMcpServerEnabledForUser(id, enabled) {
+  await readNothing(
+    await apiFetch(`/api/mcp/servers/${encodeURIComponent(id)}/user`, {
+      method: "PATCH",
+      body: JSON.stringify({ enabled })
+    })
+  );
+}
+async function listExecutionGraphs(options) {
+  const params = new URLSearchParams();
+  if (options?.status) params.set("status", options.status);
+  if (options?.limit) params.set("limit", String(options.limit));
+  const qs = params.toString();
+  return readJson(await apiFetch(`/api/execution-graphs${qs ? `?${qs}` : ""}`));
+}
 
 // src/chat/continuation.ts
 var import_node_path2 = require("node:path");
@@ -617,14 +1003,14 @@ function takeStartupConversationRequest(snapshot, folders, now = Date.now()) {
 
 // src/panel/panel.ts
 var import_node_crypto2 = require("node:crypto");
-var vscode4 = __toESM(require("vscode"));
+var vscode5 = __toESM(require("vscode"));
 
 // src/spec/dag.ts
-function validateDag(tasks2) {
-  const ids = new Set(tasks2.map((task) => task.id));
-  const indegree = new Map(tasks2.map((task) => [task.id, 0]));
-  const adjacency = new Map(tasks2.map((task) => [task.id, []]));
-  for (const task of tasks2) {
+function validateDag(tasks3) {
+  const ids = new Set(tasks3.map((task) => task.id));
+  const indegree = new Map(tasks3.map((task) => [task.id, 0]));
+  const adjacency = new Map(tasks3.map((task) => [task.id, []]));
+  for (const task of tasks3) {
     for (const dep of task.dependsOn) {
       if (!ids.has(dep)) return { ok: false, order: [], error: `Task ${task.id} depends on unknown task ${dep}` };
       if (dep === task.id) return { ok: false, order: [], error: `Task ${task.id} cannot depend on itself` };
@@ -643,11 +1029,11 @@ function validateDag(tasks2) {
       if (degree === 0) queue.push(next);
     }
   }
-  return order.length === tasks2.length ? { ok: true, order } : { ok: false, order: [], error: "Task dependencies contain a cycle" };
+  return order.length === tasks3.length ? { ok: true, order } : { ok: false, order: [], error: "Task dependencies contain a cycle" };
 }
-function computeTaskReadiness(tasks2) {
-  const status = new Map(tasks2.map((task) => [task.id, task.status]));
-  return new Map(tasks2.map((task) => {
+function computeTaskReadiness(tasks3) {
+  const status = new Map(tasks3.map((task) => [task.id, task.status]));
+  return new Map(tasks3.map((task) => {
     const blockedBy = task.dependsOn.filter((dep) => status.get(dep) !== "completed");
     return [task.id, { ready: blockedBy.length === 0 && task.status !== "completed", blockedBy }];
   }));
@@ -658,10 +1044,10 @@ function effectiveStatus(task, readiness) {
   if (info?.blockedBy.length) return "blocked";
   return info?.ready ? "ready" : task.status;
 }
-function groupTasksByStatus(tasks2) {
-  const readiness = computeTaskReadiness(tasks2);
+function groupTasksByStatus(tasks3) {
+  const readiness = computeTaskReadiness(tasks3);
   const groups = { pending: [], ready: [], running: [], completed: [], blocked: [], failed: [] };
-  for (const task of tasks2) groups[effectiveStatus(task, readiness)].push(task);
+  for (const task of tasks3) groups[effectiveStatus(task, readiness)].push(task);
   return groups;
 }
 
@@ -681,8 +1067,8 @@ function taskInput(feature, task) {
   ].join("\n").slice(0, 2e3);
 }
 async function dispatchFeature(feature, options = {}) {
-  const tasks2 = options.taskIds?.length ? feature.tasks.filter((task) => options.taskIds.includes(task.id)) : feature.tasks;
-  const validation = validateDag(tasks2);
+  const tasks3 = options.taskIds?.length ? feature.tasks.filter((task) => options.taskIds.includes(task.id)) : feature.tasks;
+  const validation = validateDag(tasks3);
   if (!validation.ok) throw new Error(validation.error);
   const response = await apiFetch("/api/specs/dispatch", {
     method: "POST",
@@ -695,7 +1081,7 @@ async function dispatchFeature(feature, options = {}) {
       ...options.swarm ? { swarm: true, isolation: options.isolation ?? "shared" } : {},
       ...feature.documentation?.length ? { documentation: feature.documentation } : {},
       ...feature.blockers?.length ? { blockers: feature.blockers } : {},
-      nodes: tasks2.map((task) => ({
+      nodes: tasks3.map((task) => ({
         id: task.id,
         type: "IMPLEMENT",
         title: task.title,
@@ -775,7 +1161,9 @@ function subscribeExecutionGraphEvents(graphId, onEvent, options = {}) {
   };
   const fail = (message) => {
     if (closed) return;
+    options.log?.(`graph ${graphId}: ${message}`);
     options.onError?.(message, false);
+    options.onDisconnect?.();
     stop();
   };
   const scheduleReconnect = (reason) => {
@@ -784,6 +1172,7 @@ function subscribeExecutionGraphEvents(graphId, onEvent, options = {}) {
       fail(`Lost the graph event stream: ${reason}`);
       return;
     }
+    options.log?.(`graph ${graphId}: reconnecting (${reason})`);
     options.onError?.(reason, true);
     retryTimer = setTimeout(() => {
       retryTimer = null;
@@ -860,9 +1249,100 @@ async function cancelExecutionGraph(graphId) {
     throw new Error(err.error ?? response.statusText);
   }
 }
+async function fetchGraphDetail(graphId) {
+  const res = await apiFetch(`/api/execution-graphs/${graphId}/detail`);
+  if (!res.ok) throw new Error(`Failed to load graph detail: ${res.status} ${res.statusText}`);
+  const detail = await res.json();
+  return { nodes: detail.nodes ?? [], approvals: detail.approvals ?? [] };
+}
+async function resolveNodeApproval(graphId, nodeId, decision, note) {
+  const res = await apiFetch(`/api/execution-graphs/${graphId}/nodes/${encodeURIComponent(nodeId)}/approval`, {
+    method: "POST",
+    body: JSON.stringify({ decision, note })
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(body.error ?? `Approval failed: ${res.status}`);
+  }
+}
+async function getWorkingMemory(graphId) {
+  const res = await apiFetch(`/api/execution-graphs/${graphId}/working-memory`);
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(body.error ?? `Failed to load working memory: ${res.status}`);
+  }
+  return await res.json();
+}
+async function patchWorkingMemory(graphId, patch) {
+  const res = await apiFetch(`/api/execution-graphs/${graphId}/working-memory`, {
+    method: "PATCH",
+    body: JSON.stringify(patch)
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(body.error ?? `Failed to update working memory: ${res.status}`);
+  }
+}
+async function addFollowUp(graphId, additionalGoal) {
+  const res = await apiFetch(`/api/execution-graphs/${graphId}/follow-up`, {
+    method: "POST",
+    body: JSON.stringify({ additionalGoal })
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(body.error ?? `Follow-up failed: ${res.status}`);
+  }
+}
+async function getGraphMetrics(graphId) {
+  const res = await apiFetch(`/api/execution-graphs/${graphId}/metrics`);
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(body.error ?? `Failed to load metrics: ${res.status}`);
+  }
+  return await res.json();
+}
+async function listGraphArtifacts(graphId) {
+  const res = await apiFetch(`/api/execution-graphs/${graphId}/artifacts`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(body.error ?? `Failed to list artifacts: ${res.status}`);
+  }
+  return await res.json();
+}
+async function retryGraph(graphId) {
+  const res = await apiFetch(`/api/execution-graphs/${graphId}/retry`, { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(body.error ?? `Retry failed: ${res.status}`);
+  }
+}
+async function replayFromNode(graphId, nodeId, reason) {
+  const res = await apiFetch(`/api/execution-graphs/${graphId}/replay-from/${encodeURIComponent(nodeId)}`, {
+    method: "POST",
+    body: JSON.stringify({ reason: reason ?? "manual_replay" })
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(body.error ?? `Replay failed: ${res.status}`);
+  }
+  const out = await res.json();
+  return out.replayed ?? 0;
+}
+async function resolveGraphApproval(graphId, approvalId, status, response) {
+  const res = await apiFetch(`/api/execution-graphs/${graphId}/approvals/${encodeURIComponent(approvalId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ status, response })
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(body.error ?? `Approval failed: ${res.status}`);
+  }
+}
 
 // src/ide-delegate/context.ts
-var vscode = __toESM(require("vscode"));
+var vscode2 = __toESM(require("vscode"));
 
 // src/ide-delegate/machine.ts
 var import_node_crypto = require("node:crypto");
@@ -898,33 +1378,178 @@ function workspaceIdFor(rootPath) {
   return workspaceIds.get(rootPath);
 }
 
+// src/ide-delegate/identity.ts
+var FALLBACK_USER_ID = "default";
+var cachedIdentity = getIntegrationIdentity();
+var warnedFallback = false;
+function currentIdeIdentity() {
+  return cachedIdentity ?? { id: FALLBACK_USER_ID };
+}
+function currentIdeUserId() {
+  return currentIdeIdentity().id || FALLBACK_USER_ID;
+}
+async function refreshIdeIdentity(log) {
+  const integrationIdentity = getIntegrationIdentity();
+  if (integrationIdentity?.id) cachedIdentity = integrationIdentity;
+  try {
+    const user = await fetchAuthenticatedUser();
+    cachedIdentity = user;
+    warnedFallback = false;
+    return user;
+  } catch (err) {
+    if (!cachedIdentity) {
+      cachedIdentity = { id: FALLBACK_USER_ID };
+      if (!warnedFallback) {
+        warnedFallback = true;
+        log?.(`Using fallback IDE identity "${FALLBACK_USER_ID}": ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    return cachedIdentity;
+  }
+}
+
+// src/workspace/intelligence.ts
+var vscode = __toESM(require("vscode"));
+var import_node_fs2 = require("node:fs");
+var import_node_path3 = require("node:path");
+var cache = /* @__PURE__ */ new Map();
+var watcherRegistered = false;
+function detectPackageManager(root) {
+  if ((0, import_node_fs2.existsSync)((0, import_node_path3.join)(root, "bun.lock"))) return "bun";
+  if ((0, import_node_fs2.existsSync)((0, import_node_path3.join)(root, "pnpm-lock.yaml"))) return "pnpm";
+  if ((0, import_node_fs2.existsSync)((0, import_node_path3.join)(root, "yarn.lock"))) return "yarn";
+  if ((0, import_node_fs2.existsSync)((0, import_node_path3.join)(root, "package-lock.json"))) return "npm";
+  if ((0, import_node_fs2.existsSync)((0, import_node_path3.join)(root, "Cargo.toml"))) return "cargo";
+  if ((0, import_node_fs2.existsSync)((0, import_node_path3.join)(root, "pyproject.toml"))) return "python";
+  return void 0;
+}
+function detectPackageScripts(root) {
+  const packageJson = (0, import_node_path3.join)(root, "package.json");
+  if (!(0, import_node_fs2.existsSync)(packageJson)) return {};
+  try {
+    const pkg = JSON.parse((0, import_node_fs2.readFileSync)(packageJson, "utf8"));
+    const scripts = pkg.scripts ?? {};
+    return {
+      test: scripts.test ? "npm test" : void 0,
+      build: scripts.build ? "npm run build" : void 0,
+      typecheck: scripts.typecheck ? "npm run typecheck" : scripts.check ? "npm run check" : void 0,
+      lint: scripts.lint ? "npm run lint" : void 0
+    };
+  } catch {
+    return {};
+  }
+}
+function detectRootMarkers(root) {
+  return [
+    "package.json",
+    "tsconfig.json",
+    "pyproject.toml",
+    "Cargo.toml",
+    "go.mod",
+    ".git",
+    ".vscode/tasks.json",
+    ".chatllm/diagnostics.json"
+  ].filter((marker) => (0, import_node_fs2.existsSync)((0, import_node_path3.join)(root, marker)));
+}
+function detectInstructionFiles(root) {
+  return ["AGENTS.md", "README.md", "CONTRIBUTING.md", ".github/copilot-instructions.md"].filter(
+    (file2) => (0, import_node_fs2.existsSync)((0, import_node_path3.join)(root, file2))
+  );
+}
+async function detectGit(root) {
+  const ext = vscode.extensions.getExtension("vscode.git");
+  if (!ext) return void 0;
+  if (!ext.isActive) await ext.activate();
+  const api = ext.exports?.getAPI?.(1);
+  const repo = api?.repositories?.find((r) => r.rootUri?.fsPath === root);
+  if (!repo) return void 0;
+  return {
+    branch: repo.state?.HEAD?.name,
+    remoteUrl: repo.state?.remotes?.[0]?.fetchUrl ?? repo.state?.remotes?.[0]?.pushUrl
+  };
+}
+async function detectTasks() {
+  try {
+    const tasks3 = await vscode.tasks.fetchTasks();
+    return tasks3.slice(0, 25).map((task) => ({
+      name: task.name,
+      source: String(task.source),
+      group: task.group?.id
+    }));
+  } catch {
+    return [];
+  }
+}
+function detectLanguages() {
+  const languages3 = /* @__PURE__ */ new Set();
+  for (const editor of vscode.window.visibleTextEditors) {
+    if (editor.document.languageId) languages3.add(editor.document.languageId);
+  }
+  return [...languages3].slice(0, 20);
+}
+async function refreshWorkspaceIntelligence(output) {
+  if (!watcherRegistered) {
+    watcherRegistered = true;
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      void refreshWorkspaceIntelligence(output);
+    });
+    vscode.window.onDidChangeVisibleTextEditors(() => {
+      void refreshWorkspaceIntelligence(output);
+    });
+  }
+  for (const folder of vscode.workspace.workspaceFolders ?? []) {
+    const root = folder.uri.fsPath;
+    try {
+      cache.set(root, {
+        rootPath: root,
+        packageManager: detectPackageManager(root),
+        languages: detectLanguages(),
+        rootMarkers: detectRootMarkers(root),
+        git: await detectGit(root),
+        tasks: await detectTasks(),
+        commands: detectPackageScripts(root),
+        instructionFiles: detectInstructionFiles(root),
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      });
+    } catch (err) {
+      output?.appendLine(`[workspace] failed to refresh ${root}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+}
+function getWorkspaceIntelligence(rootPath) {
+  return cache.get(rootPath);
+}
+
 // src/ide-delegate/context.ts
 function activeWorkspaceFolder() {
-  const active = vscode.window.activeTextEditor?.document.uri;
-  return (active && vscode.workspace.getWorkspaceFolder(active)) ?? vscode.workspace.workspaceFolders?.[0];
+  const active = vscode2.window.activeTextEditor?.document.uri;
+  return (active && vscode2.workspace.getWorkspaceFolder(active)) ?? vscode2.workspace.workspaceFolders?.[0];
 }
 function buildIdeContextPayload(conversationId) {
   const folder = activeWorkspaceFolder();
   if (!folder) return void 0;
   return {
     sessionId: `vscode-${folder.name}`,
-    // Ignored by the server (it uses the authenticated user); kept for the payload type.
-    userId: "",
+    // The server authorizes with the authenticated user; these are informational.
+    userId: currentIdeUserId(),
+    ideUserId: currentIdeUserId(),
+    ideSessionId: `vscode-${folder.name}`,
     projectPath: folder.uri.fsPath,
     mode: "desktop",
     terminalExecutor: "client",
     conversationId,
     // Lets the server pin tool calls to this machine's window for the folder.
     machineId: currentMachineId(),
-    workspaceId: workspaceIdFor(folder.uri.fsPath)
+    workspaceId: workspaceIdFor(folder.uri.fsPath),
+    workspaceIntelligence: getWorkspaceIntelligence(folder.uri.fsPath)
   };
 }
 
 // src/settings.ts
-var vscode2 = __toESM(require("vscode"));
+var vscode3 = __toESM(require("vscode"));
 var SECTION = "liberide";
 function readSettings() {
-  const cfg = vscode2.workspace.getConfiguration(SECTION);
+  const cfg = vscode3.workspace.getConfiguration(SECTION);
   return {
     modelSelection: cfg.get("modelSelection") ?? "auto",
     chatMode: "agent",
@@ -935,7 +1560,9 @@ function readSettings() {
     copilotModelsEnabled: cfg.get("copilot.modelsEnabled") ?? true,
     defaultAllowedAgentIds: cfg.get("defaultAllowedAgentIds") ?? [],
     swarm: cfg.get("swarm") ?? false,
-    isolation: cfg.get("isolation") ?? "shared"
+    isolation: cfg.get("isolation") ?? "shared",
+    confirmEdits: cfg.get("confirmEdits") ?? "off",
+    dispatchSkipPreview: cfg.get("dispatch.skipPreview") ?? false
   };
 }
 var FLAT_TO_DOTTED = {
@@ -944,16 +1571,16 @@ var FLAT_TO_DOTTED = {
 };
 async function writeSetting(key, value) {
   const dotted = FLAT_TO_DOTTED[key] ?? key;
-  await vscode2.workspace.getConfiguration(SECTION).update(dotted, value, vscode2.ConfigurationTarget.Global);
+  await vscode3.workspace.getConfiguration(SECTION).update(dotted, value, vscode3.ConfigurationTarget.Global);
 }
 function onSettingsChange(listener) {
-  return vscode2.workspace.onDidChangeConfiguration((event) => {
+  return vscode3.workspace.onDidChangeConfiguration((event) => {
     if (event.affectsConfiguration(SECTION)) listener(readSettings());
   });
 }
 
 // src/spec/writer.ts
-var vscode3 = __toESM(require("vscode"));
+var vscode4 = __toESM(require("vscode"));
 
 // src/spec/schema.ts
 var TASK_STATUSES = /* @__PURE__ */ new Set(["pending", "ready", "running", "completed", "blocked", "failed"]);
@@ -1083,10 +1710,10 @@ function parseBlockerItems(markdown) {
 
 // src/spec/writer.ts
 async function readTextFile(uri) {
-  return Buffer.from(await vscode3.workspace.fs.readFile(uri)).toString("utf8");
+  return Buffer.from(await vscode4.workspace.fs.readFile(uri)).toString("utf8");
 }
 async function writeTextFile(uri, content) {
-  await vscode3.workspace.fs.writeFile(uri, Buffer.from(content, "utf8"));
+  await vscode4.workspace.fs.writeFile(uri, Buffer.from(content, "utf8"));
 }
 var BLOCK_KEYS = /* @__PURE__ */ new Set(["architecture_hints"]);
 function serializeFrontmatter(data) {
@@ -1135,28 +1762,29 @@ ${task.body}
 }
 async function scaffoldFeature(folder, featureName) {
   const slug = featureName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "new-feature";
-  const root = vscode3.Uri.joinPath(folder.uri, ".liberide", "specs", slug);
-  const tasks2 = vscode3.Uri.joinPath(root, "tasks");
-  await vscode3.workspace.fs.createDirectory(tasks2);
-  await vscode3.workspace.fs.createDirectory(vscode3.Uri.joinPath(root, "runs"));
-  await writeTextFile(vscode3.Uri.joinPath(root, "runs", ".gitignore"), "*\n!.gitignore\n");
-  await writeTextFile(vscode3.Uri.joinPath(root, "feature.md"), `# ${featureName}
+  const root = vscode4.Uri.joinPath(folder.uri, ".liberide", "specs", slug);
+  const tasks3 = vscode4.Uri.joinPath(root, "tasks");
+  await vscode4.workspace.fs.createDirectory(tasks3);
+  await vscode4.workspace.fs.createDirectory(vscode4.Uri.joinPath(root, "runs"));
+  await writeTextFile(vscode4.Uri.joinPath(root, "runs", ".gitignore"), "*\n!.gitignore\n");
+  await writeTextFile(vscode4.Uri.joinPath(root, "feature.md"), `# ${featureName}
 
 status: draft
 `);
-  await writeTextFile(vscode3.Uri.joinPath(root, "requirements.md"), "# Requirements\n\n## R-1 Overview\n\n");
-  await writeTextFile(vscode3.Uri.joinPath(root, "design.md"), "# Design\n\n## D-1 Architecture\n\n");
-  await writeTextFile(vscode3.Uri.joinPath(tasks2, "index.md"), regenerateTasksIndex([]));
+  await writeTextFile(vscode4.Uri.joinPath(root, "requirements.md"), "# Requirements\n\n## R-1 Overview\n\n");
+  await writeTextFile(vscode4.Uri.joinPath(root, "design.md"), "# Design\n\n## D-1 Architecture\n\n");
+  await writeTextFile(vscode4.Uri.joinPath(tasks3, "index.md"), regenerateTasksIndex([]));
   return root;
 }
-function regenerateTasksIndex(tasks2) {
+function regenerateTasksIndex(tasks3) {
   const header = "# Tasks\n\n| ID | Title | Status | Depends on | Requirements | Design |\n|----|-------|--------|------------|--------------|--------|\n";
-  return header + tasks2.map(
+  return header + tasks3.map(
     (t) => `| ${t.id} | ${t.title} | ${t.status} | ${t.dependsOn.join(", ") || "-"} | ${t.requirementRefs.join(", ") || "-"} | ${t.designRefs.join(", ") || "-"} |`
   ).join("\n") + "\n";
 }
 
 // src/panel/panel.ts
+init_path_containment();
 var LiberidePipelineController = class _LiberidePipelineController {
   constructor(context, store2, output, runsTree) {
     this.context = context;
@@ -1172,6 +1800,9 @@ var LiberidePipelineController = class _LiberidePipelineController {
   view;
   disposables = [];
   graphs = /* @__PURE__ */ new Map();
+  /** Dedup approval prompts per `${graphId}:${nodeId}` (SSE replays node_status on reconnect). */
+  promptedApprovals = /* @__PURE__ */ new Set();
+  disposed = false;
   resolveWebviewView(view) {
     this.view = view;
     this.bindWebview(view.webview);
@@ -1182,9 +1813,10 @@ var LiberidePipelineController = class _LiberidePipelineController {
     });
   }
   show() {
-    void vscode4.commands.executeCommand(`${_LiberidePipelineController.viewType}.focus`);
+    void vscode5.commands.executeCommand(`${_LiberidePipelineController.viewType}.focus`);
   }
   dispose() {
+    this.disposed = true;
     for (const d of this.disposables) d.dispose();
     for (const g of this.graphs.values()) g.dispose();
     this.graphs.clear();
@@ -1194,8 +1826,8 @@ var LiberidePipelineController = class _LiberidePipelineController {
       enableScripts: true,
       retainContextWhenHidden: true,
       localResourceRoots: [
-        vscode4.Uri.joinPath(this.context.extensionUri, "media"),
-        vscode4.Uri.joinPath(this.context.extensionUri, "resources")
+        vscode5.Uri.joinPath(this.context.extensionUri, "media"),
+        vscode5.Uri.joinPath(this.context.extensionUri, "resources")
       ]
     };
   }
@@ -1208,15 +1840,17 @@ var LiberidePipelineController = class _LiberidePipelineController {
     this.disposables.push(sub);
   }
   broadcast(message) {
+    if (this.disposed) return;
     this.view?.webview.postMessage(message);
   }
   broadcastFeatures() {
     const features = this.featureSummaries();
     const active = this.store.getActiveFeature();
+    const readiness = active ? computeTaskReadiness(active.tasks) : void 0;
     this.broadcast({
       type: "features",
       features,
-      activeFeature: active ? { id: active.id, tasks: active.tasks.map((t) => this.taskSummary(t)) } : void 0
+      activeFeature: active ? { id: active.id, tasks: active.tasks.map((t) => this.taskSummary(t, readiness?.get(t.id)?.blockedBy ?? [])) } : void 0
     });
   }
   featureSummaries() {
@@ -1231,8 +1865,9 @@ var LiberidePipelineController = class _LiberidePipelineController {
       active: feature.id === active?.id
     }));
   }
-  taskSummary(task) {
-    return { id: task.id, title: task.title, status: task.status, dependsOn: task.dependsOn, agent: task.agent };
+  taskSummary(task, blockedBy) {
+    const status = blockedBy.length > 0 && task.status === "pending" ? "blocked" : task.status;
+    return { id: task.id, title: task.title, status, dependsOn: task.dependsOn, agent: task.agent, blockedBy };
   }
   async handleMessage(webview, message) {
     try {
@@ -1258,17 +1893,34 @@ var LiberidePipelineController = class _LiberidePipelineController {
           await this.dispatch(message.featureId, message.taskIds);
           break;
         case "cancelGraph": {
-          const choice = await vscode4.window.showWarningMessage(`Cancel ${message.label ?? message.graphId}?`, { modal: true }, "Cancel Run");
+          const choice = await vscode5.window.showWarningMessage(`Cancel ${message.label ?? message.graphId}?`, { modal: true }, "Cancel Run");
           if (choice === "Cancel Run") await this.cancel(message.graphId);
           break;
         }
+        case "inspectRun":
+        case "refreshInspector":
+          await this.inspectGraph(message.graphId, message.nodeId);
+          break;
+        case "resolveApproval":
+          await resolveGraphApproval(message.graphId, message.approvalId, message.status, message.response);
+          await this.inspectGraph(message.graphId);
+          break;
+        case "openArtifact":
+          await this.openArtifactById(message.graphId, message.artifactId);
+          break;
+        case "openDiff":
+          await this.openWorkspaceFile(message.path);
+          break;
+        case "revertEditedFile":
+          await this.revertFile(message.path);
+          break;
         case "openTask": {
           const task = this.store.getTask(message.featureId, message.taskId);
-          if (task) await vscode4.window.showTextDocument(task.filePath);
+          if (task) await vscode5.window.showTextDocument(task.filePath);
           break;
         }
         case "openChat":
-          await vscode4.commands.executeCommand("liberide.openChat");
+          await vscode5.commands.executeCommand("liberide.openChat");
           break;
       }
     } catch (error51) {
@@ -1280,7 +1932,7 @@ var LiberidePipelineController = class _LiberidePipelineController {
   }
   async scaffold(name) {
     this.broadcast({ type: "operation", action: "scaffold", status: "running" });
-    const folder = vscode4.workspace.workspaceFolders?.[0];
+    const folder = vscode5.workspace.workspaceFolders?.[0];
     if (!folder) {
       const message = "Open a workspace folder to scaffold a feature.";
       this.broadcast({ type: "operation", action: "scaffold", status: "error", message });
@@ -1303,8 +1955,26 @@ var LiberidePipelineController = class _LiberidePipelineController {
       this.broadcast({ type: "log", message, severity: "error" });
       return;
     }
-    const tasks2 = taskIds?.length ? feature.tasks.filter((t) => taskIds.includes(t.id)) : feature.tasks;
-    const validation = validateDag(tasks2);
+    const candidateTasks = taskIds?.length ? feature.tasks.filter((t) => taskIds.includes(t.id)) : feature.tasks;
+    const settings = readSettings();
+    let selectedIds = candidateTasks.map((t) => t.id);
+    if (!settings.dispatchSkipPreview) {
+      const confirmed = await this.previewDispatchPlan(feature, candidateTasks);
+      if (!confirmed) {
+        this.broadcast({ type: "operation", action: "dispatch", status: "success", message: "Dispatch cancelled." });
+        this.broadcast({ type: "log", message: "Dispatch cancelled.", severity: "info" });
+        return;
+      }
+      selectedIds = confirmed;
+    }
+    const tasks3 = feature.tasks.filter((t) => selectedIds.includes(t.id));
+    if (tasks3.length === 0) {
+      const message = "No tasks selected to dispatch.";
+      this.broadcast({ type: "operation", action: "dispatch", status: "error", message });
+      this.broadcast({ type: "log", message, severity: "warning" });
+      return;
+    }
+    const validation = validateDag(tasks3);
     if (!validation.ok) {
       const message = `Cannot dispatch: ${validation.error}`;
       this.broadcast({ type: "operation", action: "dispatch", status: "error", message });
@@ -1312,10 +1982,9 @@ var LiberidePipelineController = class _LiberidePipelineController {
       return;
     }
     const readiness = computeTaskReadiness(feature.tasks);
-    const settings = readSettings();
     const ideContext = buildIdeContextPayload();
     const result = await dispatchFeature(feature, {
-      taskIds,
+      taskIds: selectedIds,
       ideContext: ideContext ? { ...ideContext } : void 0,
       swarm: settings.swarm,
       isolation: settings.isolation
@@ -1324,36 +1993,378 @@ var LiberidePipelineController = class _LiberidePipelineController {
       graphId: result.graphId,
       featureId: feature.id,
       label: taskIds?.length ? `${feature.name} / ${taskIds.join(", ")}` : feature.name,
-      nodes: tasks2.map((task) => ({
+      nodes: tasks3.map((task) => ({
         id: task.id,
         label: `${task.id} \xB7 ${task.title}`,
-        dependsOn: task.dependsOn
+        dependsOn: task.dependsOn,
+        parallelKey: task.agent
       }))
     };
     this.broadcast({ type: "graphStart", payload: startEvent });
-    this.runsTree.trackRun(result.graphId, feature.id, startEvent.label, tasks2.map((task) => task.id));
-    for (const task of tasks2) {
+    this.runsTree.trackRun(result.graphId, feature.id, startEvent.label, tasks3.map((task) => task.id));
+    for (const task of tasks3) {
       const ready = readiness.get(task.id);
       this.broadcast({
         type: "graphNode",
         payload: { graphId: result.graphId, nodeId: task.id, status: ready?.blockedBy.length ? "blocked" : "queued" }
       });
     }
-    const dispose = subscribeExecutionGraphEvents(result.graphId, (event) => {
-      const update = taskStatusFromEvent(event, result.graphId);
+    this.subscribeToGraph(result.graphId);
+    this.broadcast({ type: "operation", action: "dispatch", status: "success", message: `Dispatched ${startEvent.label}.` });
+  }
+  /**
+   * Show a plan preview before queuing a dispatch: a multi-select QuickPick of
+   * the tasks (all pre-selected) so the user can deselect tasks, confirm, or
+   * cancel. Returns the selected task ids, or undefined when cancelled.
+   * Bypassed when `liberide.dispatch.skipPreview` is enabled.
+   */
+  async previewDispatchPlan(feature, candidateTasks) {
+    const items = candidateTasks.map((task) => ({
+      taskId: task.id,
+      label: `${task.id} \xB7 ${task.title}`,
+      description: task.agent ? `agent: ${task.agent}` : void 0,
+      detail: task.dependsOn.length ? `depends on: ${task.dependsOn.join(", ")}` : "no dependencies",
+      picked: true
+    }));
+    const picked = await vscode5.window.showQuickPick(items, {
+      title: `Dispatch plan \u2014 ${feature.name} (${candidateTasks.length} task${candidateTasks.length === 1 ? "" : "s"})`,
+      placeHolder: "Review the plan. Deselect tasks to exclude, confirm to dispatch, or press Esc to cancel.",
+      canPickMany: true,
+      ignoreFocusOut: true
+    });
+    if (!picked) return void 0;
+    return picked.map((item) => item.taskId);
+  }
+  /**
+   * Subscribe to an execution graph's event stream and bridge it to the webview,
+   * approval prompts, and disconnect surfacing (task files are written back by
+   * the runs tree). Reused by
+   * dispatch, retry, and replay. Replaces any prior subscription for the graph.
+   */
+  subscribeToGraph(graphId) {
+    this.graphs.get(graphId)?.dispose();
+    const dispose = subscribeExecutionGraphEvents(graphId, (event) => {
+      if (this.disposed) return;
+      if (event.type === "node_status" && event.nodeId && event.status === "waiting_approval") {
+        void this.promptApproval(graphId, event.nodeId);
+      }
+      const update = taskStatusFromEvent(event, graphId);
       if (update) {
         const { taskId, status, error: error51 } = update;
-        this.broadcast({ type: "graphNode", payload: { graphId: result.graphId, nodeId: taskId, status, ...error51 ? { error: error51 } : {} } });
+        this.broadcast({ type: "graphNode", payload: { graphId, nodeId: taskId, status, ...error51 ? { error: error51 } : {} } });
         if (error51) this.broadcast({ type: "log", message: `${taskId} failed: ${error51}`, severity: "error" });
       }
       if (event.type === "done" && event.status) {
-        this.broadcast({ type: "graphDone", payload: { graphId: result.graphId, status: event.status } });
-        this.graphs.get(result.graphId)?.dispose();
-        this.graphs.delete(result.graphId);
+        this.broadcast({ type: "graphDone", payload: { graphId, status: event.status } });
+        this.graphs.get(graphId)?.dispose();
+        this.graphs.delete(graphId);
+      }
+    }, {
+      log: (message) => this.output.appendLine(`[pipeline.sse] ${message}`),
+      onDisconnect: () => {
+        if (this.disposed) return;
+        this.broadcast({ type: "graphDone", payload: { graphId, status: "disconnected" } });
+        this.broadcast({ type: "log", message: `Lost connection to run ${graphId}; it may still be running on the server.`, severity: "warning" });
       }
     });
-    this.graphs.set(result.graphId, { graphId: result.graphId, dispose });
-    this.broadcast({ type: "operation", action: "dispatch", status: "success", message: `Dispatched ${startEvent.label}.` });
+    this.graphs.set(graphId, { graphId, dispose });
+  }
+  /** Retry a failed/cancelled run: re-queues failed nodes and re-attaches the event stream. */
+  async retryRun(graphId) {
+    const meta3 = this.runsTree.getRunMeta(graphId);
+    try {
+      await retryGraph(graphId);
+      if (meta3) this.runsTree.trackRun(graphId, meta3.featureId, meta3.label, meta3.nodeIds);
+      this.subscribeToGraph(graphId);
+      this.broadcast({ type: "log", message: `Retrying run ${graphId}.`, severity: "info" });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.output.appendLine(`[pipeline.retry] ${msg}`);
+      void vscode5.window.showErrorMessage(`Retry failed: ${msg}`);
+    }
+  }
+  /** Replay a node and its downstream dependents, re-attaching the event stream. */
+  async replayFromNode(graphId, nodeId) {
+    const meta3 = this.runsTree.getRunMeta(graphId);
+    try {
+      const count = await replayFromNode(graphId, nodeId);
+      if (meta3) this.runsTree.trackRun(graphId, meta3.featureId, meta3.label, meta3.nodeIds);
+      this.subscribeToGraph(graphId);
+      this.broadcast({ type: "log", message: `Replaying ${count} node(s) from ${nodeId}.`, severity: "info" });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.output.appendLine(`[pipeline.replay] ${msg}`);
+      void vscode5.window.showErrorMessage(`Replay failed: ${msg}`);
+    }
+  }
+  /** Show a run's aggregated token/cost usage (totals + per-node breakdown). */
+  async viewRunCost(graphId) {
+    let metrics;
+    try {
+      metrics = await getGraphMetrics(graphId);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.output.appendLine(`[pipeline.cost] ${msg}`);
+      void vscode5.window.showErrorMessage(`Failed to load run cost: ${msg}`);
+      return;
+    }
+    if (!metrics || metrics.callCount === 0) {
+      void vscode5.window.showInformationMessage("No usage recorded for this run yet.");
+      return;
+    }
+    const cost = metrics.estimatedCostUsd ? `$${metrics.estimatedCostUsd.toFixed(4)}` : "n/a";
+    void vscode5.window.showInformationMessage(
+      `Run cost: ${cost} \xB7 ${metrics.inputTokens} in / ${metrics.outputTokens} out tokens \xB7 ${metrics.callCount} calls`
+    );
+    this.output.appendLine(`
+\u2500\u2500 Cost for run ${graphId} \u2500\u2500`);
+    this.output.appendLine(`Total: ${cost} \xB7 ${metrics.inputTokens} in / ${metrics.outputTokens} out \xB7 ${metrics.callCount} calls`);
+    for (const n of metrics.perNode) {
+      const c = n.estimatedCostUsd ? `$${n.estimatedCostUsd.toFixed(4)}` : "n/a";
+      this.output.appendLine(`  ${n.nodeId} (${n.title}): ${c} \xB7 ${n.inputTokens}/${n.outputTokens} tok`);
+    }
+    this.output.show(true);
+  }
+  /** List a run's artifacts in a QuickPick and open the chosen one in an editor tab. */
+  async viewArtifacts(graphId) {
+    let artifacts;
+    try {
+      artifacts = await listGraphArtifacts(graphId);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.output.appendLine(`[pipeline.artifacts] ${msg}`);
+      void vscode5.window.showErrorMessage(`Failed to load artifacts: ${msg}`);
+      return;
+    }
+    if (artifacts.length === 0) {
+      void vscode5.window.showInformationMessage("This run has not produced any artifacts yet.");
+      return;
+    }
+    const pick2 = await vscode5.window.showQuickPick(
+      artifacts.map((a) => ({ label: a.title || a.path || a.id, description: `${a.kind}${a.path ? ` \xB7 ${a.path}` : ""}`, artifact: a })),
+      { placeHolder: "Open an artifact produced by this run" }
+    );
+    if (!pick2) return;
+    const doc = await vscode5.workspace.openTextDocument({
+      content: pick2.artifact.content ?? "",
+      language: languageForArtifact(pick2.artifact.path, pick2.artifact.kind)
+    });
+    await vscode5.window.showTextDocument(doc, { preview: true });
+  }
+  async inspectGraph(graphId, nodeId) {
+    try {
+      const [detail, artifacts, metrics, workingMemory] = await Promise.all([
+        fetchGraphDetail(graphId),
+        listGraphArtifacts(graphId).catch(() => []),
+        getGraphMetrics(graphId).catch(() => null),
+        getWorkingMemory(graphId).catch(() => null)
+      ]);
+      this.broadcast({
+        type: "graphInspector",
+        payload: {
+          graphId,
+          nodeId,
+          detail,
+          artifacts,
+          metrics,
+          workingMemory,
+          verification: workingMemory?.verificationHistory ?? []
+        }
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.output.appendLine(`[pipeline.inspect] ${msg}`);
+      this.broadcast({ type: "log", message: `Failed to inspect run: ${msg}`, severity: "error" });
+    }
+  }
+  async openArtifactById(graphId, artifactId) {
+    const artifact = (await listGraphArtifacts(graphId)).find((a) => a.id === artifactId);
+    if (!artifact) {
+      void vscode5.window.showInformationMessage(`Artifact not found: ${artifactId}`);
+      return;
+    }
+    await this.openArtifactDocument(artifact);
+  }
+  async openArtifactDocument(artifact) {
+    const doc = await vscode5.workspace.openTextDocument({
+      content: artifact.content ?? "",
+      language: languageForArtifact(artifact.path, artifact.kind)
+    });
+    await vscode5.window.showTextDocument(doc, { preview: true });
+  }
+  async revertFile(filePath) {
+    const root = vscode5.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!root) return;
+    const clean = filePath.replace(/^\/+/, "");
+    const absolute = resolveContainedRelativePath(root, clean);
+    const { execFile: execFile3 } = await import("node:child_process");
+    const run = (args) => new Promise((resolve9) => {
+      execFile3("git", args, { cwd: root, timeout: 15e3, windowsHide: true }, (err, _stdout, stderr) => {
+        const code = err && typeof err.code === "number" ? err.code : err ? 1 : 0;
+        resolve9({ code, stderr: stderr || (err instanceof Error ? err.message : "") });
+      });
+    });
+    const tracked = (await run(["ls-files", "--error-unmatch", "--", clean])).code === 0;
+    if (tracked) {
+      const result = await run(["checkout", "--", clean]);
+      if (result.code !== 0) throw new Error(result.stderr || `git checkout failed for ${clean}`);
+      this.broadcast({ type: "log", message: `Reverted ${clean}.`, severity: "info" });
+      return;
+    }
+    const choice = await vscode5.window.showWarningMessage(
+      `${clean} is not tracked by git. Reverting will delete this agent-created file.`,
+      { modal: true },
+      "Delete"
+    );
+    if (choice !== "Delete") {
+      this.broadcast({ type: "log", message: `Revert cancelled for ${clean}.`, severity: "info" });
+      return;
+    }
+    try {
+      await vscode5.workspace.fs.delete(vscode5.Uri.file(absolute), { useTrash: true });
+      this.broadcast({ type: "log", message: `Reverted (deleted untracked) ${clean}.`, severity: "info" });
+    } catch (err) {
+      throw new Error(`Failed to delete ${clean}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  async openWorkspaceFile(filePath) {
+    const root = vscode5.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!root) return;
+    const clean = filePath.replace(/^\/+/, "");
+    await vscode5.commands.executeCommand("vscode.open", vscode5.Uri.file(resolveContainedRelativePath(root, clean)));
+  }
+  /** Open a run's working memory (accumulated agent context) as a rendered markdown tab. */
+  async viewWorkingMemory(graphId) {
+    let memory;
+    try {
+      memory = await getWorkingMemory(graphId);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.output.appendLine(`[pipeline.memory] ${msg}`);
+      void vscode5.window.showErrorMessage(`Failed to load working memory: ${msg}`);
+      return;
+    }
+    if (!memory) {
+      void vscode5.window.showInformationMessage("This run has no working memory yet.");
+      return;
+    }
+    const doc = await vscode5.workspace.openTextDocument({
+      content: renderWorkingMemory(memory),
+      language: "markdown"
+    });
+    await vscode5.window.showTextDocument(doc, { preview: true });
+  }
+  /** Append a user-supplied assumption/context note to a run's working memory. */
+  async addWorkingMemoryNote(graphId) {
+    const note = await vscode5.window.showInputBox({ prompt: "Add an assumption / context note for the agents" });
+    if (!note?.trim()) return;
+    try {
+      const memory = await getWorkingMemory(graphId);
+      const assumptions = [...memory?.assumptions ?? [], note.trim()];
+      await patchWorkingMemory(graphId, { assumptions });
+      this.broadcast({ type: "log", message: "Added context to working memory.", severity: "info" });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.output.appendLine(`[pipeline.memory] ${msg}`);
+      void vscode5.window.showErrorMessage(`Failed to update working memory: ${msg}`);
+    }
+  }
+  /** Add a follow-up goal to a run. */
+  async addFollowUp(graphId) {
+    const goal = await vscode5.window.showInputBox({ prompt: "Follow-up instruction for this run" });
+    if (!goal?.trim()) return;
+    try {
+      await addFollowUp(graphId, goal.trim());
+      this.broadcast({ type: "log", message: "Follow-up queued.", severity: "info" });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.output.appendLine(`[pipeline.followup] ${msg}`);
+      void vscode5.window.showErrorMessage(`Follow-up failed: ${msg}`);
+    }
+  }
+  /** Show a node's status, summary, and error in the output channel (trace inspection). */
+  async showNodeDetail(graphId, nodeId) {
+    try {
+      const { nodes } = await fetchGraphDetail(graphId);
+      const node = nodes.find((n) => n.id === nodeId);
+      if (!node) {
+        void vscode5.window.showInformationMessage(`No detail for node ${nodeId}.`);
+        return;
+      }
+      this.output.appendLine("");
+      this.output.appendLine(`\u2500\u2500 Node ${node.id} (${node.type}) \u2014 ${node.status} \u2500\u2500`);
+      this.output.appendLine(node.title);
+      if (node.inputSummary) this.output.appendLine(`Input: ${node.inputSummary}`);
+      if (node.error) this.output.appendLine(`Error: ${node.error}`);
+      try {
+        const metrics = await getGraphMetrics(graphId);
+        const nodeCost = metrics?.perNode.find((n) => n.nodeId === nodeId);
+        if (nodeCost) {
+          const c = nodeCost.estimatedCostUsd ? `$${nodeCost.estimatedCostUsd.toFixed(4)}` : "n/a";
+          this.output.appendLine(`Cost: ${c} \xB7 ${nodeCost.inputTokens}/${nodeCost.outputTokens} tokens`);
+        }
+      } catch {
+      }
+      this.output.show(true);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.output.appendLine(`[pipeline.nodeDetail] ${msg}`);
+      void vscode5.window.showErrorMessage(`Failed to load node detail: ${msg}`);
+    }
+  }
+  /** Re-open the approval prompt on demand (Runs-tree "Resolve Approval" action). */
+  async resolveApprovalForRun(graphId, nodeId) {
+    this.promptedApprovals.delete(`${graphId}:${nodeId}`);
+    await this.promptApproval(graphId, nodeId);
+  }
+  /**
+   * Prompt the user to approve/reject a graph-native APPROVAL node (the swarm
+   * blocker gate). Deduped per node since the SSE stream replays node_status on
+   * reconnect. Resolves via the node-approval endpoint and advances the run.
+   */
+  async promptApproval(graphId, nodeId) {
+    if (this.disposed) return;
+    const key = `${graphId}:${nodeId}`;
+    if (this.promptedApprovals.has(key)) return;
+    this.promptedApprovals.add(key);
+    let title = "Approval required";
+    let detail = "";
+    try {
+      const { nodes } = await fetchGraphDetail(graphId);
+      const node = nodes.find((n) => n.id === nodeId);
+      if (node && node.status !== "waiting_approval") {
+        this.promptedApprovals.delete(key);
+        return;
+      }
+      if (node) {
+        title = node.title || title;
+        detail = node.inputSummary ?? "";
+      }
+    } catch (err) {
+      this.output.appendLine(`[pipeline.approval] detail fetch failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (this.disposed) return;
+    const message = `LiberIDE run needs approval \u2014 ${title}${detail ? `: ${detail}` : ""}`;
+    const choice = await vscode5.window.showWarningMessage(message, { modal: false }, "Approve", "Reject");
+    if (!choice) {
+      this.promptedApprovals.delete(key);
+      return;
+    }
+    const decision = choice === "Approve" ? "approved" : "rejected";
+    let note;
+    if (decision === "rejected") {
+      note = await vscode5.window.showInputBox({ prompt: "Reason for rejection (optional)" }) || void 0;
+    }
+    if (this.disposed) return;
+    try {
+      await resolveNodeApproval(graphId, nodeId, decision, note);
+      this.broadcast({ type: "log", message: `Approval ${decision} for ${nodeId}.`, severity: "info" });
+    } catch (err) {
+      this.promptedApprovals.delete(key);
+      const msg = err instanceof Error ? err.message : String(err);
+      this.output.appendLine(`[pipeline.approval] ${msg}`);
+      void vscode5.window.showErrorMessage(`Failed to submit approval: ${msg}`);
+    }
   }
   async cancel(graphId) {
     this.broadcast({ type: "operation", action: "cancel", status: "running" });
@@ -1365,8 +2376,8 @@ var LiberidePipelineController = class _LiberidePipelineController {
     this.broadcast({ type: "operation", action: "cancel", status: "success", message: `Cancelled ${graphId}.` });
   }
   renderHtml(webview) {
-    const scriptUri = webview.asWebviewUri(vscode4.Uri.joinPath(this.context.extensionUri, "media", "pipeline.js"));
-    const styleUri = webview.asWebviewUri(vscode4.Uri.joinPath(this.context.extensionUri, "media", "webview.css"));
+    const scriptUri = webview.asWebviewUri(vscode5.Uri.joinPath(this.context.extensionUri, "media", "pipeline.js"));
+    const styleUri = webview.asWebviewUri(vscode5.Uri.joinPath(this.context.extensionUri, "media", "webview.css"));
     const nonce = randomNonce();
     const csp = [
       `default-src 'none'`,
@@ -1393,173 +2404,85 @@ var LiberidePipelineController = class _LiberidePipelineController {
 </html>`;
   }
 };
+var ARTIFACT_LANG_BY_EXT = {
+  ts: "typescript",
+  tsx: "typescriptreact",
+  js: "javascript",
+  jsx: "javascriptreact",
+  py: "python",
+  json: "json",
+  md: "markdown",
+  diff: "diff",
+  patch: "diff",
+  yaml: "yaml",
+  yml: "yaml",
+  sh: "shellscript",
+  sql: "sql",
+  go: "go",
+  rs: "rust",
+  java: "java",
+  html: "html",
+  css: "css",
+  toml: "toml",
+  xml: "xml"
+};
+function renderWorkingMemory(m) {
+  const list = (items) => items.length ? items.map((i) => `- ${i}`).join("\n") : "_(none)_";
+  const lines = [
+    `# Working Memory`,
+    ``,
+    `**Goal:** ${m.activeGoal || "_(none)_"}`,
+    `**Updated:** ${m.updatedAt}`,
+    ``,
+    `## Active files`,
+    list(m.activeFiles),
+    ``,
+    `## Active tasks`,
+    list(m.activeTasks),
+    ``,
+    `## Blockers`,
+    list(m.blockers),
+    ``,
+    `## Assumptions`,
+    list(m.assumptions),
+    ``,
+    `## Next actions`,
+    list(m.nextActions)
+  ];
+  if (m.recentFailures.length) {
+    lines.push(``, `## Recent failures`, ...m.recentFailures.map((f) => `- ${f.nodeTitle ?? "node"}: ${f.error ?? ""}`));
+  }
+  if (m.verificationHistory.length) {
+    lines.push(``, `## Verification history`, ...m.verificationHistory.map((v) => `- ${v.nodeTitle ?? "node"}: ${v.passed ? "passed" : "failed"}`));
+  }
+  if (m.currentPlan) {
+    lines.push(``, `## Current plan`, ``, m.currentPlan);
+  }
+  return `${lines.join("\n")}
+`;
+}
+function languageForArtifact(path11, kind) {
+  const ext = path11?.split(".").pop()?.toLowerCase();
+  if (ext && ARTIFACT_LANG_BY_EXT[ext]) return ARTIFACT_LANG_BY_EXT[ext];
+  const k = (kind ?? "").toLowerCase();
+  if (k.includes("patch") || k.includes("diff")) return "diff";
+  return "markdown";
+}
 function randomNonce() {
   return (0, import_node_crypto2.randomBytes)(16).toString("hex");
 }
 
 // src/chat/chat-panel.ts
-var vscode9 = __toESM(require("vscode"));
+var vscode11 = __toESM(require("vscode"));
 
 // src/ide-delegate/handlers/fs.ts
-var vscode6 = __toESM(require("vscode"));
-var path3 = __toESM(require("node:path"));
-var import_node_fs3 = require("node:fs");
+var vscode7 = __toESM(require("vscode"));
+var path4 = __toESM(require("node:path"));
+var import_node_fs4 = require("node:fs");
 var import_promises = require("node:fs/promises");
 var import_node_child_process = require("node:child_process");
-
-// src/ide-delegate/handlers/helpers.ts
-var vscode5 = __toESM(require("vscode"));
-var path = __toESM(require("node:path"));
-var import_node_fs2 = require("node:fs");
-var import_node_async_hooks = require("node:async_hooks");
-var requestRoot = new import_node_async_hooks.AsyncLocalStorage();
-function withRequestRoot(root, run, conversationId) {
-  return requestRoot.run({ root, conversationId }, run);
-}
-function requestConversationId() {
-  return requestRoot.getStore()?.conversationId;
-}
-function workspaceFolder() {
-  const folders = vscode5.workspace.workspaceFolders ?? [];
-  const root = requestRoot.getStore()?.root;
-  if (root) {
-    const target = path.resolve(root);
-    const match = folders.find((folder) => path.resolve(folder.uri.fsPath) === target);
-    if (match) return match;
-  }
-  return folders[0];
-}
-function isInWorkspace(fsPath) {
-  const root = workspaceFolder()?.uri.fsPath;
-  if (!root) return false;
-  const rel2 = path.relative(root, fsPath);
-  return rel2 === "" || rel2 !== ".." && !rel2.startsWith(`..${path.sep}`) && !path.isAbsolute(rel2);
-}
-function relativePath(fsPath) {
-  const root = workspaceFolder()?.uri.fsPath;
-  if (!root) return fsPath;
-  return path.relative(root, fsPath).replace(/\\/g, "/") || fsPath;
-}
-function resolveInsideRootSync(root, relative8, options = {}) {
-  if (relative8.includes("\0")) throw new Error("Path contains invalid characters");
-  if (path.isAbsolute(relative8) || /^[a-zA-Z]:[\\/]/.test(relative8)) {
-    throw new Error("Path must be relative to the workspace folder");
-  }
-  const base = path.resolve(root);
-  const full = path.resolve(base, relative8);
-  if (!isPathInside(base, full)) throw new Error("Path escapes the workspace folder");
-  if (!(0, import_node_fs2.existsSync)(base)) return full;
-  const realBase = (0, import_node_fs2.realpathSync)(base);
-  const segments = path.relative(base, full).split(path.sep).filter(Boolean);
-  let current = base;
-  for (let i = 0; i < segments.length; i++) {
-    current = path.join(current, segments[i]);
-    let info;
-    try {
-      info = (0, import_node_fs2.lstatSync)(current, { throwIfNoEntry: false });
-    } catch {
-      break;
-    }
-    if (!info) break;
-    if (!info.isSymbolicLink()) continue;
-    if (options.forWrite && i === segments.length - 1) throw new Error("Refusing to write through a symbolic link");
-    let target;
-    try {
-      target = (0, import_node_fs2.realpathSync)(current);
-    } catch {
-      throw new Error("Path goes through a dangling symbolic link");
-    }
-    if (!isPathInside(realBase, target)) throw new Error("Path escapes the workspace folder");
-  }
-  return full;
-}
-async function resolveInsideRoot(root, relative8, options = {}) {
-  return resolveInsideRootSync(root, relative8, options);
-}
-function isPathInside(root, candidate) {
-  const rel2 = path.relative(root, candidate);
-  return rel2 === "" || rel2 !== ".." && !rel2.startsWith(`..${path.sep}`) && !path.isAbsolute(rel2);
-}
-function resolveFileUri(relative8) {
-  const folder = workspaceFolder();
-  if (!folder) throw new Error("No workspace folder open");
-  if (folder.uri.scheme !== "file") {
-    const normalized = path.posix.normalize(relative8.replace(/\\/g, "/"));
-    if (normalized.startsWith("../") || normalized === ".." || path.posix.isAbsolute(normalized)) {
-      throw new Error("Path escapes the workspace folder");
-    }
-    return vscode5.Uri.joinPath(folder.uri, normalized);
-  }
-  return vscode5.Uri.file(resolveInsideRootSync(folder.uri.fsPath, relative8));
-}
-function rangeFromPayload(payload) {
-  const startLine = Number(payload.startLine ?? payload.line ?? 1) - 1;
-  const startChar = Number(payload.startChar ?? payload.startCharacter ?? payload.character ?? 0);
-  const endLine = Number(payload.endLine ?? payload.line ?? 1) - 1;
-  const endChar = Number(payload.endChar ?? payload.endCharacter ?? payload.character ?? 0);
-  return new vscode5.Range(startLine, startChar, endLine, endChar);
-}
-function positionFromPayload(payload) {
-  return new vscode5.Position(Number(payload.line ?? 1) - 1, Number(payload.character ?? 0));
-}
-
-// src/ide-delegate/handlers/redaction.ts
-var path2 = __toESM(require("node:path"));
-var SECRET_FILE_NAME = /^(\.env(\..*)?|\.npmrc|\.pypirc|\.netrc|\.git-credentials|credentials(\.json)?|secrets?\.(json|ya?ml|toml)|id_(rsa|dsa|ecdsa|ed25519)|.*\.(pem|key|p12|pfx|keystore|jks))$/i;
-function isSecretFile(filePath) {
-  const base = path2.basename(filePath);
-  return SECRET_FILE_NAME.test(base) && !/\.(example|sample|template|dist)$/i.test(base);
-}
-var SENSITIVE_PATTERNS = [
-  { pattern: /((?:api[_-]?key|token|secret|password|passwd|pwd|credential))[=:][ ]*[\x27\x22]?([\w\-/=]+)[\x27\x22]?/gi, replacement: "$1=[REDACTED]" },
-  { pattern: /x-api-key[=:][ ]*[\x27\x22]?([^\s,\x27\x22]+)[\x27\x22]?/gi, replacement: "x-api-key=[REDACTED]" },
-  { pattern: /"(?:api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|password|secret|private[_-]?key)"\s*:\s*"[^"]+"/gi, replacement: '"[REDACTED]":"[REDACTED]"' },
-  { pattern: /Bearer[ ]+([\w.-]+)/gi, replacement: "Bearer [REDACTED]" },
-  { pattern: /Basic[ ]+([\w+/=]+)/gi, replacement: "Basic [REDACTED]" },
-  { pattern: /(?:https?|git):\/\/[^:]+:[^@]+@/gi, replacement: "https://[REDACTED]@" },
-  { pattern: /(-----BEGIN[ ]+(?:RSA|DSA|EC|OPENSSH)[ ]+PRIVATE[ ]+KEY-----)[\s\S]*?(-----END[ ]+(?:RSA|DSA|EC|OPENSSH)[ ]+PRIVATE[ ]+KEY-----)/gi, replacement: "$1 [REDACTED] $2" },
-  { pattern: /((?:aws_access_key_id|aws_secret_access_key))[=:][ ]*[\x27\x22]?([\w/+ =]+)[\x27\x22]?/gi, replacement: "$1=[REDACTED]" },
-  { pattern: /(postgresql|mysql|mongodb|redis):\/\/([^:]+):([^@]+)@/gi, replacement: "$1://$2:[REDACTED]@" }
-];
-var KEY_MATERIAL = /^[A-Za-z0-9+/=]{16,}$/;
-function redactSecretFile(filePath, text) {
-  const base = path2.basename(filePath).toLowerCase();
-  let values = base.startsWith(".env") || base.endsWith(".npmrc") || base.endsWith(".pypirc") ? text.replace(/^(\s*(?:export\s+)?[\w.-]+\s*[=:]\s*)(\S.*)$/gm, "$1[REDACTED]") : text;
-  if (/\.(pem|key|p12|pfx|keystore|jks)$/.test(base) || /^id_/.test(base)) {
-    values = values.split("\n").map((line) => KEY_MATERIAL.test(line.trim()) ? "[REDACTED]" : line).join("\n");
-  }
-  for (const { pattern, replacement } of SENSITIVE_PATTERNS) values = values.replace(pattern, replacement);
-  return values;
-}
-function redactIfSecret(filePath, text) {
-  if (!isSecretFile(filePath)) return { text, redacted: false };
-  return { text: redactSecretFile(filePath, text), redacted: true };
-}
-function redactUnifiedDiff(diff, filePath) {
-  let secretPath = filePath && isSecretFile(filePath) ? filePath : void 0;
-  return diff.split("\n").map((line) => {
-    const header = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
-    if (header) {
-      secretPath = isSecretFile(header[2]) || isSecretFile(header[1]) ? header[2] : void 0;
-      return line;
-    }
-    if (!secretPath) return line;
-    if (/^(---|\+\+\+|@@|index |new file|deleted file|similarity|rename |old mode|new mode|Binary)/.test(line)) return line;
-    const prefix = line.slice(0, 1);
-    if (prefix !== "+" && prefix !== "-" && prefix !== " ") return line;
-    return prefix + redactSecretFile(secretPath, line.slice(1));
-  }).join("\n");
-}
-function countRedactionPlaceholders(text) {
-  return text.split("[REDACTED]").length - 1;
-}
-function assertNoRedactionPlaceholders(before, after, filePath) {
-  if (countRedactionPlaceholders(after) > countRedactionPlaceholders(before)) {
-    throw new Error(`Refusing to write '${filePath}': the new content contains [REDACTED] placeholders from a redacted read. Edit only the lines you need instead of rewriting redacted values.`);
-  }
-}
-
-// src/ide-delegate/handlers/fs.ts
+init_helpers();
+init_redaction();
 var EXCLUDED_DIRS = /* @__PURE__ */ new Set(["node_modules", ".git", "dist", "build", ".next", "__pycache__"]);
 var BINARY_EXTS = /* @__PURE__ */ new Set([
   ".png",
@@ -1635,14 +2558,14 @@ async function restorePreEditSnapshot(fullPath, scope = DEFAULT_SCOPE) {
   const before = snapshots.get(fullPath);
   if (before === null) await (0, import_promises.rm)(fullPath, { force: true });
   else {
-    await (0, import_promises.mkdir)(path3.dirname(fullPath), { recursive: true });
+    await (0, import_promises.mkdir)(path4.dirname(fullPath), { recursive: true });
     await writeFileNoFollow(fullPath, before);
   }
   snapshots.delete(fullPath);
   return true;
 }
 async function writeFileNoFollow(fullPath, content, mode) {
-  const flags = import_node_fs3.constants.O_WRONLY | import_node_fs3.constants.O_CREAT | import_node_fs3.constants.O_TRUNC | (import_node_fs3.constants.O_NOFOLLOW ?? 0);
+  const flags = import_node_fs4.constants.O_WRONLY | import_node_fs4.constants.O_CREAT | import_node_fs4.constants.O_TRUNC | (import_node_fs4.constants.O_NOFOLLOW ?? 0);
   const handle = await (0, import_promises.open)(fullPath, flags, 438);
   try {
     await handle.writeFile(content, "utf8");
@@ -1698,8 +2621,8 @@ async function handleFsWrite(root, payload) {
   const full = await resolveInsideRoot(root, relPath(payload), { forWrite: true });
   const content = typeof payload.content === "string" ? payload.content : "";
   await snapshotBeforeChange(full);
-  await (0, import_promises.mkdir)(path3.dirname(full), { recursive: true });
-  if (!isPathInside(await (0, import_promises.realpath)(root), await (0, import_promises.realpath)(path3.dirname(full)))) {
+  await (0, import_promises.mkdir)(path4.dirname(full), { recursive: true });
+  if (!isPathInside(await (0, import_promises.realpath)(root), await (0, import_promises.realpath)(path4.dirname(full)))) {
     throw new Error("Path escapes the workspace folder");
   }
   await writeFileNoFollow(full, content, typeof payload.mode === "number" ? payload.mode : void 0);
@@ -1707,7 +2630,7 @@ async function handleFsWrite(root, payload) {
 }
 async function handleFsDelete(root, payload) {
   const full = await resolveInsideRoot(root, relPath(payload));
-  if (full === path3.resolve(root)) throw new Error("Refusing to delete the workspace root");
+  if (full === path4.resolve(root)) throw new Error("Refusing to delete the workspace root");
   await snapshotBeforeChange(full);
   await (0, import_promises.rm)(full, { force: true, recursive: payload.recursive === true });
   return { deleted: true };
@@ -1715,10 +2638,10 @@ async function handleFsDelete(root, payload) {
 async function handleFsRename(root, payload) {
   const from = await resolveInsideRoot(root, relPath(payload, "from"));
   const to = await resolveInsideRoot(root, relPath(payload, "to"));
-  if (payload.overwrite !== true && (0, import_node_fs3.existsSync)(to)) throw new Error(`Target already exists: ${String(payload.to)}`);
+  if (payload.overwrite !== true && (0, import_node_fs4.existsSync)(to)) throw new Error(`Target already exists: ${String(payload.to)}`);
   await snapshotBeforeChange(from);
   await snapshotBeforeChange(to);
-  await (0, import_promises.mkdir)(path3.dirname(to), { recursive: true });
+  await (0, import_promises.mkdir)(path4.dirname(to), { recursive: true });
   await (0, import_promises.rename)(from, to);
   return { renamed: true };
 }
@@ -1726,12 +2649,12 @@ async function listRecursive(dir, root, depth) {
   if (depth <= 0) return [];
   const entries = [];
   for (const item of await (0, import_promises.readdir)(dir, { withFileTypes: true })) {
-    const full = path3.join(dir, item.name);
+    const full = path4.join(dir, item.name);
     const info = await (0, import_promises.lstat)(full).catch(() => void 0);
     if (!info || info.isSymbolicLink()) continue;
     const entry = {
       name: item.name,
-      path: path3.relative(root, full).replace(/\\/g, "/"),
+      path: path4.relative(root, full).replace(/\\/g, "/"),
       type: info.isDirectory() ? "directory" : "file",
       size: Number(info.size),
       modifiedAt: info.mtime.toISOString()
@@ -1752,11 +2675,11 @@ async function handleFsList(root, payload) {
 }
 function bundledRipgrep() {
   const candidates = [
-    path3.join(vscode6.env.appRoot, "node_modules", "@vscode", "ripgrep", "bin", "rg"),
-    path3.join(vscode6.env.appRoot, "node_modules.asar.unpacked", "@vscode", "ripgrep", "bin", "rg")
+    path4.join(vscode7.env.appRoot, "node_modules", "@vscode", "ripgrep", "bin", "rg"),
+    path4.join(vscode7.env.appRoot, "node_modules.asar.unpacked", "@vscode", "ripgrep", "bin", "rg")
   ];
   const suffix = process.platform === "win32" ? ".exe" : "";
-  return candidates.map((candidate) => candidate + suffix).find((candidate) => (0, import_node_fs3.existsSync)(candidate));
+  return candidates.map((candidate) => candidate + suffix).find((candidate) => (0, import_node_fs4.existsSync)(candidate));
 }
 function searchWithRipgrep(rg, root, query, isRegex, include, maxResults) {
   const args = ["--json"];
@@ -1765,7 +2688,7 @@ function searchWithRipgrep(rg, root, query, isRegex, include, maxResults) {
   for (const ext of BINARY_EXTS) args.push("--glob", `!*${ext}`);
   if (include) args.push("--glob", include);
   args.push("--", query, ".");
-  return new Promise((resolve8, reject) => {
+  return new Promise((resolve9, reject) => {
     const proc = (0, import_node_child_process.spawn)(rg, args, { cwd: root, windowsHide: true });
     const results = [];
     let buffer = "";
@@ -1790,7 +2713,7 @@ function searchWithRipgrep(rg, root, query, isRegex, include, maxResults) {
     proc.on("close", (code) => {
       consume(buffer);
       if (code === 2 && results.length === 0) reject(new Error("ripgrep error"));
-      else resolve8(results);
+      else resolve9(results);
     });
   });
 }
@@ -1827,21 +2750,21 @@ async function searchWithScan(root, query, isRegex, include, maxResults) {
   const results = [];
   const pattern = isRegex ? new RegExp(query) : void 0;
   const includeRe = include ? globToRegExp(include) : void 0;
-  const ignoredBy = (scopes, full, isDir) => scopes.some((scope) => isIgnored(scope.rules, path3.relative(scope.dir, full).replace(/\\/g, "/"), isDir));
+  const ignoredBy = (scopes, full, isDir) => scopes.some((scope) => isIgnored(scope.rules, path4.relative(scope.dir, full).replace(/\\/g, "/"), isDir));
   const walk = async (dir, parents) => {
-    const ignoreText = await (0, import_promises.readFile)(path3.join(dir, ".gitignore"), "utf8").catch(() => "");
+    const ignoreText = await (0, import_promises.readFile)(path4.join(dir, ".gitignore"), "utf8").catch(() => "");
     const scopes = ignoreText ? [...parents, { dir, rules: parseGitignore(ignoreText) }] : parents;
     for (const entry of await (0, import_promises.readdir)(dir, { withFileTypes: true }).catch(() => [])) {
       if (results.length >= maxResults) return;
-      const full = path3.join(dir, entry.name);
-      const rel2 = path3.relative(root, full).replace(/\\/g, "/");
+      const full = path4.join(dir, entry.name);
+      const rel2 = path4.relative(root, full).replace(/\\/g, "/");
       const explicitlyIncluded = includeRe !== void 0 && (includeRe.test(entry.name) || includeRe.test(rel2));
       if (entry.isDirectory()) {
         if (EXCLUDED_DIRS.has(entry.name) || entry.name.startsWith(".") || ignoredBy(scopes, full, true)) continue;
         await walk(full, scopes);
         continue;
       }
-      if (!entry.isFile() || BINARY_EXTS.has(path3.extname(entry.name).toLowerCase())) continue;
+      if (!entry.isFile() || BINARY_EXTS.has(path4.extname(entry.name).toLowerCase())) continue;
       if (includeRe && !explicitlyIncluded) continue;
       if (!explicitlyIncluded && (entry.name.startsWith(".") || ignoredBy(scopes, full, false))) continue;
       const info = await (0, import_promises.stat)(full).catch(() => void 0);
@@ -1878,18 +2801,19 @@ async function handleFsSearch(root, payload) {
 }
 
 // src/chat/chat-panel.ts
+init_helpers();
 var import_node_crypto4 = require("node:crypto");
 var nodePath = __toESM(require("node:path"));
 
 // src/project/identity.ts
-var vscode7 = __toESM(require("vscode"));
+var vscode8 = __toESM(require("vscode"));
 var import_node_child_process2 = require("node:child_process");
 var import_node_crypto3 = require("node:crypto");
 function gitExec(args, cwd) {
-  return new Promise((resolve8) => {
+  return new Promise((resolve9) => {
     (0, import_node_child_process2.execFile)("git", args, { cwd, timeout: 5e3, windowsHide: true }, (err, stdout) => {
-      if (err) return resolve8(null);
-      resolve8(stdout.toString().trim());
+      if (err) return resolve9(null);
+      resolve9(stdout.toString().trim());
     });
   });
 }
@@ -1903,12 +2827,24 @@ function normaliseRemote(remote) {
 function shortHash(input) {
   return (0, import_node_crypto3.createHash)("sha1").update(input).digest("hex").slice(0, 24);
 }
-async function detectProjectIdentity() {
-  const folder = vscode7.workspace.workspaceFolders?.[0];
-  if (!folder || folder.uri.scheme !== "file") {
+var activeProjectFolderPath;
+function getActiveProjectFolder() {
+  const folders = vscode8.workspace.workspaceFolders ?? [];
+  if (activeProjectFolderPath) {
+    const match = folders.find((f) => f.uri.fsPath === activeProjectFolderPath);
+    if (match) return match;
+  }
+  return folders[0];
+}
+function setActiveProjectFolder(folder) {
+  activeProjectFolderPath = folder.uri.fsPath;
+}
+async function detectProjectIdentity(folder) {
+  const target = folder ?? getActiveProjectFolder();
+  if (!target || target.uri.scheme !== "file") {
     return { id: "none", source: "none", name: "No workspace" };
   }
-  const cwd = folder.uri.fsPath;
+  const cwd = target.uri.fsPath;
   const [remoteRaw, firstCommit, branch] = await Promise.all([
     gitExec(["config", "--get", "remote.origin.url"], cwd),
     gitExec(["rev-list", "--max-parents=0", "HEAD"], cwd),
@@ -1920,7 +2856,7 @@ async function detectProjectIdentity() {
     return {
       id: `git:${shortHash(composite)}`,
       source: "git",
-      name: folder.name,
+      name: target.name,
       remoteUrl: remote,
       firstCommit: firstCommit ?? void 0,
       branch: branch ?? void 0,
@@ -1930,7 +2866,7 @@ async function detectProjectIdentity() {
   return {
     id: `folder:${shortHash(cwd)}`,
     source: "folder",
-    name: folder.name,
+    name: target.name,
     rootPath: cwd
   };
 }
@@ -1955,6 +2891,11 @@ function conversationHasProjectTag(identity, tags) {
 }
 
 // ../../../packages/shared/src/json-rpc.ts
+function isJsonRpcNotification(value) {
+  if (!value || typeof value !== "object") return false;
+  const record2 = value;
+  return record2["jsonrpc"] === "2.0" && typeof record2["method"] === "string" && !("id" in record2);
+}
 function isJsonRpcRequest(value) {
   if (!value || typeof value !== "object") return false;
   const record2 = value;
@@ -2738,10 +3679,10 @@ function mergeDefs(...defs) {
 function cloneDef(schema) {
   return mergeDefs(schema._zod.def);
 }
-function getElementAtPath(obj, path10) {
-  if (!path10)
+function getElementAtPath(obj, path11) {
+  if (!path11)
     return obj;
-  return path10.reduce((acc, key) => acc?.[key], obj);
+  return path11.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -3150,11 +4091,11 @@ function explicitlyAborted(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path10, issues) {
+function prefixIssues(path11, issues) {
   return issues.map((iss) => {
     var _a3;
     (_a3 = iss).path ?? (_a3.path = []);
-    iss.path.unshift(path10);
+    iss.path.unshift(path11);
     return iss;
   });
 }
@@ -3301,16 +4242,16 @@ function flattenError(error51, mapper = (issue2) => issue2.message) {
 }
 function formatError(error51, mapper = (issue2) => issue2.message) {
   const fieldErrors = { _errors: [] };
-  const processError = (error52, path10 = []) => {
+  const processError = (error52, path11 = []) => {
     for (const issue2 of error52.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
-        issue2.errors.map((issues) => processError({ issues }, [...path10, ...issue2.path]));
+        issue2.errors.map((issues) => processError({ issues }, [...path11, ...issue2.path]));
       } else if (issue2.code === "invalid_key") {
-        processError({ issues: issue2.issues }, [...path10, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path11, ...issue2.path]);
       } else if (issue2.code === "invalid_element") {
-        processError({ issues: issue2.issues }, [...path10, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path11, ...issue2.path]);
       } else {
-        const fullpath = [...path10, ...issue2.path];
+        const fullpath = [...path11, ...issue2.path];
         if (fullpath.length === 0) {
           fieldErrors._errors.push(mapper(issue2));
         } else {
@@ -3337,17 +4278,17 @@ function formatError(error51, mapper = (issue2) => issue2.message) {
 }
 function treeifyError(error51, mapper = (issue2) => issue2.message) {
   const result = { errors: [] };
-  const processError = (error52, path10 = []) => {
+  const processError = (error52, path11 = []) => {
     var _a3, _b;
     for (const issue2 of error52.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
-        issue2.errors.map((issues) => processError({ issues }, [...path10, ...issue2.path]));
+        issue2.errors.map((issues) => processError({ issues }, [...path11, ...issue2.path]));
       } else if (issue2.code === "invalid_key") {
-        processError({ issues: issue2.issues }, [...path10, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path11, ...issue2.path]);
       } else if (issue2.code === "invalid_element") {
-        processError({ issues: issue2.issues }, [...path10, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path11, ...issue2.path]);
       } else {
-        const fullpath = [...path10, ...issue2.path];
+        const fullpath = [...path11, ...issue2.path];
         if (fullpath.length === 0) {
           result.errors.push(mapper(issue2));
           continue;
@@ -3379,8 +4320,8 @@ function treeifyError(error51, mapper = (issue2) => issue2.message) {
 }
 function toDotPath(_path) {
   const segs = [];
-  const path10 = _path.map((seg) => typeof seg === "object" ? seg.key : seg);
-  for (const seg of path10) {
+  const path11 = _path.map((seg) => typeof seg === "object" ? seg.key : seg);
+  for (const seg of path11) {
     if (typeof seg === "number")
       segs.push(`[${seg}]`);
     else if (typeof seg === "symbol")
@@ -16072,13 +17013,13 @@ function resolveRef(ref, ctx) {
   if (!ref.startsWith("#")) {
     throw new Error("External $ref is not supported, only local refs (#/...) are allowed");
   }
-  const path10 = ref.slice(1).split("/").filter(Boolean);
-  if (path10.length === 0) {
+  const path11 = ref.slice(1).split("/").filter(Boolean);
+  if (path11.length === 0) {
     return ctx.rootSchema;
   }
   const defsKey = ctx.version === "draft-2020-12" ? "$defs" : "definitions";
-  if (path10[0] === defsKey) {
-    const key = path10[1];
+  if (path11[0] === defsKey) {
+    const key = path11[1];
     if (!key || !ctx.defs[key]) {
       throw new Error(`Reference not found: ${ref}`);
     }
@@ -16603,6 +17544,23 @@ var handoffPayloadSchema = external_exports.discriminatedUnion("kind", [
   researchFindingHandoffSchema
 ]);
 
+// src/chat/context-blocks.ts
+function toChips(blocks) {
+  return blocks.map((b) => ({ id: b.id, kind: b.kind, label: b.label }));
+}
+function enrichMessageWithContext(content, blocks) {
+  if (blocks.length === 0) return content;
+  const sections = blocks.map(
+    (b) => `# Context \u2014 ${b.label}
+\`\`\`${b.language ?? ""}
+${b.content}
+\`\`\``
+  );
+  return `${sections.join("\n\n")}
+
+${content}`;
+}
+
 // src/chat/commands.ts
 var SPEC_SYSTEM_PROMPTS = {
   spec: "Draft EARS-style feature requirements in markdown using ## R-N section ids.",
@@ -16744,9 +17702,9 @@ function defaultEnabledModel(models) {
 }
 
 // src/chat/copilot-lm.ts
-var vscode8 = __toESM(require("vscode"));
+var vscode9 = __toESM(require("vscode"));
 async function listCopilotLmModels() {
-  const models = await vscode8.lm.selectChatModels({ vendor: "copilot" });
+  const models = await vscode9.lm.selectChatModels({ vendor: "copilot" });
   const now = (/* @__PURE__ */ new Date()).toISOString();
   return models.map((m) => ({
     id: `lm:copilot:${m.id}`,
@@ -16775,22 +17733,22 @@ function isImage(mime) {
 }
 function toLmMessages(history) {
   return history.map(
-    (m) => m.role === "user" ? vscode8.LanguageModelChatMessage.User(m.content) : vscode8.LanguageModelChatMessage.Assistant(m.content)
+    (m) => m.role === "user" ? vscode9.LanguageModelChatMessage.User(m.content) : vscode9.LanguageModelChatMessage.Assistant(m.content)
   );
 }
 function buildUserMessage(prompt, attachments) {
-  if (!attachments.length) return vscode8.LanguageModelChatMessage.User(prompt);
+  if (!attachments.length) return vscode9.LanguageModelChatMessage.User(prompt);
   const parts = [
-    new vscode8.LanguageModelTextPart(prompt)
+    new vscode9.LanguageModelTextPart(prompt)
   ];
   for (const attachment of attachments) {
     if (isImage(attachment.mimeType)) {
-      parts.push(vscode8.LanguageModelDataPart.image(attachment.data, attachment.mimeType));
+      parts.push(vscode9.LanguageModelDataPart.image(attachment.data, attachment.mimeType));
     } else {
-      parts.push(new vscode8.LanguageModelDataPart(attachment.data, attachment.mimeType));
+      parts.push(new vscode9.LanguageModelDataPart(attachment.data, attachment.mimeType));
     }
   }
-  return vscode8.LanguageModelChatMessage.User(parts);
+  return vscode9.LanguageModelChatMessage.User(parts);
 }
 var MAX_TOOL_ROUNDS = 12;
 var SERVER_LOOP_ONLY_TOOLS = /* @__PURE__ */ new Set(["delegate", "discover_tools", "extend_graph", "update_plan", "ask_user"]);
@@ -16810,11 +17768,11 @@ async function loadCatalogTools() {
   return tools;
 }
 async function streamCopilotChat(input) {
-  const [model] = await vscode8.lm.selectChatModels({ vendor: "copilot", id: input.modelId });
+  const [model] = await vscode9.lm.selectChatModels({ vendor: "copilot", id: input.modelId });
   if (!model) throw new Error(`Copilot model not available: ${input.modelId}`);
   const toolEvents = [];
   let content = "";
-  const cancellation = new vscode8.CancellationTokenSource();
+  const cancellation = new vscode9.CancellationTokenSource();
   const onAbort = () => cancellation.cancel();
   if (input.signal?.aborted) cancellation.cancel();
   else input.signal?.addEventListener("abort", onAbort, { once: true });
@@ -16839,17 +17797,17 @@ async function streamCopilotChat(input) {
       const roundTools = lastRound ? [] : tools;
       const response = await model.sendRequest(
         messages,
-        roundTools.length ? { tools: roundTools, toolMode: vscode8.LanguageModelChatToolMode.Auto } : {},
+        roundTools.length ? { tools: roundTools, toolMode: vscode9.LanguageModelChatToolMode.Auto } : {},
         cancellation.token
       );
       let roundText = "";
       const calls = [];
       for await (const part of response.stream) {
-        if (part instanceof vscode8.LanguageModelTextPart) {
+        if (part instanceof vscode9.LanguageModelTextPart) {
           roundText += part.value;
           content += part.value;
           input.onToken(part.value);
-        } else if (part instanceof vscode8.LanguageModelToolCallPart) {
+        } else if (part instanceof vscode9.LanguageModelToolCallPart) {
           calls.push(part);
         }
       }
@@ -16858,8 +17816,8 @@ async function streamCopilotChat(input) {
         content += "\n\n_[Stopped after the maximum number of tool rounds.]_";
         break;
       }
-      messages.push(vscode8.LanguageModelChatMessage.Assistant([
-        ...roundText ? [new vscode8.LanguageModelTextPart(roundText)] : [],
+      messages.push(vscode9.LanguageModelChatMessage.Assistant([
+        ...roundText ? [new vscode9.LanguageModelTextPart(roundText)] : [],
         ...calls
       ]));
       const results = [];
@@ -16873,9 +17831,9 @@ async function streamCopilotChat(input) {
         const done = { ...event, result };
         toolEvents.push(done);
         input.onToolEvent(done);
-        results.push(new vscode8.LanguageModelToolResultPart(call.callId, [new vscode8.LanguageModelTextPart(result || "(empty result)")]));
+        results.push(new vscode9.LanguageModelToolResultPart(call.callId, [new vscode9.LanguageModelTextPart(result || "(empty result)")]));
       }
-      messages.push(vscode8.LanguageModelChatMessage.User(results));
+      messages.push(vscode9.LanguageModelChatMessage.User(results));
     }
   } finally {
     input.signal?.removeEventListener("abort", onAbort);
@@ -16933,8 +17891,8 @@ async function errorFromResponse(response) {
   if (response.status === 403) return new ChatStreamError(message === "forbidden" ? "You are not allowed to do that." : message, "forbidden", { status: 403 });
   return new ChatStreamError(message, "server", { status: response.status });
 }
-async function streamChatEndpoint(path10, body, handlers, signal, headers) {
-  const response = await apiFetch(path10, {
+async function streamChatEndpoint(path11, body, handlers, signal, headers) {
+  const response = await apiFetch(path11, {
     method: "POST",
     headers: { Accept: "text/event-stream", ...headers ?? {} },
     body: JSON.stringify(body),
@@ -17067,7 +18025,44 @@ async function listConversationApprovals(conversationId) {
 
 // src/chat/chat-panel.ts
 var import_node_child_process3 = require("node:child_process");
-var import_node_path3 = require("node:path");
+var import_node_path4 = require("node:path");
+
+// src/chat/cache-prune.ts
+function pruneMapKeys(map2, keptIds) {
+  for (const key of [...map2.keys()]) {
+    if (!keptIds.has(key)) map2.delete(key);
+  }
+}
+function pruneObjectKeys(obj, keptIds) {
+  for (const key of Object.keys(obj)) {
+    if (!keptIds.has(key)) delete obj[key];
+  }
+}
+function buildKeptConversationIds(ownedIds, activeSessionId, draftSessionId) {
+  const kept = new Set(ownedIds);
+  if (activeSessionId) kept.add(activeSessionId);
+  if (draftSessionId) kept.add(draftSessionId);
+  return kept;
+}
+function pruneConversationCaches(keptIds, maps) {
+  pruneMapKeys(maps.messagesCache, keptIds);
+  pruneObjectKeys(maps.overrides, keptIds);
+  pruneMapKeys(maps.sessionKinds, keptIds);
+  pruneMapKeys(maps.consumedPipelineCards, keptIds);
+  const keptDocumentIds = /* @__PURE__ */ new Set();
+  for (const id of keptIds) {
+    const entry = maps.overrides[id];
+    if (entry && typeof entry === "object" && "documentIds" in entry) {
+      const docIds = entry.documentIds;
+      if (Array.isArray(docIds)) {
+        for (const docId of docIds) keptDocumentIds.add(String(docId));
+      }
+    }
+  }
+  pruneMapKeys(maps.attachmentBytes, keptDocumentIds);
+}
+
+// src/chat/chat-panel.ts
 var OVERRIDES_STORAGE_KEY = "liberide.chat.overrides";
 var ACTIVE_SESSION_STORAGE_KEY = "liberide.chat.activeSession";
 function resolveAllowedAgentIds(agents, configured) {
@@ -17094,7 +18089,7 @@ function toolActivityKind(name) {
   if (name === "agent" || name === "agent_group" || name === "agent_result") return "agent";
   if (name === "web") return "web";
   if (name === "mcp" || name.startsWith("mcp_")) return "mcp";
-  if (name === "ide_read_file" || name === "ide_list_directory" || name === "ide_open_editors" || name === "ide_dirty_buffers" || name === "ide_active_selection" || name === "ide_workspace_diagnostics" || name === "ide_workspace_symbols" || name === "ide_document_symbols" || name === "ide_definition" || name === "ide_references" || name === "ide_hover" || name === "ide_find_files" || name === "ide_git_status" || name === "ide_git_log" || name === "ide_git_diff" || name === "ide_git_blame" || name === "ide_code_actions" || name === "ide_test_list" || name === "ide_test_status" || name === "ide_tasks_list" || name === "ide_debug_list" || name === "ide_debug_stacktrace" || name === "ide_notebook_read" || name === "ide_workspace_config_read" || name === "ide_extensions_list" || name === "ide_problems_by_owner" || name === "ide_semantic_tokens" || name === "read" || name === "find_symbol" || name === "find_references" || name === "find_implementations" || name === "find_callers" || name === "find_dependencies" || name === "find_test_for_file" || name === "find_related_code") {
+  if (name === "ide_read_file" || name === "ide_list_directory" || name === "ide_open_editors" || name === "ide_dirty_buffers" || name === "ide_active_selection" || name === "ide_workspace_diagnostics" || name === "ide_workspace_symbols" || name === "ide_document_symbols" || name === "ide_definition" || name === "ide_references" || name === "ide_hover" || name === "ide_find_files" || name === "ide_git_status" || name === "ide_git_log" || name === "ide_git_diff" || name === "ide_git_blame" || name === "ide_code_actions" || name === "ide_test_list" || name === "ide_test_status" || name === "ide_tasks_list" || name === "ide_tasks_status" || name === "ide_debug_list" || name === "ide_debug_stacktrace" || name === "ide_notebook_read" || name === "ide_workspace_config_read" || name === "ide_extensions_list" || name === "ide_problems_by_owner" || name === "ide_semantic_tokens" || name === "read" || name === "find_symbol" || name === "find_references" || name === "find_implementations" || name === "find_callers" || name === "find_dependencies" || name === "find_test_for_file" || name === "find_related_code") {
     return "reading";
   }
   if (name === "ide_search_code" || name === "search" || name === "recall") return "searching";
@@ -17114,14 +18109,16 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     for (const [id, kind] of Object.entries(storedKinds)) this.sessionKinds.set(id, kind);
     this.disposables.push(
       onSettingsChange((settings) => this.broadcast({ type: "settings", settings })),
-      vscode9.workspace.onDidChangeWorkspaceFolders(() => {
+      vscode11.workspace.onDidChangeWorkspaceFolders(() => {
         void this.onWorkspaceFoldersChanged();
       })
     );
     this.conversationSyncDispose = subscribeConversationListSync((event) => {
+      if (this.disposed) return;
       void this.onConversationListEvent(event);
     });
     const offAuth = onAuthChanged(() => {
+      if (this.disposed) return;
       void this.refreshCatalog().then(() => this.refreshConversations());
     });
     this.disposables.push({ dispose: offAuth });
@@ -17142,6 +18139,8 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
   messagesCache = /* @__PURE__ */ new Map();
   static MAX_CACHED_CONVERSATIONS = 20;
   attachmentBytes = /* @__PURE__ */ new Map();
+  /** Inline context chips applied to the next message in the active chat. */
+  pendingContextBlocks = [];
   overrides = {};
   sessionKinds = /* @__PURE__ */ new Map();
   /** conversationId -> set of message ids whose pipeline-ready card has been consumed. */
@@ -17171,7 +18170,9 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
   attaching = /* @__PURE__ */ new Set();
   draftSession = null;
   activeSessionId = null;
+  disposed = false;
   async onConversationListEvent(event) {
+    if (this.disposed) return;
     if (event.type === "message_updated" && event.conversationId) {
       this.agentResumeNotes.delete(event.conversationId);
       if (this.messagesCache.has(event.conversationId)) await this.refreshSingleConversation(event.conversationId);
@@ -17184,10 +18185,15 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     }
   }
   async onWorkspaceFoldersChanged() {
+    if (this.disposed) return;
     this.project = await detectProjectIdentity();
     await this.ensureProjectFolder();
     await this.refreshConversations();
     this.broadcast({ type: "project", project: this.projectInfo() });
+  }
+  /** Re-detect the active project (e.g. after the user picks a different root). */
+  async reloadProject() {
+    await this.onWorkspaceFoldersChanged();
   }
   resolveWebviewView(view) {
     this.view = view;
@@ -17197,7 +18203,7 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     });
   }
   show() {
-    void vscode9.commands.executeCommand(`${_LiberideChatPanelController.viewType}.focus`);
+    void vscode11.commands.executeCommand(`${_LiberideChatPanelController.viewType}.focus`);
   }
   async newSession() {
     this.draftSession = this.makeDraft();
@@ -17231,10 +18237,10 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     this.show();
     const session = this.activeSession();
     if (!session) {
-      void vscode9.window.showInformationMessage("No active chat to rename.");
+      void vscode11.window.showInformationMessage("No active chat to rename.");
       return;
     }
-    const next = await vscode9.window.showInputBox({
+    const next = await vscode11.window.showInputBox({
       prompt: "Rename chat",
       value: session.title
     });
@@ -17242,6 +18248,7 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     await this.renameSession(session.id, next);
   }
   dispose() {
+    this.disposed = true;
     this.conversationSyncDispose?.();
     for (const d of this.disposables) d.dispose();
     for (const s of this.streams.values()) s.abort.abort();
@@ -17259,8 +18266,8 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
       enableScripts: true,
       retainContextWhenHidden: true,
       localResourceRoots: [
-        vscode9.Uri.joinPath(this.context.extensionUri, "media"),
-        vscode9.Uri.joinPath(this.context.extensionUri, "resources")
+        vscode11.Uri.joinPath(this.context.extensionUri, "media"),
+        vscode11.Uri.joinPath(this.context.extensionUri, "resources")
       ]
     };
   }
@@ -17273,6 +18280,7 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     this.disposables.push(sub);
   }
   broadcast(message) {
+    if (this.disposed) return;
     this.view?.webview.postMessage(message);
   }
   broadcastSessions() {
@@ -17300,7 +18308,7 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
           break;
         case "deleteSession": {
           const title = this.findSession(message.sessionId)?.title ?? "this chat";
-          const choice = await vscode9.window.showWarningMessage(`Delete "${title}"? This cannot be undone.`, { modal: true }, "Delete");
+          const choice = await vscode11.window.showWarningMessage(`Delete "${title}"? This cannot be undone.`, { modal: true }, "Delete");
           if (choice === "Delete") await this.removeSession(message.sessionId);
           break;
         }
@@ -17315,6 +18323,10 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
           break;
         case "removeAttachment":
           await this.removeAttachment(message.sessionId, message.documentId);
+          break;
+        case "removeContextBlock":
+          this.pendingContextBlocks = this.pendingContextBlocks.filter((b) => b.id !== message.id);
+          this.broadcastContextBlocks();
           break;
         case "cancelMessage":
           await this.cancelTurn(message.sessionId);
@@ -17353,7 +18365,7 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
           this.broadcast({ type: "openSettings" });
           break;
         case "openPipeline":
-          await vscode9.commands.executeCommand("liberide.openPipeline");
+          await vscode11.commands.executeCommand("liberide.openPipeline");
           break;
         case "copilotGithubLogin":
           await this.copilotGithubLogin();
@@ -17494,16 +18506,32 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     }
   }
   async refreshConversations() {
+    if (this.disposed) return;
     if (this.backendStatus !== "ok") {
       this.broadcastSessions();
       return;
     }
     try {
       const all = await listConversations();
+      if (this.disposed) return;
       await this.syncProjectConversations(all);
       const owned = all.filter((c) => this.conversationBelongsToProject(c) || this.openedConversations.has(c.id));
       this.conversations.clear();
       for (const c of owned) this.conversations.set(c.id, c);
+      const keptIds = buildKeptConversationIds(
+        owned.map((c) => c.id),
+        this.activeSessionId,
+        this.draftSession?.id
+      );
+      pruneConversationCaches(keptIds, {
+        messagesCache: this.messagesCache,
+        overrides: this.overrides,
+        sessionKinds: this.sessionKinds,
+        consumedPipelineCards: this.consumedPipelineCards,
+        attachmentBytes: this.attachmentBytes
+      });
+      void this.persistSessionKinds();
+      void this.context.workspaceState.update(OVERRIDES_STORAGE_KEY, this.overrides);
       if (this.activeSessionId && this.activeSessionId.startsWith("draft:")) {
       } else if (!this.activeSessionId || !this.conversations.has(this.activeSessionId)) {
         const next = [...this.conversations.values()].sort(
@@ -17726,7 +18754,8 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
       remoteUrl: this.project.remoteUrl,
       branch: this.project.branch,
       rootPath: this.project.rootPath,
-      folderName: projectFolderName(this.project)
+      folderName: projectFolderName(this.project),
+      workspaceIntelligence: this.project.rootPath ? getWorkspaceIntelligence(this.project.rootPath) : void 0
     };
   }
   async persistActive() {
@@ -17735,7 +18764,7 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
   }
   /** Enables "Continue in Browser" while a saved conversation is active. */
   publishActiveContext() {
-    void vscode9.commands.executeCommand("setContext", "liberide.hasActiveConversation", Boolean(this.activeSessionId && !this.activeSessionId.startsWith("draft:")));
+    void vscode11.commands.executeCommand("setContext", "liberide.hasActiveConversation", Boolean(this.activeSessionId && !this.activeSessionId.startsWith("draft:")));
   }
   async persistOverrides() {
     await this.context.workspaceState.update(OVERRIDES_STORAGE_KEY, this.overrides);
@@ -17832,18 +18861,115 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     this.broadcastSessions();
     this.broadcastActiveSession();
   }
+  broadcastContextBlocks() {
+    this.broadcast({ type: "contextBlocks", blocks: toChips(this.pendingContextBlocks) });
+  }
+  addContextBlock(block) {
+    this.pendingContextBlocks.push(block);
+    this.broadcastContextBlocks();
+    this.show();
+  }
+  /** Attach the active editor selection (or whole line at cursor) as chat context. */
+  async attachSelection() {
+    const editor = vscode11.window.activeTextEditor;
+    if (!editor) {
+      void vscode11.window.showInformationMessage("No active editor to attach a selection from.");
+      return;
+    }
+    const sel = editor.selection;
+    const range = sel.isEmpty ? editor.document.lineAt(sel.active.line).range : sel;
+    const text = editor.document.getText(range);
+    const rel2 = vscode11.workspace.asRelativePath(editor.document.uri);
+    this.addContextBlock({
+      id: randomId(),
+      kind: "selection",
+      label: `${rel2}:${range.start.line + 1}-${range.end.line + 1}`,
+      content: text,
+      language: editor.document.languageId
+    });
+  }
+  /** Attach the active file's full contents as chat context. */
+  async attachActiveFile() {
+    const editor = vscode11.window.activeTextEditor;
+    if (!editor) {
+      void vscode11.window.showInformationMessage("No active editor to attach.");
+      return;
+    }
+    const rel2 = vscode11.workspace.asRelativePath(editor.document.uri);
+    this.addContextBlock({
+      id: randomId(),
+      kind: "file",
+      label: rel2,
+      content: editor.document.getText(),
+      language: editor.document.languageId
+    });
+  }
+  /** Pick a workspace file (the @-file mention) and attach its contents. */
+  async attachFilePick() {
+    const uris = await vscode11.workspace.findFiles("**/*", "**/{node_modules,.git,dist,out}/**", 2e3);
+    const pick2 = await vscode11.window.showQuickPick(
+      uris.map((u) => ({ label: vscode11.workspace.asRelativePath(u), uri: u })),
+      { placeHolder: "Attach a file as chat context" }
+    );
+    if (!pick2) return;
+    try {
+      const bytes = await vscode11.workspace.fs.readFile(pick2.uri);
+      this.addContextBlock({
+        id: randomId(),
+        kind: "file",
+        label: pick2.label,
+        content: new TextDecoder().decode(bytes),
+        language: pick2.label.split(".").pop()
+      });
+    } catch (err) {
+      void vscode11.window.showErrorMessage(`Failed to read ${pick2.label}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  /** Attach the output of the active terminal's last shell execution. */
+  async attachTerminalOutput() {
+    const terminal = vscode11.window.activeTerminal;
+    if (!terminal) {
+      void vscode11.window.showInformationMessage("No active terminal.");
+      return;
+    }
+    const note = await vscode11.window.showInputBox({
+      prompt: "Paste the terminal output to attach (shell history isn't readable via API)"
+    });
+    if (!note?.trim()) return;
+    this.addContextBlock({ id: randomId(), kind: "terminal", label: terminal.name, content: note, language: "shell" });
+  }
+  /** Attach the working-tree git diff as chat context. */
+  async attachGitDiff() {
+    try {
+      const root = this.project.rootPath ?? activeWorkspaceFolder()?.uri.fsPath;
+      if (!root) {
+        void vscode11.window.showInformationMessage("Open a workspace folder to attach its git diff.");
+        return;
+      }
+      const { handleGitDiff: handleGitDiff2 } = await Promise.resolve().then(() => (init_git(), git_exports));
+      const result = await handleGitDiff2(root, {});
+      const diff = result.diff?.trim();
+      if (!diff) {
+        void vscode11.window.showInformationMessage("No working-tree changes to attach.");
+        return;
+      }
+      this.addContextBlock({ id: randomId(), kind: "diff", label: "working tree diff", content: diff, language: "diff" });
+    } catch (err) {
+      void vscode11.window.showErrorMessage(`Failed to read git diff: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
   async attachFiles(sessionId) {
     if (this.backendStatus !== "ok") {
       this.broadcast({ type: "log", message: "Connect to the LiberIDE backend before attaching files." });
       return;
     }
-    const uris = await vscode9.window.showOpenDialog({ canSelectMany: true, openLabel: "Attach to chat" });
+    const uris = await vscode11.window.showOpenDialog({ canSelectMany: true, openLabel: "Attach to chat" });
     if (!uris?.length) return;
     const uploadedIds = [];
     for (const uri of uris) {
       try {
-        const bytes = await vscode9.workspace.fs.readFile(uri);
-        const name = (0, import_node_path3.basename)(uri.fsPath);
+        const bytes = await vscode11.workspace.fs.readFile(uri);
+        const name = (0, import_node_path4.basename)(uri.fsPath);
         const document = await uploadDocument({ name, bytes });
         uploadedIds.push(document.id);
         this.attachmentBytes.set(document.id, { data: bytes, mimeType: document.mimeType, name: document.name });
@@ -17853,7 +18979,7 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         this.output.appendLine(`[chat.attach] ${msg}`);
-        this.broadcast({ type: "log", message: `Failed to attach ${(0, import_node_path3.basename)(uri.fsPath)}: ${msg}` });
+        this.broadcast({ type: "log", message: `Failed to attach ${(0, import_node_path4.basename)(uri.fsPath)}: ${msg}` });
       }
     }
     if (!uploadedIds.length) return;
@@ -17993,6 +19119,12 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     const useRag = overrides.useRag ?? settings.useRag;
     const toolsEnabled = true;
     const systemPrompt = command ? SPEC_SYSTEM_PROMPTS[command] : pipelineMode ? PIPELINE_INTERVIEW_SYSTEM_PROMPT : settings.systemPrompt || void 0;
+    const baseContent = rest || content;
+    const outgoingContent = !command && !pipelineMode ? enrichMessageWithContext(baseContent, this.pendingContextBlocks) : baseContent;
+    if (!command && !pipelineMode && this.pendingContextBlocks.length > 0) {
+      this.pendingContextBlocks = [];
+      this.broadcastContextBlocks();
+    }
     const body = {
       conversationId,
       provider: resolved.provider,
@@ -18000,12 +19132,13 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
       // An explicit retry with a chosen alternative is a pin, not a routing hint.
       modelSelection: forced ? "manual" : settings.modelSelection,
       chatMode,
-      content: rest || content,
+      content: outgoingContent,
       systemPrompt,
       // Spec/pipeline prompts steer this turn only; the chat keeps its own prompt.
       ...command || pipelineMode ? { systemPromptScope: "turn" } : {},
-      // The model gets the command's argument; the chat shows the typed command.
-      ...command && (rest || content) !== content ? { displayContent: content } : {},
+      // The model gets the command's argument (or the message plus attached
+      // context chips); the chat shows what the user typed.
+      ...outgoingContent !== content ? { displayContent: content } : {},
       skillIds: pipelineMode ? [] : overrides.skillIds ?? [],
       documentIds: pipelineMode ? [] : overrides.documentIds ?? [],
       useRag: pipelineMode ? false : useRag,
@@ -18302,6 +19435,7 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
     try {
       await cancelExecutionGraph(graphId);
     } catch (err) {
+      if (this.disposed) return;
       const msg = err instanceof Error ? err.message : String(err);
       if (view) {
         view.cancelling = false;
@@ -18546,6 +19680,7 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
     }
   }
   async refreshSingleConversation(id) {
+    if (this.disposed) return;
     if (this.streams.has(id)) {
       this.pendingRefresh.add(id);
       return;
@@ -18576,7 +19711,7 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
    * recorded root there is no safe guess.
    */
   editRoot(root) {
-    const folders = vscode9.workspace.workspaceFolders ?? [];
+    const folders = vscode11.workspace.workspaceFolders ?? [];
     if (root) return folders.find((folder) => nodePath.resolve(folder.uri.fsPath) === nodePath.resolve(root));
     return folders.length === 1 ? folders[0] : void 0;
   }
@@ -18590,19 +19725,19 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
     let target;
     try {
       if (folder.uri.scheme === "file") {
-        target = vscode9.Uri.file(resolveInsideRootSync(folder.uri.fsPath, clean));
+        target = vscode11.Uri.file(resolveInsideRootSync(folder.uri.fsPath, clean));
       } else {
         const normalized = nodePath.posix.normalize(clean.replace(/\\/g, "/"));
         if (normalized === ".." || normalized.startsWith("../") || nodePath.posix.isAbsolute(normalized)) throw new Error("Path escapes the workspace folder");
-        target = vscode9.Uri.joinPath(folder.uri, normalized);
+        target = vscode11.Uri.joinPath(folder.uri, normalized);
       }
     } catch (err) {
       this.broadcast({ type: "log", message: `Could not open ${relativePath2}: ${err instanceof Error ? err.message : err}` });
       return;
     }
     try {
-      const doc = await vscode9.workspace.openTextDocument(target);
-      await vscode9.window.showTextDocument(doc, { preview: false });
+      const doc = await vscode11.workspace.openTextDocument(target);
+      await vscode11.window.showTextDocument(doc, { preview: false });
     } catch (err) {
       this.broadcast({ type: "log", message: `Could not open ${relativePath2}: ${err instanceof Error ? err.message : err}` });
     }
@@ -18614,7 +19749,7 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
    */
   async undoEdits(sessionId, files) {
     if (!files.length) return;
-    const choice = await vscode9.window.showWarningMessage(
+    const choice = await vscode11.window.showWarningMessage(
       `Undo the agent's edits to ${files.length} file${files.length === 1 ? "" : "s"}?`,
       { modal: true },
       "Undo"
@@ -18647,7 +19782,7 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
       return;
     }
     const names = needGit.map((file2) => file2.clean).join(", ");
-    const gitChoice = await vscode9.window.showWarningMessage(
+    const gitChoice = await vscode11.window.showWarningMessage(
       `No exact snapshot for ${names}. Revert ${needGit.length === 1 ? "it" : "them"} to the last git commit? This also discards your own uncommitted changes.`,
       { modal: true },
       "Revert"
@@ -18655,10 +19790,10 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
     if (gitChoice !== "Revert") return;
     for (const { clean, root } of needGit) {
       if (!isPathInside(root, nodePath.resolve(root, clean))) continue;
-      await new Promise((resolve8, reject) => {
+      await new Promise((resolve9, reject) => {
         (0, import_node_child_process3.execFile)("git", ["checkout", "--", clean], { cwd: root, timeout: 15e3, windowsHide: true }, (err, _stdout, stderr) => {
           if (err) reject(new Error(stderr || err.message));
-          else resolve8();
+          else resolve9();
         });
       }).then(() => {
         this.broadcast({ type: "log", message: `Reverted ${clean} to last git state.`, severity: "info" });
@@ -18676,7 +19811,7 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
       const updated = this.store.getFeature(feature.id);
       if (updated?.tasksDirUri) {
         await writeTextFile(
-          vscode9.Uri.joinPath(updated.tasksDirUri, "index.md"),
+          vscode11.Uri.joinPath(updated.tasksDirUri, "index.md"),
           regenerateTasksIndex(updated.tasks)
         );
       }
@@ -18686,7 +19821,7 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
   async writeTaskContractsForFeature(featureId, tasksDirUri, text) {
     let written = 0;
     for (const block of extractTaskBlocks(text)) {
-      const probe = vscode9.Uri.joinPath(tasksDirUri, "_probe.md");
+      const probe = vscode11.Uri.joinPath(tasksDirUri, "_probe.md");
       const task = parseTaskContract(
         featureId,
         probe,
@@ -18696,7 +19831,7 @@ ${block}
 `
       );
       if (!task) continue;
-      task.filePath = vscode9.Uri.joinPath(
+      task.filePath = vscode11.Uri.joinPath(
         tasksDirUri,
         `${task.id}-${task.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40)}.md`
       );
@@ -18711,7 +19846,7 @@ ${block}
       this.broadcast({ type: "log", message: "Pipeline generation: session not found." });
       return;
     }
-    const folder = vscode9.workspace.workspaceFolders?.[0];
+    const folder = vscode11.workspace.workspaceFolders?.[0];
     if (!folder) {
       this.broadcast({ type: "log", message: "Open a workspace folder to scaffold a feature." });
       return;
@@ -18742,9 +19877,9 @@ ${block}
       return;
     }
     const slug = root.path.split("/").pop() ?? featureName;
-    const tasksDirUri = vscode9.Uri.joinPath(root, "tasks");
-    const requirementsUri = vscode9.Uri.joinPath(root, "requirements.md");
-    const designUri = vscode9.Uri.joinPath(root, "design.md");
+    const tasksDirUri = vscode11.Uri.joinPath(root, "tasks");
+    const requirementsUri = vscode11.Uri.joinPath(root, "requirements.md");
+    const designUri = vscode11.Uri.joinPath(root, "design.md");
     const conversationId = session.conversationId;
     const messages = this.messagesCache.get(conversationId) ?? [];
     const userPrompt = `Generate the requirements, design, and task contracts for the feature "${featureName}". Emit the marker [[FEATURE_NAME: ${slug}]] on the first line.`;
@@ -18824,13 +19959,13 @@ ${sections.requirements}
 ${sections.design}
 `);
         if (sections.documentation) {
-          await writeTextFile(vscode9.Uri.joinPath(root, "documentation.md"), `# Documentation
+          await writeTextFile(vscode11.Uri.joinPath(root, "documentation.md"), `# Documentation
 
 ${sections.documentation}
 `);
         }
         if (sections.blockers) {
-          await writeTextFile(vscode9.Uri.joinPath(root, "blockers.md"), `# Blockers
+          await writeTextFile(vscode11.Uri.joinPath(root, "blockers.md"), `# Blockers
 
 ${sections.blockers}
 `);
@@ -18842,7 +19977,7 @@ ${sections.blockers}
         const updated = this.store.getFeature(slug);
         if (updated?.tasksDirUri) {
           await writeTextFile(
-            vscode9.Uri.joinPath(updated.tasksDirUri, "index.md"),
+            vscode11.Uri.joinPath(updated.tasksDirUri, "index.md"),
             regenerateTasksIndex(updated.tasks)
           );
         }
@@ -18880,7 +20015,7 @@ _Failed to scaffold pipeline files: ${msg}_`;
   }
   async copilotGithubLogin() {
     try {
-      const session = await vscode9.authentication.getSession("github", ["read:user"], { createIfNone: true });
+      const session = await vscode11.authentication.getSession("github", ["read:user"], { createIfNone: true });
       if (!session?.accessToken) throw new Error("GitHub authentication did not return an access token.");
       await apiFetch("/api/copilot/link/ide", {
         method: "POST",
@@ -18896,9 +20031,9 @@ _Failed to scaffold pipeline files: ${msg}_`;
   // HTML
   // ---------------------------------------------------------------------------
   renderHtml(webview) {
-    const scriptUri = webview.asWebviewUri(vscode9.Uri.joinPath(this.context.extensionUri, "media", "chat.js"));
-    const styleUri = webview.asWebviewUri(vscode9.Uri.joinPath(this.context.extensionUri, "media", "webview.css"));
-    const mermaidUri = webview.asWebviewUri(vscode9.Uri.joinPath(this.context.extensionUri, "media", "mermaid.js"));
+    const scriptUri = webview.asWebviewUri(vscode11.Uri.joinPath(this.context.extensionUri, "media", "chat.js"));
+    const styleUri = webview.asWebviewUri(vscode11.Uri.joinPath(this.context.extensionUri, "media", "webview.css"));
+    const mermaidUri = webview.asWebviewUri(vscode11.Uri.joinPath(this.context.extensionUri, "media", "mermaid.js"));
     const nonce = randomNonce2();
     const csp = [
       `default-src 'none'`,
@@ -19011,21 +20146,21 @@ function applyToolEvent(stream, event) {
   return { entry: existing, editedFiles: [...stream.edits.values()] };
 }
 function summarizeTool(name, args) {
-  const path10 = typeof args.path === "string" ? args.path : void 0;
+  const path11 = typeof args.path === "string" ? args.path : void 0;
   switch (name) {
     case "ide_write_file":
-      return path10 ? `Wrote \`${path10}\`` : "Wrote file";
+      return path11 ? `Wrote \`${path11}\`` : "Wrote file";
     case "ide_edit_file":
-      return path10 ? `Edited \`${path10}\`` : "Edited file";
+      return path11 ? `Edited \`${path11}\`` : "Edited file";
     case "ide_read_file":
-      return path10 ? `Read \`${path10}\`` : "Read file";
+      return path11 ? `Read \`${path11}\`` : "Read file";
     case "ide_list_directory":
-      return path10 ? `Listed \`${path10}\`` : "Listed directory";
+      return path11 ? `Listed \`${path11}\`` : "Listed directory";
     case "ide_search_code":
-      return typeof args.query === "string" ? `Searched for "${truncate(args.query, 40)}"` : "Searched code";
+      return typeof args.query === "string" ? `Searched for "${truncate2(args.query, 40)}"` : "Searched code";
     case "ide_run_command":
     case "terminal_run":
-      return typeof args.command === "string" ? `Ran \`${truncate(args.command, 48)}\`` : "Ran command";
+      return typeof args.command === "string" ? `Ran \`${truncate2(args.command, 48)}\`` : "Ran command";
     default:
       return humanizeToolName(name);
   }
@@ -19033,7 +20168,7 @@ function summarizeTool(name, args) {
 function humanizeToolName(name) {
   return name.replace(/^ide_/, "").replace(/_/g, " ");
 }
-function truncate(value, max) {
+function truncate2(value, max) {
   return value.length > max ? `${value.slice(0, max - 1)}\u2026` : value;
 }
 function looksLikeToolError(result) {
@@ -19050,9 +20185,9 @@ function looksLikeToolError(result) {
 }
 function recordFileEdit(edits, name, args, result, root) {
   if (name !== "ide_write_file" && name !== "ide_edit_file") return;
-  const path10 = typeof args.path === "string" ? args.path : void 0;
-  if (!path10) return;
-  const current = edits.get(path10) ?? { path: path10, root, writes: 0, edits: 0, additions: 0, deletions: 0 };
+  const path11 = typeof args.path === "string" ? args.path : void 0;
+  if (!path11) return;
+  const current = edits.get(path11) ?? { path: path11, root, writes: 0, edits: 0, additions: 0, deletions: 0 };
   if (name === "ide_write_file") {
     current.writes += 1;
     const content = typeof args.content === "string" ? args.content : "";
@@ -19076,7 +20211,7 @@ function recordFileEdit(edits, name, args, result, root) {
       current.deletions = Math.max(current.deletions, parsedStats.deletions);
     }
   }
-  edits.set(path10, current);
+  edits.set(path11, current);
 }
 function parseEditStatsFromResult(result) {
   const match = result.match(/(\+|\u002B)(\d+).*?(-|\u2212)(\d+)/);
@@ -19091,13 +20226,14 @@ function randomNonce2() {
 }
 
 // src/spec/store.ts
-var vscode10 = __toESM(require("vscode"));
+var vscode12 = __toESM(require("vscode"));
+var REFRESH_TIMEOUT_MS = 15e3;
 var SPEC_WATCH_GLOB = "**/.liberide/specs/**";
 var SpecStore = class {
   constructor(output) {
     this.output = output;
   }
-  changeEmitter = new vscode10.EventEmitter();
+  changeEmitter = new vscode12.EventEmitter();
   onDidChange = this.changeEmitter.event;
   features = /* @__PURE__ */ new Map();
   watcher;
@@ -19114,7 +20250,7 @@ var SpecStore = class {
   }
   async initialize(context) {
     this.activeFeatureId = context.workspaceState.get("liberide.activeFeatureId");
-    this.watcher = vscode10.workspace.createFileSystemWatcher(SPEC_WATCH_GLOB);
+    this.watcher = vscode12.workspace.createFileSystemWatcher(SPEC_WATCH_GLOB);
     this.watcher.onDidCreate(() => this.scheduleRefresh());
     this.watcher.onDidChange(() => this.scheduleRefresh());
     this.watcher.onDidDelete(() => this.scheduleRefresh());
@@ -19143,20 +20279,19 @@ var SpecStore = class {
     }
     this.refreshInProgress = true;
     try {
-      this.features.clear();
-      for (const folder of vscode10.workspace.workspaceFolders ?? []) {
-        const root = vscode10.Uri.joinPath(folder.uri, ".liberide", "specs");
-        try {
-          for (const [name, type] of await vscode10.workspace.fs.readDirectory(root)) {
-            if (type === vscode10.FileType.Directory) {
-              const feature = await this.loadFeature(root, name);
-              if (feature) this.features.set(feature.id, feature);
-            }
-          }
-        } catch {
-        }
-      }
+      await Promise.race([
+        this.runRefreshBody(),
+        new Promise((_, reject) => {
+          setTimeout(() => reject(new Error("refresh timeout")), REFRESH_TIMEOUT_MS);
+        })
+      ]);
       this.changeEmitter.fire();
+    } catch (err) {
+      if (err instanceof Error && err.message === "refresh timeout") {
+        this.output.appendLine(`[spec.refresh] timed out after ${REFRESH_TIMEOUT_MS}ms; refreshInProgress reset`);
+      } else {
+        this.output.appendLine(`[spec.refresh] error: ${err instanceof Error ? err.message : String(err)}`);
+      }
     } finally {
       this.refreshInProgress = false;
       if (this.refreshQueued) {
@@ -19165,12 +20300,27 @@ var SpecStore = class {
       }
     }
   }
+  async runRefreshBody() {
+    this.features.clear();
+    for (const folder of vscode12.workspace.workspaceFolders ?? []) {
+      const root = vscode12.Uri.joinPath(folder.uri, ".liberide", "specs");
+      try {
+        for (const [name, type] of await vscode12.workspace.fs.readDirectory(root)) {
+          if (type === vscode12.FileType.Directory) {
+            const feature = await this.loadFeature(root, name);
+            if (feature) this.features.set(feature.id, feature);
+          }
+        }
+      } catch {
+      }
+    }
+  }
   async loadFeature(specsRoot, id) {
-    const rootUri = vscode10.Uri.joinPath(specsRoot, id);
-    const featureMdUri = vscode10.Uri.joinPath(rootUri, "feature.md");
-    const requirementsUri = vscode10.Uri.joinPath(rootUri, "requirements.md");
-    const designUri = vscode10.Uri.joinPath(rootUri, "design.md");
-    const tasksDirUri = vscode10.Uri.joinPath(rootUri, "tasks");
+    const rootUri = vscode12.Uri.joinPath(specsRoot, id);
+    const featureMdUri = vscode12.Uri.joinPath(rootUri, "feature.md");
+    const requirementsUri = vscode12.Uri.joinPath(rootUri, "requirements.md");
+    const designUri = vscode12.Uri.joinPath(rootUri, "design.md");
+    const tasksDirUri = vscode12.Uri.joinPath(rootUri, "tasks");
     let name = id;
     let status = "draft";
     try {
@@ -19182,18 +20332,18 @@ var SpecStore = class {
     }
     const requirementIds = await this.readIds(requirementsUri, "R");
     const designIds = await this.readIds(designUri, "D");
-    const tasks2 = [];
+    const tasks3 = [];
     try {
-      for (const [fileName, fileType] of await vscode10.workspace.fs.readDirectory(tasksDirUri)) {
-        if (fileType !== vscode10.FileType.File || !/^T-\d+.*\.md$/i.test(fileName)) continue;
-        const filePath = vscode10.Uri.joinPath(tasksDirUri, fileName);
+      for (const [fileName, fileType] of await vscode12.workspace.fs.readDirectory(tasksDirUri)) {
+        if (fileType !== vscode12.FileType.File || !/^T-\d+.*\.md$/i.test(fileName)) continue;
+        const filePath = vscode12.Uri.joinPath(tasksDirUri, fileName);
         const task = parseTaskContract(id, filePath, await readTextFile(filePath));
-        if (task) tasks2.push(task);
+        if (task) tasks3.push(task);
       }
     } catch {
     }
-    const documentation = await this.readDocumentation(vscode10.Uri.joinPath(rootUri, "documentation.md"));
-    const blockers = await this.readBlockers(vscode10.Uri.joinPath(rootUri, "blockers.md"));
+    const documentation = await this.readDocumentation(vscode12.Uri.joinPath(rootUri, "documentation.md"));
+    const blockers = await this.readBlockers(vscode12.Uri.joinPath(rootUri, "blockers.md"));
     return {
       id,
       name,
@@ -19205,7 +20355,7 @@ var SpecStore = class {
       tasksDirUri,
       requirementIds,
       designIds,
-      tasks: tasks2,
+      tasks: tasks3,
       ...documentation.length ? { documentation } : {},
       ...blockers.length ? { blockers } : {}
     };
@@ -19239,7 +20389,7 @@ var SpecStore = class {
 };
 
 // src/theme-bridge.ts
-var vscode11 = __toESM(require("vscode"));
+var vscode13 = __toESM(require("vscode"));
 var NEXUS_TO_VSCODE2 = {
   "default:light": "Light Modern",
   "default:dark": "Dark Modern",
@@ -19272,27 +20422,27 @@ function createThemeBridge(output) {
   async function applyTheme(themeId) {
     if (!themeId) return;
     lastApplied = themeId;
-    await vscode11.workspace.getConfiguration("workbench").update("colorTheme", themeId, vscode11.ConfigurationTarget.Global);
+    await vscode13.workspace.getConfiguration("workbench").update("colorTheme", themeId, vscode13.ConfigurationTarget.Global);
   }
   async function applyColorOverrides(overrides) {
     if (!overrides || Object.keys(overrides).length === 0) return;
     const fingerprint = JSON.stringify(overrides);
     if (fingerprint === lastOverridesKey) return;
     lastOverridesKey = fingerprint;
-    const config2 = vscode11.workspace.getConfiguration("workbench");
+    const config2 = vscode13.workspace.getConfiguration("workbench");
     const existing = config2.get("colorCustomizations") ?? {};
     const next = { ...overrides };
     for (const [key, value] of Object.entries(existing)) {
       if (key.startsWith("[") && key.endsWith("]")) next[key] = value;
     }
-    await config2.update("colorCustomizations", next, vscode11.ConfigurationTarget.Global);
+    await config2.update("colorCustomizations", next, vscode13.ConfigurationTarget.Global);
   }
   async function applyTokenColorOverrides(overrides) {
     if (!overrides || !overrides.textMateRules || overrides.textMateRules.length === 0) return;
     const fingerprint = JSON.stringify(overrides);
     if (fingerprint === lastTokenOverridesKey) return;
     lastTokenOverridesKey = fingerprint;
-    const config2 = vscode11.workspace.getConfiguration("editor");
+    const config2 = vscode13.workspace.getConfiguration("editor");
     const existing = config2.get("tokenColorCustomizations") ?? {};
     const next = {
       textMateRules: overrides.textMateRules,
@@ -19304,10 +20454,10 @@ function createThemeBridge(output) {
     for (const [key, value] of Object.entries(existing)) {
       if (key.startsWith("[") && key.endsWith("]")) next[key] = value;
     }
-    await config2.update("tokenColorCustomizations", next, vscode11.ConfigurationTarget.Global);
+    await config2.update("tokenColorCustomizations", next, vscode13.ConfigurationTarget.Global);
   }
   async function publishTheme() {
-    const themeId = vscode11.workspace.getConfiguration("workbench").get("colorTheme");
+    const themeId = vscode13.workspace.getConfiguration("workbench").get("colorTheme");
     if (!themeId || themeId === lastApplied) {
       lastApplied = void 0;
       return;
@@ -19348,7 +20498,7 @@ function createThemeBridge(output) {
   }
   const envTheme = NEXUS_TO_VSCODE2[`${process.env.LIBERVOX_THEME_FAMILY}:${process.env.LIBERVOX_THEME_MODE === "system" ? "dark" : process.env.LIBERVOX_THEME_MODE}`];
   void applyTheme(envTheme);
-  const listener = vscode11.workspace.onDidChangeConfiguration((event) => {
+  const listener = vscode13.workspace.onDidChangeConfiguration((event) => {
     if (event.affectsConfiguration("workbench.colorTheme")) void publishTheme();
   });
   connect();
@@ -19361,21 +20511,50 @@ function createThemeBridge(output) {
 }
 
 // src/views/runsTree.ts
-var vscode12 = __toESM(require("vscode"));
+var vscode14 = __toESM(require("vscode"));
 var MAX_COMPLETED_RUNS = 20;
+var MAX_BACKGROUND_RUNS = 25;
 var RunsTreeProvider = class {
   constructor(writeback) {
     this.writeback = writeback;
   }
-  emitter = new vscode12.EventEmitter();
+  emitter = new vscode14.EventEmitter();
   onDidChangeTreeData = this.emitter.event;
   runs = /* @__PURE__ */ new Map();
+  backgroundRuns = [];
+  backgroundError;
   refresh() {
+    void this.reloadBackgroundRuns();
+  }
+  /** Lightweight redraw without hitting the network (used for local SSE updates). */
+  fireChange() {
+    this.emitter.fire(void 0);
+  }
+  /** Fetch recent server-side runs (web/swarm/scheduled) not tracked locally. */
+  async reloadBackgroundRuns() {
+    try {
+      const graphs = await listExecutionGraphs({ limit: MAX_BACKGROUND_RUNS });
+      this.backgroundRuns = graphs.filter((g) => !this.runs.has(g.id));
+      this.backgroundError = void 0;
+    } catch (err) {
+      this.backgroundError = err instanceof Error ? err.message : String(err);
+    }
     this.emitter.fire(void 0);
   }
   trackRun(graphId, featureId, label, nodeIds) {
-    const run = { graphId, featureId, label, status: "running", nodes: new Map(nodeIds.map((id) => [id, "queued"])) };
+    const run = { graphId, featureId, label, status: "running", nodes: new Map(nodeIds.map((id) => [id, "queued"])), serverNodeIds: /* @__PURE__ */ new Map() };
     run.dispose = subscribeExecutionGraphEvents(graphId, (event) => {
+      if (event.type === "node_status" && event.nodeId && event.status) {
+        const taskId = taskIdFromNodeEvent(event, graphId);
+        if (taskId) run.serverNodeIds.set(taskId, event.nodeId);
+        if (event.status === "waiting_approval") {
+          run.waitingNodeId = event.nodeId;
+          run.status = "waiting approval";
+        } else if (run.waitingNodeId === event.nodeId) {
+          run.waitingNodeId = void 0;
+          if (run.status === "waiting approval") run.status = "running";
+        }
+      }
       const update = taskStatusFromEvent(event, graphId);
       if (update) {
         run.nodes.set(update.taskId, update.status);
@@ -19392,31 +20571,89 @@ var RunsTreeProvider = class {
           this.runs.delete(oldestId);
         }
       }
-      this.refresh();
+      this.fireChange();
+    }, {
+      onDisconnect: () => {
+        if (run.status === "running") run.status = "disconnected";
+        this.fireChange();
+      }
     });
     this.runs.set(graphId, run);
-    this.refresh();
+    this.fireChange();
   }
   cancelRun(graphId) {
     this.runs.get(graphId)?.dispose?.();
     this.runs.delete(graphId);
-    this.refresh();
+    this.fireChange();
+  }
+  /** The node id awaiting approval for a run, if any (used by the resolve-approval command). */
+  getWaitingNodeId(graphId) {
+    return this.runs.get(graphId)?.waitingNodeId;
+  }
+  /** Run metadata used to re-establish a subscription on retry/replay. */
+  getRunMeta(graphId) {
+    const run = this.runs.get(graphId);
+    return run ? { featureId: run.featureId, label: run.label, nodeIds: [...run.nodes.keys()] } : void 0;
   }
   getTreeItem(item) {
     if (item.kind === "run") {
-      const tree2 = new vscode12.TreeItem(item.run.label, vscode12.TreeItemCollapsibleState.Expanded);
-      tree2.description = item.run.status;
-      tree2.contextValue = "run";
-      tree2.iconPath = new vscode12.ThemeIcon(item.run.status === "running" ? "loading~spin" : "run-all");
+      const tree2 = new vscode14.TreeItem(item.run.label, vscode14.TreeItemCollapsibleState.Expanded);
+      const total = item.run.nodes.size;
+      const completed = [...item.run.nodes.values()].filter((s) => s === "completed").length;
+      tree2.description = total > 0 ? `${item.run.status} \xB7 ${completed}/${total}` : item.run.status;
+      const terminal = ["completed", "failed", "cancelled", "disconnected"].includes(item.run.status);
+      tree2.contextValue = item.run.waitingNodeId ? "run-waiting" : terminal ? "run-terminal" : "run";
+      const icon = item.run.waitingNodeId ? "person" : item.run.status === "running" ? "loading~spin" : item.run.status === "disconnected" ? "debug-disconnect" : item.run.status === "failed" ? "error" : "run-all";
+      tree2.iconPath = new vscode14.ThemeIcon(icon);
       return tree2;
     }
-    const tree = new vscode12.TreeItem(item.nodeId);
+    if (item.kind === "section") {
+      const tree2 = new vscode14.TreeItem("Background Runs", vscode14.TreeItemCollapsibleState.Collapsed);
+      tree2.contextValue = "runs-section-background";
+      tree2.tooltip = "Server-side runs (web, swarm, scheduled) not started from this IDE.";
+      tree2.iconPath = new vscode14.ThemeIcon("server-process");
+      return tree2;
+    }
+    if (item.kind === "bgRun") {
+      const tree2 = new vscode14.TreeItem(item.graph.goal || item.graph.id);
+      tree2.description = `${item.graph.status} \xB7 ${item.graph.mode}`;
+      tree2.tooltip = `${item.graph.id}
+${new Date(item.graph.createdAt).toLocaleString()}`;
+      tree2.contextValue = "bg-run";
+      const icon = item.graph.status === "running" ? "loading~spin" : item.graph.status === "waiting_approval" ? "person" : item.graph.status === "failed" ? "error" : item.graph.status === "completed" ? "pass" : "circle-outline";
+      tree2.iconPath = new vscode14.ThemeIcon(icon);
+      tree2.command = { command: "liberide.openPipeline", title: "Open Pipeline" };
+      return tree2;
+    }
+    if (item.kind === "info") {
+      const tree2 = new vscode14.TreeItem(item.label);
+      if (item.icon) tree2.iconPath = new vscode14.ThemeIcon(item.icon);
+      return tree2;
+    }
+    const tree = new vscode14.TreeItem(item.nodeId);
     tree.description = item.status;
+    tree.contextValue = "node";
+    tree.command = {
+      command: "liberide.showNodeDetail",
+      title: "Show Node Detail",
+      arguments: [{ graphId: item.graphId, nodeId: item.serverNodeId }]
+    };
     return tree;
   }
   getChildren(item) {
-    if (!item) return [...this.runs.values()].map((run) => ({ kind: "run", run }));
-    if (item.kind === "run") return [...item.run.nodes.entries()].map(([nodeId, status]) => ({ kind: "node", nodeId, status }));
+    if (!item) {
+      const local = [...this.runs.values()].map((run) => ({ kind: "run", run }));
+      return [...local, { kind: "section", section: "background" }];
+    }
+    if (item.kind === "run") {
+      const run = item.run;
+      return [...run.nodes.entries()].map(([nodeId, status]) => ({ kind: "node", graphId: run.graphId, nodeId, serverNodeId: run.serverNodeIds.get(nodeId) ?? nodeId, status }));
+    }
+    if (item.kind === "section") {
+      if (this.backgroundError) return [{ kind: "info", label: `Failed to load: ${this.backgroundError}`, icon: "error" }];
+      if (this.backgroundRuns.length === 0) return [{ kind: "info", label: "No background runs", icon: "circle-slash" }];
+      return this.backgroundRuns.map((graph) => ({ kind: "bgRun", graph }));
+    }
     return [];
   }
 };
@@ -19427,27 +20664,27 @@ function mapStatus(status) {
 }
 
 // src/views/specsTree.ts
-var vscode13 = __toESM(require("vscode"));
+var vscode15 = __toESM(require("vscode"));
 var SpecsTreeProvider = class {
   constructor(store2) {
     this.store = store2;
     store2.onDidChange(() => this.refresh());
   }
-  emitter = new vscode13.EventEmitter();
+  emitter = new vscode15.EventEmitter();
   onDidChangeTreeData = this.emitter.event;
   refresh() {
     this.emitter.fire(void 0);
   }
   getTreeItem(item) {
     if (item.kind === "feature") {
-      const tree2 = new vscode13.TreeItem(item.feature.name, vscode13.TreeItemCollapsibleState.Expanded);
+      const tree2 = new vscode15.TreeItem(item.feature.name, vscode15.TreeItemCollapsibleState.Expanded);
       tree2.description = item.feature.status;
       tree2.contextValue = "feature";
-      tree2.iconPath = new vscode13.ThemeIcon("folder");
+      tree2.iconPath = new vscode15.ThemeIcon("folder");
       tree2.command = { command: "liberide.setActiveFeature", title: "Set Active", arguments: [item.feature.id] };
       return tree2;
     }
-    const tree = new vscode13.TreeItem(item.label);
+    const tree = new vscode15.TreeItem(item.label);
     tree.resourceUri = item.uri;
     tree.command = { command: "vscode.open", title: "Open", arguments: [item.uri] };
     return tree;
@@ -19459,26 +20696,26 @@ var SpecsTreeProvider = class {
     return [
       f.requirementsUri && { kind: "file", label: `requirements.md (${f.requirementIds.length})`, uri: f.requirementsUri },
       f.designUri && { kind: "file", label: `design.md (${f.designIds.length})`, uri: f.designUri },
-      f.tasksDirUri && { kind: "file", label: `tasks/index.md (${f.tasks.length})`, uri: vscode13.Uri.joinPath(f.tasksDirUri, "index.md") }
+      f.tasksDirUri && { kind: "file", label: `tasks/index.md (${f.tasks.length})`, uri: vscode15.Uri.joinPath(f.tasksDirUri, "index.md") }
     ].filter(Boolean);
   }
 };
 
 // src/views/tasksTree.ts
-var vscode14 = __toESM(require("vscode"));
+var vscode16 = __toESM(require("vscode"));
 var TasksTreeProvider = class {
   constructor(store2) {
     this.store = store2;
     store2.onDidChange(() => this.refresh());
   }
-  emitter = new vscode14.EventEmitter();
+  emitter = new vscode16.EventEmitter();
   onDidChangeTreeData = this.emitter.event;
   refresh() {
     this.emitter.fire(void 0);
   }
   getTreeItem(item) {
-    if (item.kind === "group") return new vscode14.TreeItem(item.label, vscode14.TreeItemCollapsibleState.Expanded);
-    const tree = new vscode14.TreeItem(`${item.task.id}: ${item.task.title}`);
+    if (item.kind === "group") return new vscode16.TreeItem(item.label, vscode16.TreeItemCollapsibleState.Expanded);
+    const tree = new vscode16.TreeItem(`${item.task.id}: ${item.task.title}`);
     tree.description = item.task.status;
     tree.contextValue = "task";
     tree.command = { command: "liberide.openTask", title: "Open Task", arguments: [{ kind: "task", featureId: item.featureId, task: { id: item.task.id } }] };
@@ -19496,12 +20733,198 @@ var TasksTreeProvider = class {
   }
 };
 
+// src/views/approvalsTree.ts
+var vscode17 = __toESM(require("vscode"));
+function grantActive(grant) {
+  if (grant.revoked) return false;
+  if (grant.expiresAt && new Date(grant.expiresAt).getTime() <= Date.now()) return false;
+  if (grant.maxUses !== void 0 && grant.usedCount >= grant.maxUses) return false;
+  return true;
+}
+var ApprovalsTreeProvider = class {
+  constructor(log) {
+    this.log = log;
+  }
+  emitter = new vscode17.EventEmitter();
+  onDidChangeTreeData = this.emitter.event;
+  grants = [];
+  policies;
+  policiesForbidden = false;
+  loadError;
+  refresh() {
+    void this.reload();
+  }
+  async reload() {
+    try {
+      this.grants = await listApprovalGrants();
+      this.loadError = void 0;
+    } catch (err) {
+      this.loadError = err instanceof Error ? err.message : String(err);
+      this.log?.(`[approvals] grants load failed: ${this.loadError}`);
+    }
+    try {
+      const result = await listPermissionPolicies();
+      this.policies = result.policies;
+      this.policiesForbidden = Boolean(result.forbidden);
+    } catch (err) {
+      this.policies = void 0;
+      this.log?.(`[approvals] policies load failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    this.emitter.fire(void 0);
+  }
+  getTreeItem(item) {
+    switch (item.kind) {
+      case "section": {
+        const tree = new vscode17.TreeItem(item.label, vscode17.TreeItemCollapsibleState.Expanded);
+        tree.contextValue = `approvals-section-${item.section}`;
+        return tree;
+      }
+      case "grant": {
+        const label = item.grant.resourcePattern ? `${item.grant.scope} \xB7 ${item.grant.resourcePattern}` : item.grant.scope;
+        const tree = new vscode17.TreeItem(label);
+        const uses = item.grant.maxUses !== void 0 ? `${item.grant.usedCount}/${item.grant.maxUses} uses` : `${item.grant.usedCount} uses`;
+        const expiry = item.grant.revoked ? "revoked" : item.grant.expiresAt ? `expires ${new Date(item.grant.expiresAt).toLocaleString()}` : "no expiry";
+        tree.description = `${item.grant.issuer} \xB7 ${uses} \xB7 ${expiry}`;
+        tree.tooltip = `Granted ${new Date(item.grant.createdAt).toLocaleString()}`;
+        tree.contextValue = item.active ? "approval-grant-active" : "approval-grant-inactive";
+        tree.iconPath = new vscode17.ThemeIcon(item.active ? "shield" : "circle-slash");
+        return tree;
+      }
+      case "policy": {
+        const tree = new vscode17.TreeItem(item.policy.scope);
+        tree.description = item.policy.requiresApproval ? `approval required \xB7 ${item.policy.riskLevel}` : `auto \xB7 ${item.policy.riskLevel}`;
+        tree.tooltip = item.policy.description ?? item.policy.scope;
+        tree.iconPath = new vscode17.ThemeIcon(item.policy.requiresApproval ? "lock" : "unlock");
+        return tree;
+      }
+      case "info": {
+        const tree = new vscode17.TreeItem(item.label);
+        tree.tooltip = item.tooltip;
+        tree.command = item.command;
+        if (item.icon) tree.iconPath = new vscode17.ThemeIcon(item.icon);
+        return tree;
+      }
+    }
+  }
+  getChildren(item) {
+    if (!item) {
+      return [
+        { kind: "section", section: "grants", label: "Active Grants" },
+        { kind: "section", section: "history", label: "Grant History" },
+        { kind: "section", section: "policies", label: "Permission Policies" }
+      ];
+    }
+    if (item.kind !== "section") return [];
+    if (item.section === "grants") {
+      if (this.loadError) {
+        return [{ kind: "info", label: `Failed to load grants: ${this.loadError}`, icon: "error" }];
+      }
+      const active = this.grants.filter(grantActive);
+      if (active.length === 0) return [{ kind: "info", label: "No active grants", icon: "check" }];
+      return active.map((grant) => ({ kind: "grant", grant, active: true }));
+    }
+    if (item.section === "history") {
+      if (this.grants.length === 0) return [{ kind: "info", label: "No grant history", icon: "history" }];
+      return this.grants.map((grant) => ({ kind: "grant", grant, active: grantActive(grant) }));
+    }
+    if (this.policiesForbidden) {
+      const origin = getApiOrigin();
+      return [
+        {
+          kind: "info",
+          label: "Managed in the web app (manager only)",
+          tooltip: "Permission policies require the manager role. Open the web app to view or change them.",
+          icon: "link-external",
+          command: origin ? { command: "vscode.open", title: "Open web app", arguments: [vscode17.Uri.parse(origin)] } : void 0
+        }
+      ];
+    }
+    if (!this.policies) {
+      return [{ kind: "info", label: "Policies unavailable", icon: "warning" }];
+    }
+    return this.policies.map((policy) => ({ kind: "policy", policy }));
+  }
+  /** Returns the grant id for a revoke command argument. */
+  static grantIdOf(item) {
+    if (item && typeof item === "object" && item.kind === "grant") {
+      return item.grant.id;
+    }
+    return void 0;
+  }
+};
+
+// src/views/mcpTree.ts
+var vscode18 = __toESM(require("vscode"));
+var McpTreeProvider = class {
+  constructor(log) {
+    this.log = log;
+  }
+  emitter = new vscode18.EventEmitter();
+  onDidChangeTreeData = this.emitter.event;
+  servers = [];
+  loadError;
+  refresh() {
+    void this.reload();
+  }
+  async reload() {
+    try {
+      this.servers = await listMcpServers();
+      this.loadError = void 0;
+    } catch (err) {
+      this.loadError = err instanceof Error ? err.message : String(err);
+      this.log?.(`[mcp] load failed: ${this.loadError}`);
+    }
+    this.emitter.fire(void 0);
+  }
+  getTreeItem(item) {
+    if (item.kind === "info") {
+      const tree2 = new vscode18.TreeItem(item.label);
+      tree2.tooltip = item.tooltip;
+      tree2.command = item.command;
+      if (item.icon) tree2.iconPath = new vscode18.ThemeIcon(item.icon);
+      return tree2;
+    }
+    const { server } = item;
+    const enabled = server.enabledForUser ?? false;
+    const tree = new vscode18.TreeItem(server.name);
+    tree.description = `${server.transport ?? "stdio"} \xB7 ${enabled ? "enabled" : "disabled"}`;
+    tree.tooltip = server.description ?? (server.transport === "http" ? server.url : server.command);
+    tree.contextValue = enabled ? "mcp-server-enabled" : "mcp-server-disabled";
+    tree.iconPath = new vscode18.ThemeIcon(enabled ? "plug" : "circle-slash");
+    return tree;
+  }
+  getChildren(item) {
+    if (item) return [];
+    if (this.loadError) {
+      return [{ kind: "info", label: `Failed to load MCP servers: ${this.loadError}`, icon: "error" }];
+    }
+    const rows = this.servers.map((server) => ({ kind: "server", server }));
+    const origin = getApiOrigin();
+    rows.push({
+      kind: "info",
+      label: "Add or configure servers in the web app (manager only)",
+      tooltip: "Creating, editing, or deleting MCP servers requires the manager role and is done in the web app.",
+      icon: "link-external",
+      command: origin ? { command: "vscode.open", title: "Open web app", arguments: [vscode18.Uri.parse(origin)] } : void 0
+    });
+    return rows;
+  }
+  static serverOf(item) {
+    if (item && typeof item === "object" && item.kind === "server") {
+      return item.server;
+    }
+    return void 0;
+  }
+};
+
 // src/ide-delegate/stream.ts
-var vscode33 = __toESM(require("vscode"));
+var vscode36 = __toESM(require("vscode"));
 var import_node_os = require("node:os");
 
 // src/ide-delegate/handlers/editors.ts
-var vscode15 = __toESM(require("vscode"));
+var vscode19 = __toESM(require("vscode"));
+init_helpers();
+init_redaction();
 function inWorkspace(uri) {
   return uri.scheme === "file" && isInWorkspace(uri.fsPath);
 }
@@ -19509,15 +20932,15 @@ function tabPath(uri, label) {
   return uri && inWorkspace(uri) ? relativePath(uri.fsPath) : label;
 }
 async function handleOpenEditors() {
-  const groups = vscode15.window.tabGroups.all.map((group) => ({
+  const groups = vscode19.window.tabGroups.all.map((group) => ({
     activeTab: group.activeTab ? {
       label: group.activeTab.label,
-      input: tabPath(group.activeTab.input instanceof vscode15.TabInputText ? group.activeTab.input.uri : void 0, group.activeTab.label)
+      input: tabPath(group.activeTab.input instanceof vscode19.TabInputText ? group.activeTab.input.uri : void 0, group.activeTab.label)
     } : null,
     tabs: group.tabs.map((tab) => {
       const input = tab.input;
       const filePath = tabPath(
-        input instanceof vscode15.TabInputText ? input.uri : input instanceof vscode15.TabInputTextDiff ? input.modified : void 0,
+        input instanceof vscode19.TabInputText ? input.uri : input instanceof vscode19.TabInputTextDiff ? input.modified : void 0,
         tab.label
       );
       return {
@@ -19528,7 +20951,7 @@ async function handleOpenEditors() {
       };
     })
   }));
-  const active = vscode15.window.activeTextEditor;
+  const active = vscode19.window.activeTextEditor;
   return {
     tabGroups: groups,
     activeEditor: active && inWorkspace(active.document.uri) ? {
@@ -19544,7 +20967,7 @@ async function handleOpenEditors() {
 async function handleDirtyBuffers(payload) {
   const maxChars = Number(payload.maxChars ?? 5e5);
   const buffers = [];
-  for (const doc of vscode15.workspace.textDocuments) {
+  for (const doc of vscode19.workspace.textDocuments) {
     if (!doc.isDirty) continue;
     if (!inWorkspace(doc.uri)) continue;
     const { text, redacted } = redactIfSecret(doc.uri.fsPath, doc.getText());
@@ -19565,7 +20988,7 @@ async function handleDirtyBuffers(payload) {
   return { buffers, count: buffers.length };
 }
 async function handleActiveSelection() {
-  const editor = vscode15.window.activeTextEditor;
+  const editor = vscode19.window.activeTextEditor;
   if (!editor) return { available: false };
   if (!inWorkspace(editor.document.uri)) return { available: false, reason: "The active editor is outside this workspace folder" };
   const sel = editor.selection;
@@ -19583,10 +21006,16 @@ async function handleActiveSelection() {
 }
 
 // src/ide-delegate/handlers/diagnostics.ts
-var vscode16 = __toESM(require("vscode"));
+var vscode20 = __toESM(require("vscode"));
+init_helpers();
+init_path_containment();
 async function handleDiagnostics(payload) {
-  const filterPaths = Array.isArray(payload.filePaths) ? payload.filePaths.map(String) : void 0;
-  const all = vscode16.languages.getDiagnostics();
+  const root = workspaceFolder()?.uri.fsPath;
+  const filterPaths = Array.isArray(payload.filePaths) ? payload.filePaths.map(String).map((p) => {
+    if (root) resolveContainedRelativePath(root, p);
+    return p;
+  }) : void 0;
+  const all = vscode20.languages.getDiagnostics();
   const entries = [];
   for (const [uri, diags] of all) {
     if (uri.scheme !== "file" || !isInWorkspace(uri.fsPath)) continue;
@@ -19596,7 +21025,7 @@ async function handleDiagnostics(payload) {
       path: rel2,
       diagnostics: diags.map((d) => ({
         message: d.message,
-        severity: vscode16.DiagnosticSeverity[d.severity] ?? String(d.severity),
+        severity: vscode20.DiagnosticSeverity[d.severity] ?? String(d.severity),
         line: d.range.start.line + 1,
         character: d.range.start.character,
         source: d.source,
@@ -19608,7 +21037,8 @@ async function handleDiagnostics(payload) {
 }
 
 // src/ide-delegate/handlers/lsp.ts
-var vscode17 = __toESM(require("vscode"));
+var vscode21 = __toESM(require("vscode"));
+init_helpers();
 function locationToJson(loc) {
   if ("uri" in loc && loc.uri) {
     return {
@@ -19633,7 +21063,7 @@ function pageOf(items, payload, defaultSize = 50) {
 }
 async function handleWorkspaceSymbols(payload) {
   const query = String(payload.query ?? "");
-  const all = await vscode17.commands.executeCommand(
+  const all = await vscode21.commands.executeCommand(
     "vscode.executeWorkspaceSymbolProvider",
     query
   ) ?? [];
@@ -19645,7 +21075,7 @@ async function handleWorkspaceSymbols(payload) {
     ...nextCursor !== void 0 ? { nextCursor, hasMore: true } : { hasMore: false },
     symbols: page.map((s) => ({
       name: s.name,
-      kind: vscode17.SymbolKind[s.kind],
+      kind: vscode21.SymbolKind[s.kind],
       path: relativePath(s.location.uri.fsPath),
       line: s.location.range.start.line + 1,
       character: s.location.range.start.character,
@@ -19656,7 +21086,7 @@ async function handleWorkspaceSymbols(payload) {
 async function handleDocumentSymbols(payload) {
   const filePath = String(payload.path ?? "");
   const uri = resolveFileUri(filePath);
-  const symbols = await vscode17.commands.executeCommand(
+  const symbols = await vscode21.commands.executeCommand(
     "vscode.executeDocumentSymbolProvider",
     uri
   ) ?? [];
@@ -19664,7 +21094,7 @@ async function handleDocumentSymbols(payload) {
     for (const item of items) {
       out.push({
         name: item.name,
-        kind: vscode17.SymbolKind[item.kind],
+        kind: vscode21.SymbolKind[item.kind],
         line: item.range.start.line + 1,
         detail: item.detail
       });
@@ -19676,8 +21106,8 @@ async function handleDocumentSymbols(payload) {
 }
 async function handleDefinition(payload) {
   const uri = resolveFileUri(String(payload.path ?? ""));
-  const position = new vscode17.Position(Number(payload.line ?? 1) - 1, Number(payload.character ?? 0));
-  const defs = await vscode17.commands.executeCommand(
+  const position = new vscode21.Position(Number(payload.line ?? 1) - 1, Number(payload.character ?? 0));
+  const defs = await vscode21.commands.executeCommand(
     "vscode.executeDefinitionProvider",
     uri,
     position
@@ -19686,8 +21116,8 @@ async function handleDefinition(payload) {
 }
 async function handleReferences(payload) {
   const uri = resolveFileUri(String(payload.path ?? ""));
-  const position = new vscode17.Position(Number(payload.line ?? 1) - 1, Number(payload.character ?? 0));
-  const refs = await vscode17.commands.executeCommand(
+  const position = new vscode21.Position(Number(payload.line ?? 1) - 1, Number(payload.character ?? 0));
+  const refs = await vscode21.commands.executeCommand(
     "vscode.executeReferenceProvider",
     uri,
     position
@@ -19697,8 +21127,8 @@ async function handleReferences(payload) {
 }
 async function handleHover(payload) {
   const uri = resolveFileUri(String(payload.path ?? ""));
-  const position = new vscode17.Position(Number(payload.line ?? 1) - 1, Number(payload.character ?? 0));
-  const hover = await vscode17.commands.executeCommand(
+  const position = new vscode21.Position(Number(payload.line ?? 1) - 1, Number(payload.character ?? 0));
+  const hover = await vscode21.commands.executeCommand(
     "vscode.executeHoverProvider",
     uri,
     position
@@ -19709,14 +21139,16 @@ async function handleHover(payload) {
 }
 
 // src/ide-delegate/handlers/files.ts
-var vscode18 = __toESM(require("vscode"));
+var vscode22 = __toESM(require("vscode"));
+init_helpers();
+init_path_containment();
 async function handleFindFiles(payload) {
   const folder = workspaceFolder();
   if (!folder) throw new Error("No workspace folder open");
-  const pattern = String(payload.pattern ?? "**/*");
+  const pattern = assertContainedGlobPattern(String(payload.pattern ?? "**/*"));
   const maxResults = Number(payload.maxResults ?? 200);
-  const uris = await vscode18.workspace.findFiles(
-    new vscode18.RelativePattern(folder, pattern),
+  const uris = await vscode22.workspace.findFiles(
+    new vscode22.RelativePattern(folder, pattern),
     "**/{node_modules,.git,dist,build,out}/**",
     maxResults
   );
@@ -19726,90 +21158,15 @@ async function handleFindFiles(payload) {
   };
 }
 
-// src/ide-delegate/handlers/git.ts
-var vscode19 = __toESM(require("vscode"));
-var path4 = __toESM(require("node:path"));
-function isInside(root, candidate) {
-  const rel2 = path4.relative(root, candidate);
-  return rel2 === "" || rel2 !== ".." && !rel2.startsWith(`..${path4.sep}`) && !path4.isAbsolute(rel2);
-}
-async function getGitRepo(root) {
-  const ext = vscode19.extensions.getExtension("vscode.git");
-  if (!ext) throw new Error("vscode.git extension is not available");
-  if (!ext.isActive) await ext.activate();
-  const repos = ext.exports.getAPI(1).repositories.filter((r) => isInside(r.rootUri.fsPath, root) || isInside(root, r.rootUri.fsPath)).sort((a, b) => b.rootUri.fsPath.length - a.rootUri.fsPath.length);
-  const repo = repos.find((r) => isInside(r.rootUri.fsPath, root)) ?? repos[0];
-  if (!repo) throw new Error("No git repository found in workspace");
-  return repo;
-}
-function rel(fsPath, root) {
-  return path4.relative(root, fsPath).replace(/\\/g, "/");
-}
-function truncate2(text, maxBytes) {
-  return text.length > maxBytes ? `${text.slice(0, maxBytes)}
-... [truncated]` : text;
-}
-async function handleGitStatus(root) {
-  const repo = await getGitRepo(root);
-  const repoRoot = repo.rootUri.fsPath;
-  const { state } = repo;
-  return {
-    branch: state.HEAD?.name ?? null,
-    commit: state.HEAD?.commit ?? null,
-    ahead: state.HEAD?.ahead ?? 0,
-    behind: state.HEAD?.behind ?? 0,
-    indexChanges: state.indexChanges.map((c) => ({ path: rel(c.uri.fsPath, repoRoot), status: c.status })),
-    workingTreeChanges: state.workingTreeChanges.map((c) => ({ path: rel(c.uri.fsPath, repoRoot), status: c.status })),
-    mergeChanges: state.mergeChanges.map((c) => ({ path: rel(c.uri.fsPath, repoRoot), status: c.status }))
-  };
-}
-async function handleGitLog(root, payload) {
-  const repo = await getGitRepo(root);
-  const maxCount = Math.max(1, Math.min(Number(payload.maxCount ?? 20), 200));
-  const relPath2 = payload.path ? String(payload.path) : void 0;
-  const commits = await repo.log({
-    maxEntries: maxCount,
-    ...relPath2 ? { path: resolveInsideRootSync(root, relPath2) } : {}
-  });
-  return {
-    commits: commits.map((c) => ({
-      hash: c.hash,
-      message: c.message,
-      author: c.authorName,
-      email: c.authorEmail,
-      date: c.authorDate ? new Date(c.authorDate).toISOString() : void 0
-    }))
-  };
-}
-async function handleGitDiff(root, payload) {
-  const repo = await getGitRepo(root);
-  const relPath2 = payload.path ? String(payload.path) : void 0;
-  const staged = payload.staged === true;
-  const maxBytes = Number(payload.maxBytes ?? 8e4);
-  let text;
-  if (relPath2) {
-    const full = resolveInsideRootSync(root, relPath2);
-    text = staged ? await repo.diffIndexWithHEAD(full) : await repo.diffWithHEAD(full);
-  } else {
-    text = await repo.diff(staged);
-  }
-  return { path: relPath2 ?? ".", staged, diff: truncate2(redactUnifiedDiff(text ?? "", relPath2), maxBytes) };
-}
-async function handleGitBlame(root, payload) {
-  const repo = await getGitRepo(root);
-  const relPath2 = String(payload.path ?? "");
-  if (!relPath2) throw new Error("path is required");
-  const blame = await repo.blame(resolveInsideRootSync(root, relPath2));
-  const lines = (blame ?? "").split("\n").slice(0, 500);
-  return { path: relPath2, blame: lines.join("\n"), lineCount: lines.length };
-}
+// src/ide-delegate/handlers/index.ts
+init_git();
 
 // src/ide-delegate/handlers/terminal-session.ts
-var path6 = __toESM(require("node:path"));
+var path7 = __toESM(require("node:path"));
 
 // src/terminal/local-runner.ts
 var import_child_process = require("child_process");
-var path5 = __toESM(require("path"));
+var path6 = __toESM(require("path"));
 var MAX_OUTPUT = 1e5;
 var KILL_GRACE_MS = 2e3;
 var OutputBuffer = class {
@@ -19829,6 +21186,9 @@ var OutputBuffer = class {
       this.dropped += excess;
       this.tail = this.tail.slice(excess);
     }
+  }
+  get truncated() {
+    return this.dropped > 0;
   }
   toString() {
     if (!this.dropped) return this.head + this.tail;
@@ -19891,12 +21251,13 @@ function killTree(proc) {
   }, KILL_GRACE_MS).unref();
 }
 function runLocalTerminal(delegate, signal, hooks = {}) {
-  const cwd = path5.resolve(delegate.cwd || delegate.projectPath);
+  const cwd = path6.resolve(delegate.cwd || delegate.projectPath);
   const argv = shellArgv(delegate.command);
   const timeoutMs = delegate.timeoutMs > 0 ? delegate.timeoutMs : 12e4;
-  return new Promise((resolve8) => {
+  const startedAt = Date.now();
+  return new Promise((resolve9) => {
     if (signal?.aborted) {
-      resolve8({ exitCode: null, stdout: "", stderr: "Cancelled before start", timedOut: false, cancelled: true });
+      resolve9({ status: "cancelled", exitCode: null, stdout: "", stderr: "Cancelled before start", timedOut: false, cancelled: true, durationMs: 0, truncated: false, stillRunning: false });
       return;
     }
     const proc = (0, import_child_process.spawn)(argv[0], argv.slice(1), {
@@ -19935,26 +21296,30 @@ function runLocalTerminal(delegate, signal, hooks = {}) {
     const finish = (result) => {
       clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
-      resolve8(result);
+      resolve9(result);
     };
     proc.on("close", (code, killSignal) => {
       finish({
+        status: cancelled ? "cancelled" : timedOut ? "timed_out" : code === 0 ? "completed" : "failed",
         exitCode: code,
         stdout: stdout.toString(),
         stderr: stderr.toString(),
         timedOut,
+        durationMs: Date.now() - startedAt,
+        truncated: stdout.truncated || stderr.truncated,
+        stillRunning: false,
         ...cancelled ? { cancelled } : {},
         ...killSignal ? { signal: killSignal } : {}
       });
     });
     proc.on("error", (err) => {
-      finish({ exitCode: 1, stdout: "", stderr: err.message, timedOut: false });
+      finish({ status: "failed", exitCode: 1, stdout: "", stderr: err.message, timedOut: false, durationMs: Date.now() - startedAt, truncated: false, stillRunning: false });
     });
   });
 }
 
 // src/terminal/agent-terminals.ts
-var vscode20 = __toESM(require("vscode"));
+var vscode23 = __toESM(require("vscode"));
 var import_child_process2 = require("child_process");
 var import_crypto = require("crypto");
 var MAX_SESSIONS = 8;
@@ -19970,7 +21335,7 @@ function toTerminalText(text) {
 }
 var TerminalView = class {
   terminal;
-  writeEmitter = new vscode20.EventEmitter();
+  writeEmitter = new vscode23.EventEmitter();
   pending = [];
   closedByUser = false;
   constructor(name, handlers = {}) {
@@ -19987,7 +21352,7 @@ var TerminalView = class {
       },
       handleInput: handlers.onInput
     };
-    this.terminal = vscode20.window.createTerminal({ name, pty });
+    this.terminal = vscode23.window.createTerminal({ name, pty });
   }
   write(text) {
     const chunk = toTerminalText(text);
@@ -20138,14 +21503,14 @@ var AgentTerminalSession = class {
     return this.read(false);
   }
   waitForOutput(since, maxWaitMs, signal) {
-    return new Promise((resolve8) => {
+    return new Promise((resolve9) => {
       let quietTimer;
       const done = () => {
         clearTimeout(deadline);
         if (quietTimer) clearTimeout(quietTimer);
         this.outputListeners.delete(onOutput);
         signal?.removeEventListener("abort", done);
-        resolve8();
+        resolve9();
       };
       const onOutput = () => {
         if (this.exited) return done();
@@ -20241,10 +21606,10 @@ function agentOutputView(name) {
 
 // src/ide-delegate/handlers/terminal-session.ts
 function cwdInside(root, requested) {
-  const base = path6.resolve(root);
-  const cwd = path6.resolve(base, typeof requested === "string" && requested ? requested : ".");
-  const rel2 = path6.relative(base, cwd);
-  if (rel2 === ".." || rel2.startsWith(`..${path6.sep}`) || path6.isAbsolute(rel2)) {
+  const base = path7.resolve(root);
+  const cwd = path7.resolve(base, typeof requested === "string" && requested ? requested : ".");
+  const rel2 = path7.relative(base, cwd);
+  if (rel2 === ".." || rel2.startsWith(`..${path7.sep}`) || path7.isAbsolute(rel2)) {
     throw new Error("Terminal cwd is outside the workspace folder");
   }
   return cwd;
@@ -20297,7 +21662,7 @@ async function handleTerminalSessionClose(payload) {
 }
 
 // src/ide-delegate/handlers/terminal-run.ts
-var path7 = __toESM(require("node:path"));
+var path8 = __toESM(require("node:path"));
 async function handleTerminalRun(payload, signal) {
   const delegate = {
     delegateId: String(payload.delegateId ?? ""),
@@ -20308,30 +21673,33 @@ async function handleTerminalRun(payload, signal) {
     sessionId: payload.sessionId ? String(payload.sessionId) : void 0,
     conversationId: payload.conversationId ? String(payload.conversationId) : void 0
   };
-  const root = path7.resolve(delegate.projectPath);
-  const cwd = path7.resolve(root, delegate.cwd || ".");
-  const rel2 = path7.relative(root, cwd);
-  if (rel2 === ".." || rel2.startsWith(`..${path7.sep}`) || path7.isAbsolute(rel2)) {
+  const root = path8.resolve(delegate.projectPath);
+  const cwd = path8.resolve(root, delegate.cwd || ".");
+  const rel2 = path8.relative(root, cwd);
+  if (rel2 === ".." || rel2.startsWith(`..${path8.sep}`) || path8.isAbsolute(rel2)) {
     throw new Error("terminal.run cwd is outside the workspace folder");
   }
   return runLocalTerminal({ ...delegate, cwd }, signal);
 }
 
 // src/ide-delegate/handlers/refactor.ts
-var vscode22 = __toESM(require("vscode"));
+var vscode25 = __toESM(require("vscode"));
+init_helpers();
 
 // src/ide-delegate/handlers/edit-apply.ts
-var vscode21 = __toESM(require("vscode"));
-var path8 = __toESM(require("node:path"));
+var vscode24 = __toESM(require("vscode"));
+var path9 = __toESM(require("node:path"));
+init_helpers();
+init_redaction();
 function relativeToFolder(uri) {
   const folder = workspaceFolder();
   if (!folder) throw new Error("No workspace folder open");
   if (uri.scheme === "file" && folder.uri.scheme === "file") {
     if (!isInWorkspace(uri.fsPath)) throw new Error(`Refusing to change a file outside the workspace folder: ${uri.fsPath}`);
-    return path8.relative(folder.uri.fsPath, uri.fsPath).replace(/\\/g, "/");
+    return path9.relative(folder.uri.fsPath, uri.fsPath).replace(/\\/g, "/");
   }
-  const rel2 = path8.posix.relative(folder.uri.path, uri.path);
-  if (uri.scheme !== folder.uri.scheme || rel2 === ".." || rel2.startsWith("../") || path8.posix.isAbsolute(rel2)) {
+  const rel2 = path9.posix.relative(folder.uri.path, uri.path);
+  if (uri.scheme !== folder.uri.scheme || rel2 === ".." || rel2.startsWith("../") || path9.posix.isAbsolute(rel2)) {
     throw new Error(`Refusing to change a file outside the workspace folder: ${uri.toString()}`);
   }
   return rel2;
@@ -20343,7 +21711,7 @@ function assertEditableResource(resource) {
 }
 async function guardRedactedText(uri, edits) {
   if (!edits.some((edit) => countRedactionPlaceholders(edit.newText) > 0)) return;
-  const doc = await vscode21.workspace.openTextDocument(uri).then((d) => d, () => void 0);
+  const doc = await vscode24.workspace.openTextDocument(uri).then((d) => d, () => void 0);
   const label = uri.scheme === "file" ? relativePath(uri.fsPath) : uri.toString();
   for (const edit of edits) assertNoRedactionPlaceholders(doc?.getText(edit.range) ?? "", edit.newText, label);
 }
@@ -20357,7 +21725,7 @@ async function saveDocuments(uris) {
     const key = uri.toString();
     if (seen.has(key)) continue;
     seen.add(key);
-    const doc = vscode21.workspace.textDocuments.find((d) => d.uri.toString() === key);
+    const doc = vscode24.workspace.textDocuments.find((d) => d.uri.toString() === key);
     if (doc?.isDirty && await doc.save()) saved.push(uri.scheme === "file" ? relativePath(uri.fsPath) : key);
   }
   return saved;
@@ -20368,14 +21736,26 @@ async function applyTrackedEdit(edit, touched) {
   for (const resource of touched) {
     if (resource.uri.scheme === "file") await snapshotBeforeChange(resource.uri.fsPath);
   }
-  const applied = await vscode21.workspace.applyEdit(edit);
+  const applied = await vscode24.workspace.applyEdit(edit);
   const saved = applied ? await saveDocuments(touched.map((resource) => resource.uri)) : [];
   return { applied, saved };
 }
 
 // src/ide-delegate/handlers/refactor.ts
+init_redaction();
 var CODE_ACTION_RESOLVE_COUNT = 50;
 var codeActionCache = /* @__PURE__ */ new Map();
+async function confirmMutation(summary) {
+  if (readSettings().confirmEdits === "off") return true;
+  const choice = await vscode25.window.showWarningMessage(
+    `Apply agent change?
+
+${summary}`,
+    { modal: true },
+    "Apply"
+  );
+  return choice === "Apply";
+}
 function cacheAction(action) {
   const id = crypto.randomUUID();
   codeActionCache.set(id, action);
@@ -20389,7 +21769,7 @@ async function handleCodeActions(payload) {
   const uri = resolveFileUri(String(payload.path ?? ""));
   const range = rangeFromPayload(payload);
   const kinds = payload.only ? String(payload.only).split(",").map((kind) => kind.trim()).filter(Boolean) : [];
-  const provided = await vscode22.commands.executeCommand(
+  const provided = await vscode25.commands.executeCommand(
     "vscode.executeCodeActionProvider",
     uri,
     range,
@@ -20416,12 +21796,15 @@ async function handleApplyCodeAction(payload) {
     throw new Error(`Code action '${action.title}' has nothing to apply (no edit or command after resolving)`);
   }
   const touched = action.edit ? touchedByEdit(action.edit) : [];
+  if (!await confirmMutation(`Code action: ${action.title}`)) {
+    return { applied: false, title: action.title, cancelled: true };
+  }
   if (action.edit) {
     const { applied } = await applyTrackedEdit(action.edit, touched);
     if (!applied) throw new Error("Failed to apply code action edit");
   }
   if (action.command) {
-    await vscode22.commands.executeCommand(action.command.command, ...action.command.arguments ?? []);
+    await vscode25.commands.executeCommand(action.command.command, ...action.command.arguments ?? []);
     await saveDocuments(touched.map((resource) => resource.uri));
   }
   codeActionCache.delete(actionId);
@@ -20433,24 +21816,27 @@ async function handleRenameSymbol(payload) {
   const newName = String(payload.newName ?? "");
   if (!newName) throw new Error("newName is required");
   if (countRedactionPlaceholders(newName) > 0) throw new Error("newName contains a [REDACTED] placeholder");
-  const edit = await vscode22.commands.executeCommand(
+  const edit = await vscode25.commands.executeCommand(
     "vscode.executeDocumentRenameProvider",
     uri,
     position,
     newName
   );
   if (!edit) throw new Error("Rename provider returned no edit");
+  if (!await confirmMutation(`Rename symbol to "${newName}"`)) {
+    return { applied: false, newName, cancelled: true };
+  }
   const touched = touchedByEdit(edit);
   const { applied, saved } = await applyTrackedEdit(edit, touched);
   return { applied, newName, changedFiles: touched.filter((r) => r.uri.scheme === "file").map((r) => relativePath(r.uri.fsPath)), saved };
 }
 function formattingOptions(uri) {
-  const config2 = vscode22.workspace.getConfiguration("editor", uri);
+  const config2 = vscode25.workspace.getConfiguration("editor", uri);
   return { tabSize: Number(config2.get("tabSize", 4)), insertSpaces: config2.get("insertSpaces") !== false };
 }
 async function applyFormatEdits(filePath, uri, edits) {
   if (!edits?.length) return { path: filePath, formatted: false, reason: "No formatter changes (or no formatter for this file)" };
-  const edit = new vscode22.WorkspaceEdit();
+  const edit = new vscode25.WorkspaceEdit();
   edit.set(uri, edits);
   const { applied, saved } = await applyTrackedEdit(edit, [{ uri, operation: "edit" }]);
   return { path: filePath, formatted: applied, edits: edits.length, saved: saved.length > 0 };
@@ -20458,8 +21844,8 @@ async function applyFormatEdits(filePath, uri, edits) {
 async function handleFormatDocument(payload) {
   const filePath = String(payload.path ?? "");
   const uri = resolveFileUri(filePath);
-  await vscode22.workspace.openTextDocument(uri);
-  const edits = await vscode22.commands.executeCommand(
+  await vscode25.workspace.openTextDocument(uri);
+  const edits = await vscode25.commands.executeCommand(
     "vscode.executeFormatDocumentProvider",
     uri,
     formattingOptions(uri)
@@ -20469,8 +21855,8 @@ async function handleFormatDocument(payload) {
 async function handleFormatRange(payload) {
   const filePath = String(payload.path ?? "");
   const uri = resolveFileUri(filePath);
-  await vscode22.workspace.openTextDocument(uri);
-  const edits = await vscode22.commands.executeCommand(
+  await vscode25.workspace.openTextDocument(uri);
+  const edits = await vscode25.commands.executeCommand(
     "vscode.executeFormatRangeProvider",
     uri,
     rangeFromPayload(payload),
@@ -20480,25 +21866,58 @@ async function handleFormatRange(payload) {
 }
 
 // src/ide-delegate/handlers/workspace-edit.ts
-var vscode23 = __toESM(require("vscode"));
+var vscode26 = __toESM(require("vscode"));
+init_helpers();
+
+// src/ide-delegate/handlers/edit-confirm.ts
+function summarizeEdit(payload) {
+  const files = /* @__PURE__ */ new Set();
+  let hasDestructive = false;
+  const changes = payload.changes;
+  if (changes) for (const path11 of Object.keys(changes)) files.add(path11);
+  const documentChanges = payload.documentChanges;
+  if (Array.isArray(documentChanges)) {
+    for (const change of documentChanges) {
+      if (change.kind === "rename") {
+        hasDestructive = true;
+        if (change.oldPath) files.add(String(change.oldPath));
+        if (change.newPath) files.add(String(change.newPath));
+      } else if (change.kind === "create" || change.kind === "delete") {
+        hasDestructive = true;
+        if (change.path) files.add(String(change.path));
+      } else if (change.textEdits && change.path) {
+        files.add(String(change.path));
+      }
+    }
+  }
+  return { fileCount: files.size, hasDestructive };
+}
+function shouldConfirmEdit(payload, mode) {
+  if (mode === "off") return false;
+  if (mode === "always") return true;
+  const summary = summarizeEdit(payload);
+  return summary.fileCount > 1 || summary.hasDestructive;
+}
+
+// src/ide-delegate/handlers/workspace-edit.ts
 function rangeFromEditPayload(edit) {
-  return new vscode23.Range(
+  return new vscode26.Range(
     edit.range.startLine - 1,
     edit.range.startCharacter,
     edit.range.endLine - 1,
     edit.range.endCharacter
   );
 }
-function buildWorkspaceEdit(payload) {
-  const edit = new vscode23.WorkspaceEdit();
+function buildWorkspaceEdit(payload, meta3) {
+  const edit = new vscode26.WorkspaceEdit();
   const touched = [];
+  const addEdits = (uri, edits) => {
+    for (const e of edits) edit.replace(uri, rangeFromEditPayload(e), e.newText, meta3);
+    touched.push({ uri, operation: "edit" });
+  };
   const changes = payload.changes;
   if (changes) {
-    for (const [filePath, edits] of Object.entries(changes)) {
-      const uri = resolveFileUri(filePath);
-      edit.set(uri, edits.map((e) => new vscode23.TextEdit(rangeFromEditPayload(e), e.newText)));
-      touched.push({ uri, operation: "edit" });
-    }
+    for (const [filePath, edits] of Object.entries(changes)) addEdits(resolveFileUri(filePath), edits);
   }
   const documentChanges = payload.documentChanges;
   if (documentChanges) {
@@ -20507,37 +21926,36 @@ function buildWorkspaceEdit(payload) {
         const oldUri = resolveFileUri(String(change.oldPath ?? ""));
         const newUri = resolveFileUri(String(change.newPath ?? ""));
         const options = change.options;
-        edit.renameFile(oldUri, newUri, options);
+        edit.renameFile(oldUri, newUri, options, meta3);
         touched.push({ uri: oldUri, operation: "rename" }, { uri: newUri, operation: "rename" });
       } else if (change.kind === "create") {
         const uri = resolveFileUri(String(change.path ?? ""));
         const options = change.options;
-        edit.createFile(uri, options);
+        edit.createFile(uri, options, meta3);
         touched.push({ uri, operation: "create" });
       } else if (change.kind === "delete") {
         const uri = resolveFileUri(String(change.path ?? ""));
         const options = change.options;
-        edit.deleteFile(uri, options);
+        edit.deleteFile(uri, options, meta3);
         touched.push({ uri, operation: "delete" });
       } else if (change.textEdits) {
-        const uri = resolveFileUri(String(change.path ?? ""));
-        const edits = change.textEdits;
-        edit.set(uri, edits.map((e) => new vscode23.TextEdit(rangeFromEditPayload(e), e.newText)));
-        touched.push({ uri, operation: "edit" });
+        addEdits(resolveFileUri(String(change.path ?? "")), change.textEdits);
       }
     }
   }
   return { edit, touched };
 }
 async function handleApplyWorkspaceEdit(payload) {
-  const { edit, touched } = buildWorkspaceEdit(payload);
+  const confirm = shouldConfirmEdit(payload, readSettings().confirmEdits);
+  const meta3 = confirm ? { needsConfirmation: true, label: "LiberIDE agent edit" } : void 0;
+  const { edit, touched } = buildWorkspaceEdit(payload, meta3);
   const { applied, saved } = await applyTrackedEdit(edit, touched);
   const changedFiles = touched.filter((resource) => resource.uri.scheme === "file").map((resource) => relativePath(resource.uri.fsPath));
-  return { applied, changedFiles: [...new Set(changedFiles)], saved };
+  return { applied, changedFiles: [...new Set(changedFiles)], saved, ...confirm ? { previewed: true } : {} };
 }
 
 // src/ide-delegate/handlers/tasks.ts
-var vscode24 = __toESM(require("vscode"));
+var vscode27 = __toESM(require("vscode"));
 var taskRuns = /* @__PURE__ */ new Map();
 var MAX_TRACKED_RUNS = 100;
 var listening = false;
@@ -20548,15 +21966,22 @@ function runFor(execution) {
 function ensureTaskListeners() {
   if (listening) return;
   listening = true;
-  vscode24.tasks.onDidEndTaskProcess((event) => {
+  vscode27.tasks.onDidStartTaskProcess((event) => {
     const run = runFor(event.execution);
-    if (run && event.exitCode !== void 0) run.exitCode = event.exitCode;
+    if (run && run.status === "started") run.status = "running";
   });
-  vscode24.tasks.onDidEndTask((event) => {
+  vscode27.tasks.onDidEndTaskProcess((event) => {
+    const run = runFor(event.execution);
+    if (!run) return;
+    if (event.exitCode !== void 0) run.exitCode = event.exitCode;
+    if (run.status !== "cancelled") run.status = event.exitCode === 0 ? "completed" : "failed";
+  });
+  vscode27.tasks.onDidEndTask((event) => {
     const run = runFor(event.execution);
     if (!run || run.state !== "running") return;
     run.state = "completed";
     run.endedAt = Date.now();
+    if (run.status === "started" || run.status === "running") run.status = run.exitCode === void 0 || run.exitCode === 0 ? "completed" : "failed";
   });
 }
 function runToJson(run) {
@@ -20564,10 +21989,12 @@ function runToJson(run) {
     runId: run.runId,
     name: run.name,
     state: run.state,
+    status: run.status,
     exitCode: run.exitCode ?? null,
     startedAt: new Date(run.startedAt).toISOString(),
     endedAt: run.endedAt ? new Date(run.endedAt).toISOString() : null,
     durationMs: (run.endedAt ?? Date.now()) - run.startedAt,
+    task: run.task,
     // VS Code exposes no API to read a task's terminal output.
     output: "unavailable: VS Code does not expose task output; run the command with the terminal tool to capture it"
   };
@@ -20583,21 +22010,23 @@ function taskToJson(task) {
 }
 async function handleTasksList(payload) {
   const filter = payload.filter;
-  const tasks2 = await vscode24.tasks.fetchTasks(filter ? { type: filter } : void 0);
-  return { tasks: tasks2.map(taskToJson) };
+  const tasks3 = await vscode27.tasks.fetchTasks(filter ? { type: filter } : void 0);
+  return { tasks: tasks3.map(taskToJson) };
 }
 async function handleTasksRun(payload) {
   const taskName = String(payload.name ?? "");
   const taskSource = payload.source ? String(payload.source) : void 0;
-  const tasks2 = await vscode24.tasks.fetchTasks();
-  const task = tasks2.find((t) => t.name === taskName && (!taskSource || t.source === taskSource));
+  const tasks3 = await vscode27.tasks.fetchTasks();
+  const task = tasks3.find((t) => t.name === taskName && (!taskSource || t.source === taskSource));
   if (!task) throw new Error(`Task not found: ${taskName}`);
   ensureTaskListeners();
-  const execution = await vscode24.tasks.executeTask(task);
+  const execution = await vscode27.tasks.executeTask(task);
   const runId = `${task.name}-${Date.now()}`;
-  taskRuns.set(runId, { runId, execution, name: task.name, startedAt: Date.now(), state: "running" });
+  const taskJson = taskToJson(task);
+  const startedAt = Date.now();
+  taskRuns.set(runId, { runId, execution, name: task.name, task: taskJson, startedAt, state: "running", status: "started" });
   while (taskRuns.size > MAX_TRACKED_RUNS) taskRuns.delete(taskRuns.keys().next().value);
-  return { runId, task: taskToJson(task) };
+  return { runId, status: "started", startedAt: new Date(startedAt).toISOString(), task: taskJson };
 }
 async function handleTasksCancel(payload) {
   const runId = String(payload.runId ?? "");
@@ -20606,6 +22035,7 @@ async function handleTasksCancel(payload) {
   if (run.state === "running") {
     run.execution.terminate();
     run.state = "terminated";
+    run.status = "cancelled";
     run.endedAt = Date.now();
   }
   return { cancelled: true, ...runToJson(run) };
@@ -20618,17 +22048,18 @@ async function handleTasksStatus(payload) {
 }
 
 // src/ide-delegate/handlers/tests.ts
-var vscode25 = __toESM(require("vscode"));
+var vscode28 = __toESM(require("vscode"));
+init_helpers();
 var MAX_LISTED_TESTS = 500;
 var MAX_REPORTED_FAILURES = 20;
 var MAX_MESSAGE_CHARS = 2e3;
 var MAX_OUTPUT_CHARS = 2e4;
 var observer;
 function testObserver() {
-  if (!vscode25.tests.createTestObserver) {
+  if (!vscode28.tests.createTestObserver) {
     throw new Error("The test observer API is not available in this VS Code build");
   }
-  observer ??= vscode25.tests.createTestObserver();
+  observer ??= vscode28.tests.createTestObserver();
   return observer;
 }
 function flatten(items, out = []) {
@@ -20711,13 +22142,13 @@ async function handleTestsRun(payload, signal) {
   const summary = { runId, status: "running", startedAt: (/* @__PURE__ */ new Date()).toISOString() };
   runs.set(runId, summary);
   while (runs.size > 50) runs.delete(runs.keys().next().value);
-  const before = vscode25.tests.testResults[0];
-  const cancellation = new vscode25.CancellationTokenSource();
+  const before = vscode28.tests.testResults[0];
+  const cancellation = new vscode28.CancellationTokenSource();
   const onAbort = () => cancellation.cancel();
   signal?.addEventListener("abort", onAbort, { once: true });
   try {
-    await vscode25.tests.runTests(new vscode25.TestRunRequest(include), cancellation.token);
-    const latest = vscode25.tests.testResults[0];
+    await vscode28.tests.runTests(new vscode28.TestRunRequest(include), cancellation.token);
+    const latest = vscode28.tests.testResults[0];
     if (latest && latest !== before) summarize(latest, summary);
     summary.status = cancellation.token.isCancellationRequested ? "cancelled" : "completed";
   } catch (err) {
@@ -20735,36 +22166,55 @@ async function handleTestsStatus(payload) {
 }
 
 // src/ide-delegate/handlers/debug.ts
-var vscode26 = __toESM(require("vscode"));
+var vscode29 = __toESM(require("vscode"));
+init_helpers();
+var lastDebugError;
+var lifecycleRegistered = false;
+function ensureDebugLifecycle() {
+  if (lifecycleRegistered) return;
+  lifecycleRegistered = true;
+  vscode29.debug.onDidStartDebugSession(() => {
+    lastDebugError = void 0;
+  });
+  vscode29.debug.onDidTerminateDebugSession(() => {
+    lastDebugError = void 0;
+  });
+}
 async function handleDebugStart(payload) {
+  ensureDebugLifecycle();
   const configName = String(payload.name ?? payload.configName ?? "");
   const folder = workspaceFolder();
   if (!folder) throw new Error("No workspace folder open");
-  const launch = vscode26.workspace.getConfiguration("launch", folder.uri);
+  const launch = vscode29.workspace.getConfiguration("launch", folder.uri);
   const configurations = launch.get("configurations") ?? [];
   const config2 = configurations.find((c) => c.name === configName);
   if (!config2) throw new Error(`Debug configuration not found: ${configName}`);
-  const started = await vscode26.debug.startDebugging(folder, config2);
-  return { started, name: configName };
+  const started = await vscode29.debug.startDebugging(folder, config2);
+  return { started, status: started ? "running" : "failed", name: configName, activeSession: activeSessionJson() };
 }
 async function handleDebugStop() {
-  const session = vscode26.debug.activeDebugSession;
+  ensureDebugLifecycle();
+  const session = vscode29.debug.activeDebugSession;
   if (!session) return { stopped: false, reason: "no active session" };
-  await vscode26.debug.stopDebugging(session);
-  return { stopped: true, name: session.name };
+  await vscode29.debug.stopDebugging(session);
+  return { stopped: true, status: "stopped", name: session.name };
 }
 async function handleDebugList() {
+  ensureDebugLifecycle();
   const folder = workspaceFolder();
-  const launch = folder ? vscode26.workspace.getConfiguration("launch", folder.uri) : vscode26.workspace.getConfiguration("launch");
+  const launch = folder ? vscode29.workspace.getConfiguration("launch", folder.uri) : vscode29.workspace.getConfiguration("launch");
   const configurations = launch.get("configurations") ?? [];
-  const active = vscode26.debug.activeDebugSession;
+  const active = vscode29.debug.activeDebugSession;
   return {
     configurations: configurations.map((c) => ({ name: c.name, type: c.type, request: c.request })),
-    activeSession: active ? { name: active.name, type: active.type, id: active.id } : null
+    activeSession: activeSessionJson(active),
+    status: active ? "running" : "stopped",
+    stackTraceAvailable: Boolean(active),
+    lastError: lastDebugError
   };
 }
 async function handleDebugStackTrace(payload) {
-  const session = vscode26.debug.activeDebugSession;
+  const session = vscode29.debug.activeDebugSession;
   if (!session) return { available: false, reason: "no active debug session" };
   const threadId = Number(payload.threadId ?? 1);
   try {
@@ -20775,6 +22225,7 @@ async function handleDebugStackTrace(payload) {
     });
     return { sessionId: session.id, threadId, stackFrames: response?.stackFrames ?? [] };
   } catch (error51) {
+    lastDebugError = error51 instanceof Error ? error51.message : String(error51);
     return {
       sessionId: session.id,
       threadId,
@@ -20783,13 +22234,18 @@ async function handleDebugStackTrace(payload) {
     };
   }
 }
+function activeSessionJson(session = vscode29.debug.activeDebugSession) {
+  return session ? { name: session.name, type: session.type, id: session.id } : null;
+}
 
 // src/ide-delegate/handlers/notebook.ts
-var vscode27 = __toESM(require("vscode"));
+var vscode30 = __toESM(require("vscode"));
+init_helpers();
+init_redaction();
 function cellToJson(cell) {
   return {
     index: cell.index,
-    kind: cell.kind === vscode27.NotebookCellKind.Code ? "code" : "markdown",
+    kind: cell.kind === vscode30.NotebookCellKind.Code ? "code" : "markdown",
     languageId: cell.document.languageId,
     value: cell.document.getText(),
     metadata: cell.metadata
@@ -20798,7 +22254,7 @@ function cellToJson(cell) {
 async function handleNotebookRead(payload) {
   const filePath = String(payload.path ?? "");
   const uri = resolveFileUri(filePath);
-  const notebook = await vscode27.workspace.openNotebookDocument(uri);
+  const notebook = await vscode30.workspace.openNotebookDocument(uri);
   return {
     path: filePath,
     cellCount: notebook.cellCount,
@@ -20809,57 +22265,58 @@ async function handleNotebookEdit(payload) {
   const filePath = String(payload.path ?? "");
   const uri = resolveFileUri(filePath);
   assertEditableResource({ uri, operation: "edit" });
-  const notebook = await vscode27.workspace.openNotebookDocument(uri);
-  const edit = new vscode27.WorkspaceEdit();
+  const notebook = await vscode30.workspace.openNotebookDocument(uri);
+  const edit = new vscode30.WorkspaceEdit();
   const cellIndex = Number(payload.cellIndex ?? 0);
   const newText = payload.newText != null ? String(payload.newText) : void 0;
-  const cellKind = payload.kind === "markdown" ? vscode27.NotebookCellKind.Markup : vscode27.NotebookCellKind.Code;
+  const cellKind = payload.kind === "markdown" ? vscode30.NotebookCellKind.Markup : vscode30.NotebookCellKind.Code;
   if (payload.operation === "insert") {
     assertNoRedactionPlaceholders("", newText ?? "", filePath);
-    const cellData = new vscode27.NotebookCellData(cellKind, newText ?? "", String(payload.languageId ?? "python"));
-    edit.set(notebook.uri, [vscode27.NotebookEdit.insertCells(cellIndex, [cellData])]);
+    const cellData = new vscode30.NotebookCellData(cellKind, newText ?? "", String(payload.languageId ?? "python"));
+    edit.set(notebook.uri, [vscode30.NotebookEdit.insertCells(cellIndex, [cellData])]);
   } else if (payload.operation === "delete") {
-    edit.set(notebook.uri, [vscode27.NotebookEdit.deleteCells(new vscode27.NotebookRange(cellIndex, cellIndex + 1))]);
+    edit.set(notebook.uri, [vscode30.NotebookEdit.deleteCells(new vscode30.NotebookRange(cellIndex, cellIndex + 1))]);
   } else if (payload.operation === "replace" && newText != null) {
     const cell = notebook.cellAt(cellIndex);
     assertNoRedactionPlaceholders(cell.document.getText(), newText, filePath);
     edit.set(notebook.uri, [
-      vscode27.NotebookEdit.updateCellMetadata(cellIndex, cell.metadata),
-      vscode27.NotebookEdit.replaceCells(
-        new vscode27.NotebookRange(cellIndex, cellIndex + 1),
-        [new vscode27.NotebookCellData(cell.kind, newText, cell.document.languageId)]
+      vscode30.NotebookEdit.updateCellMetadata(cellIndex, cell.metadata),
+      vscode30.NotebookEdit.replaceCells(
+        new vscode30.NotebookRange(cellIndex, cellIndex + 1),
+        [new vscode30.NotebookCellData(cell.kind, newText, cell.document.languageId)]
       )
     ]);
   } else {
     throw new Error("notebook edit requires operation: insert | delete | replace");
   }
   if (uri.scheme === "file") await snapshotBeforeChange(uri.fsPath);
-  const applied = await vscode27.workspace.applyEdit(edit);
+  const applied = await vscode30.workspace.applyEdit(edit);
   const saved = applied && notebook.isDirty ? await notebook.save() : false;
   return { path: filePath, applied, operation: payload.operation, saved };
 }
 async function handleNotebookExecute(payload) {
   const filePath = String(payload.path ?? "");
   const uri = resolveFileUri(filePath);
-  const notebook = await vscode27.workspace.openNotebookDocument(uri);
-  await vscode27.window.showNotebookDocument(notebook, { preserveFocus: true, preview: false });
+  const notebook = await vscode30.workspace.openNotebookDocument(uri);
+  await vscode30.window.showNotebookDocument(notebook, { preserveFocus: true, preview: false });
   const cellIndex = payload.cellIndex != null ? Number(payload.cellIndex) : void 0;
   if (cellIndex != null) {
     if (!Number.isInteger(cellIndex) || cellIndex < 0 || cellIndex >= notebook.cellCount) {
       throw new Error(`cellIndex ${String(payload.cellIndex)} is out of range (0..${notebook.cellCount - 1})`);
     }
-    await vscode27.commands.executeCommand("notebook.cell.execute", { ranges: [{ start: cellIndex, end: cellIndex + 1 }], document: notebook.uri });
+    await vscode30.commands.executeCommand("notebook.cell.execute", { ranges: [{ start: cellIndex, end: cellIndex + 1 }], document: notebook.uri });
   } else {
-    await vscode27.commands.executeCommand("notebook.execute", notebook.uri);
+    await vscode30.commands.executeCommand("notebook.execute", notebook.uri);
   }
   return { path: relativePath(uri.fsPath), executed: true, cellIndex: cellIndex ?? null };
 }
 
 // src/ide-delegate/handlers/config.ts
-var vscode28 = __toESM(require("vscode"));
+var vscode31 = __toESM(require("vscode"));
+init_helpers();
 var TARGET_MAP = {
-  workspace: vscode28.ConfigurationTarget.Workspace,
-  workspaceFolder: vscode28.ConfigurationTarget.WorkspaceFolder
+  workspace: vscode31.ConfigurationTarget.Workspace,
+  workspaceFolder: vscode31.ConfigurationTarget.WorkspaceFolder
 };
 var ALLOWED_KEYS = [
   /^editor\.[\w.]+$/,
@@ -20892,7 +22349,7 @@ function scopedConfig(fullKey) {
   const languageId = override?.[1];
   const key = override ? override[2] : fullKey;
   const scope = languageId ? { uri: folder?.uri, languageId } : folder?.uri;
-  return { config: vscode28.workspace.getConfiguration(void 0, scope), key, languageId };
+  return { config: vscode31.workspace.getConfiguration(void 0, scope), key, languageId };
 }
 function workspaceValues(config2, key, languageId) {
   const inspected = config2.inspect(key);
@@ -20931,7 +22388,7 @@ async function handleConfigRead(payload) {
   const base = override ? override[2] : section;
   if (!base) throw new Error(`Pass a section inside the language override, e.g. '${section}.editor'`);
   const folder = workspaceFolder();
-  const config2 = vscode28.workspace.getConfiguration(void 0, languageId ? { uri: folder?.uri, languageId } : folder?.uri);
+  const config2 = vscode31.workspace.getConfiguration(void 0, languageId ? { uri: folder?.uri, languageId } : folder?.uri);
   const keys = leafKeys(config2.get(base), base);
   if (!keys.length) throw new Error(`Section '${section}' has no settings the agent may read (only editor and formatting settings)`);
   const values = {};
@@ -20958,10 +22415,10 @@ async function handleConfigWrite(payload) {
 }
 
 // src/ide-delegate/handlers/extensions.ts
-var vscode29 = __toESM(require("vscode"));
+var vscode32 = __toESM(require("vscode"));
 async function handleExtensionsList() {
   return {
-    extensions: vscode29.extensions.all.map((ext) => ({
+    extensions: vscode32.extensions.all.map((ext) => ({
       id: ext.id,
       version: ext.packageJSON.version,
       isActive: ext.isActive,
@@ -20969,27 +22426,28 @@ async function handleExtensionsList() {
       displayName: ext.packageJSON.displayName,
       publisher: ext.packageJSON.publisher
     })),
-    count: vscode29.extensions.all.length
+    count: vscode32.extensions.all.length
   };
 }
 
 // src/ide-delegate/handlers/problems.ts
-var vscode30 = __toESM(require("vscode"));
+var vscode33 = __toESM(require("vscode"));
+init_helpers();
 async function handleProblemsByOwner(payload) {
   const filePaths = payload.filePaths;
   const filter = filePaths ? new Set(filePaths.map((p) => p.replace(/\\/g, "/"))) : void 0;
   const byOwner = /* @__PURE__ */ new Map();
-  for (const [uri, diagnostics] of vscode30.languages.getDiagnostics()) {
+  for (const [uri, diagnostics] of vscode33.languages.getDiagnostics()) {
     if (uri.scheme !== "file") continue;
-    const path10 = relativePath(uri.fsPath);
-    if (filter && !filter.has(path10)) continue;
+    const path11 = relativePath(uri.fsPath);
+    if (filter && !filter.has(path11)) continue;
     for (const diag of diagnostics) {
       const owner = diag.source ?? "unknown";
       const list = byOwner.get(owner) ?? [];
       list.push({
-        path: path10,
+        path: path11,
         message: diag.message,
-        severity: vscode30.DiagnosticSeverity[diag.severity],
+        severity: vscode33.DiagnosticSeverity[diag.severity],
         code: typeof diag.code === "object" ? diag.code.value : diag.code,
         range: {
           startLine: diag.range.start.line + 1,
@@ -21008,10 +22466,11 @@ async function handleProblemsByOwner(payload) {
 }
 
 // src/ide-delegate/handlers/semantic.ts
-var vscode31 = __toESM(require("vscode"));
+var vscode34 = __toESM(require("vscode"));
+init_helpers();
 async function handleSemanticTokens(payload) {
   const uri = resolveFileUri(String(payload.path ?? ""));
-  const tokens = await vscode31.commands.executeCommand(
+  const tokens = await vscode34.commands.executeCommand(
     "vscode.provideDocumentSemanticTokens",
     uri
   );
@@ -21025,7 +22484,8 @@ async function handleSemanticTokens(payload) {
 }
 
 // src/ide-delegate/handlers/index.ts
-var vscode32 = __toESM(require("vscode"));
+var vscode35 = __toESM(require("vscode"));
+init_helpers();
 var TRUST_REQUIRED_KINDS = /* @__PURE__ */ new Set([
   "terminal.run",
   "vscode.terminalSession",
@@ -21052,7 +22512,7 @@ async function dispatchIdeDelegate(request) {
 async function dispatchInFolder(request) {
   const { kind, payload } = request;
   const root = request.target.projectPath;
-  if (TRUST_REQUIRED_KINDS.has(kind) && !vscode32.workspace.isTrusted) {
+  if (TRUST_REQUIRED_KINDS.has(kind) && !vscode35.workspace.isTrusted) {
     throw new Error(`'${kind}' is blocked: this workspace is not trusted (Restricted Mode). Trust the folder in VS Code to allow it.`);
   }
   switch (kind) {
@@ -21222,9 +22682,10 @@ var CLOSE_BAD_HELLO = 4400;
 var CLOSE_FORBIDDEN = 4403;
 var opLedger = new OpLedger();
 var IdeDelegateStream = class {
-  constructor(target, output) {
+  constructor(target, output, onNotification) {
     this.target = target;
     this.output = output;
+    this.onNotification = onNotification;
     this.offAuth = onAuthChanged(() => {
       if (this.closed) return;
       if (!this.authBlocked && this.ws?.readyState === WebSocket.OPEN && this.connectedOrigin === getApiOrigin()) {
@@ -21239,7 +22700,7 @@ var IdeDelegateStream = class {
       this.log(wasBlocked ? "credentials changed; reconnecting" : "credentials changed; reconnecting with the new token");
       void this.connect();
     });
-    this.focusSub = vscode33.window.onDidChangeWindowState((state) => {
+    this.focusSub = vscode36.window.onDidChangeWindowState((state) => {
       if (state.focused) this.announceFocus();
     });
   }
@@ -21268,18 +22729,18 @@ var IdeDelegateStream = class {
       pathStyle: process.platform === "win32" ? "win" : "posix",
       extensionVersion: currentExtensionVersion(),
       capabilities: {
-        trusted: vscode33.workspace.isTrusted,
-        terminal: typeof vscode33.window.createTerminal === "function",
-        fs: Boolean(vscode33.workspace.fs),
-        git: Boolean(vscode33.extensions.getExtension("vscode.git"))
+        trusted: vscode36.workspace.isTrusted,
+        terminal: typeof vscode36.window.createTerminal === "function",
+        fs: Boolean(vscode36.workspace.fs),
+        git: Boolean(vscode36.extensions.getExtension("vscode.git"))
       },
       workspace: { rootPath: this.target.projectPath, name: this.target.folderName }
     };
   }
   /** Tell the server this window is in use, so its calls come here. */
   announceFocus() {
-    if (!vscode33.window.state.focused) return;
-    this.sendJson({ jsonrpc: "2.0", method: "window.focus", params: { windowId: vscode33.env.sessionId } }, false);
+    if (!vscode36.window.state.focused) return;
+    this.sendJson({ jsonrpc: "2.0", method: "window.focus", params: { windowId: vscode36.env.sessionId } }, false);
   }
   start() {
     if (this.closed) return;
@@ -21317,7 +22778,7 @@ var IdeDelegateStream = class {
     const url2 = new URL(`${wsOrigin(origin)}/api/ide/rpc`);
     url2.searchParams.set("projectPath", this.target.projectPath);
     url2.searchParams.set("sessionId", this.target.sessionId);
-    url2.searchParams.set("windowId", vscode33.env.sessionId);
+    url2.searchParams.set("windowId", vscode36.env.sessionId);
     url2.searchParams.set("machineId", currentMachineId());
     return { url: url2.toString(), protocols };
   }
@@ -21401,9 +22862,7 @@ var IdeDelegateStream = class {
     }
     if (!isJsonRpcRequest(parsed)) {
       const method = typeof parsed === "object" && parsed && "method" in parsed ? parsed.method : void 0;
-      if (method === "connected") {
-        this.log("IDE RPC handshake received");
-      } else if (method === "hello.ack") {
+      if (method === "hello.ack") {
         const workspaceId = parsed.params?.workspaceId;
         if (typeof workspaceId === "string") {
           setWorkspaceId(this.target.projectPath, workspaceId);
@@ -21423,9 +22882,26 @@ var IdeDelegateStream = class {
           controller.abort();
         }
       }
+      if (isJsonRpcNotification(parsed)) {
+        this.dispatchNotification(parsed.method, parsed.params);
+      }
       return;
     }
     await this.handleRpcRequest(parsed);
+  }
+  dispatchNotification(method, rawParams) {
+    const params = rawParams && typeof rawParams === "object" ? rawParams : {};
+    if (method === "connected") {
+      this.log("IDE RPC handshake received");
+    } else if (method !== "hello.ack" && method !== "$/cancelRequest" && method !== "conversation.open") {
+      this.log(`notification: ${method}`);
+    }
+    try {
+      const { userId, projectPath, sessionId } = this.target;
+      this.onNotification?.(method, params, { userId, projectPath, sessionId });
+    } catch (err) {
+      this.log(`notification handler error: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
   async handleRpcRequest(request) {
     const params = request.params && typeof request.params === "object" ? request.params : {};
@@ -21470,32 +22946,33 @@ var IdeDelegateStream = class {
 };
 function streamTarget(folder) {
   return {
-    userId: "default",
+    // Informational: the server authorizes with the authenticated token.
+    userId: currentIdeUserId(),
     projectPath: folder.uri.fsPath,
     sessionId: `vscode-${folder.name}`,
     folderName: folder.name
   };
 }
-function startIdeDelegateStream(output) {
+function startIdeDelegateStream(output, onNotification) {
   const streams = /* @__PURE__ */ new Map();
   const sync = () => {
-    const folders = vscode33.workspace.workspaceFolders ?? [];
+    const folders = vscode36.workspace.workspaceFolders ?? [];
     const wanted = new Map(folders.map((folder) => [folder.uri.fsPath, folder]));
-    for (const [path10, stream] of streams) {
-      if (wanted.has(path10)) continue;
+    for (const [path11, stream] of streams) {
+      if (wanted.has(path11)) continue;
       stream.dispose();
-      streams.delete(path10);
+      streams.delete(path11);
     }
-    for (const [path10, folder] of wanted) {
-      if (streams.has(path10)) continue;
-      const stream = new IdeDelegateStream(streamTarget(folder), output);
-      streams.set(path10, stream);
+    for (const [path11, folder] of wanted) {
+      if (streams.has(path11)) continue;
+      const stream = new IdeDelegateStream(streamTarget(folder), output, onNotification);
+      streams.set(path11, stream);
       stream.start();
     }
   };
   sync();
-  const folderSub = vscode33.workspace.onDidChangeWorkspaceFolders(sync);
-  return new vscode33.Disposable(() => {
+  const folderSub = vscode36.workspace.onDidChangeWorkspaceFolders(sync);
+  return new vscode36.Disposable(() => {
     folderSub.dispose();
     for (const stream of streams.values()) stream.dispose();
     streams.clear();
@@ -21503,8 +22980,8 @@ function startIdeDelegateStream(output) {
 }
 
 // src/workflows/ide-triggers.ts
-var vscode34 = __toESM(require("vscode"));
-var path9 = __toESM(require("node:path"));
+var vscode37 = __toESM(require("vscode"));
+var path10 = __toESM(require("node:path"));
 async function readJsonOrThrow(res) {
   if (!res.ok) {
     const body = await res.text().catch(() => "");
@@ -21522,9 +22999,9 @@ async function listIdeWorkflowTriggers() {
 }
 function ideWorkflowPayload() {
   const folder = activeWorkspaceFolder();
-  const editor = vscode34.window.activeTextEditor;
+  const editor = vscode37.window.activeTextEditor;
   const doc = editor?.document;
-  const activeFile = folder && doc?.uri.scheme === "file" && folder.uri.scheme === "file" ? path9.relative(folder.uri.fsPath, doc.uri.fsPath).replace(/\\/g, "/") : void 0;
+  const activeFile = folder && doc?.uri.scheme === "file" && folder.uri.scheme === "file" ? path10.relative(folder.uri.fsPath, doc.uri.fsPath).replace(/\\/g, "/") : void 0;
   return {
     source: "liberide",
     ...folder ? { projectPath: folder.uri.fsPath, folderName: folder.name } : {},
@@ -21535,10 +23012,10 @@ function ideWorkflowPayload() {
 async function runIdeWorkflowCommand(output) {
   const triggers = await listIdeWorkflowTriggers();
   if (!triggers.length) {
-    void vscode34.window.showInformationMessage("No workflows have an IDE command trigger. Add one to a workflow in the LiberIDE app.");
+    void vscode37.window.showInformationMessage("No workflows have an IDE command trigger. Add one to a workflow in the LiberIDE app.");
     return;
   }
-  const picked = await vscode34.window.showQuickPick(
+  const picked = await vscode37.window.showQuickPick(
     triggers.map((trigger) => ({
       label: trigger.name || trigger.command,
       description: trigger.pipelineName,
@@ -21548,7 +23025,7 @@ async function runIdeWorkflowCommand(output) {
     { title: "Run Workflow", placeHolder: "Choose a workflow to run", matchOnDescription: true, matchOnDetail: true }
   );
   if (!picked) return;
-  const input = await vscode34.window.showInputBox({
+  const input = await vscode37.window.showInputBox({
     title: `Run ${picked.trigger.pipelineName}`,
     prompt: "Input for the workflow (optional)",
     placeHolder: picked.trigger.command
@@ -21557,8 +23034,8 @@ async function runIdeWorkflowCommand(output) {
   const payload = ideWorkflowPayload();
   output.appendLine(`[workflow] ${picked.trigger.pipelineName}: starting (${picked.trigger.command})`);
   output.show(true);
-  const run = await vscode34.window.withProgress(
-    { location: vscode34.ProgressLocation.Notification, title: `Running ${picked.trigger.pipelineName}\u2026`, cancellable: true },
+  const run = await vscode37.window.withProgress(
+    { location: vscode37.ProgressLocation.Notification, title: `Running ${picked.trigger.pipelineName}\u2026`, cancellable: true },
     async (_progress, token) => {
       const abort = new AbortController();
       const subscription = token.onCancellationRequested(() => abort.abort());
@@ -21576,7 +23053,7 @@ async function runIdeWorkflowCommand(output) {
   ).then((result) => result, (err) => {
     const message = err instanceof Error ? err.name === "AbortError" ? "stopped waiting (the run continues on the server)" : err.message : String(err);
     output.appendLine(`[workflow] ${picked.trigger.pipelineName}: ${message}`);
-    if (!(err instanceof Error && err.name === "AbortError")) void vscode34.window.showErrorMessage(`Workflow failed: ${message}`);
+    if (!(err instanceof Error && err.name === "AbortError")) void vscode37.window.showErrorMessage(`Workflow failed: ${message}`);
     return void 0;
   });
   if (!run) return;
@@ -21584,16 +23061,16 @@ async function runIdeWorkflowCommand(output) {
   if (run.output) output.appendLine(run.output);
   if (run.error) output.appendLine(`error: ${run.error}`);
   const summary = `Workflow ${run.pipelineName ?? picked.trigger.pipelineName}: ${run.status}`;
-  if (run.status === "failed" || run.error) void vscode34.window.showErrorMessage(summary, "Show Output").then((choice) => choice && output.show());
-  else void vscode34.window.showInformationMessage(summary, "Show Output").then((choice) => choice && output.show());
+  if (run.status === "failed" || run.error) void vscode37.window.showErrorMessage(summary, "Show Output").then((choice) => choice && output.show());
+  else void vscode37.window.showInformationMessage(summary, "Show Output").then((choice) => choice && output.show());
 }
 
 // src/pairing.ts
-var vscode35 = __toESM(require("vscode"));
+var vscode38 = __toESM(require("vscode"));
 var import_node_os2 = require("node:os");
 var PAIRING_CODE_LENGTH = 8;
 async function pairWithServerCommand(output) {
-  const serverUrl = await vscode35.window.showInputBox({
+  const serverUrl = await vscode38.window.showInputBox({
     title: "Pair with Server",
     prompt: "URL of the server to connect this machine to",
     placeHolder: "https://chat.example.com",
@@ -21602,7 +23079,7 @@ async function pairWithServerCommand(output) {
     validateInput: (value) => normalizeServerUrl(value) ? void 0 : "Enter an http(s) URL"
   });
   if (!serverUrl) return;
-  const code = await vscode35.window.showInputBox({
+  const code = await vscode38.window.showInputBox({
     title: "Pair with Server",
     prompt: "Pairing code from Settings \u2192 Machines \u2192 Connect a machine",
     placeHolder: "ABCD-EFGH",
@@ -21610,13 +23087,87 @@ async function pairWithServerCommand(output) {
     validateInput: (value) => value.replace(/[\s-]/g, "").length === PAIRING_CODE_LENGTH ? void 0 : "The code has 8 characters"
   });
   if (!code) return;
-  const result = await vscode35.window.withProgress(
-    { location: vscode35.ProgressLocation.Notification, title: "Pairing with server\u2026" },
+  const result = await vscode38.window.withProgress(
+    { location: vscode38.ProgressLocation.Notification, title: "Pairing with server\u2026" },
     () => pairWithServer({ serverUrl, code, machineId: currentMachineId(), hostname: (0, import_node_os2.hostname)(), platform: process.platform })
   );
   output.appendLine(`[pairing] paired with ${result.apiOrigin} as machine ${result.machineId}`);
-  void vscode35.window.showInformationMessage(`LiberIDE is now connected to ${result.apiOrigin}.`);
+  void vscode38.window.showInformationMessage(`LiberIDE is now connected to ${result.apiOrigin}.`);
 }
+
+// src/ide-delegate/notifications.ts
+var vscode39 = __toESM(require("vscode"));
+var FALLBACK_CLEAR_MS = 15e3;
+var IdeNotificationCenter = class {
+  constructor(output, hooks = {}) {
+    this.output = output;
+    this.hooks = hooks;
+    this.fallbackItem = vscode39.window.createStatusBarItem(vscode39.StatusBarAlignment.Left, 99);
+    this.fallbackItem.backgroundColor = new vscode39.ThemeColor("statusBarItem.warningBackground");
+  }
+  fallbackItem;
+  clearTimer;
+  warnedMutatingFallback = false;
+  get handler() {
+    return (method, params, context) => this.dispatch(method, params, context);
+  }
+  dispatch(method, params, context) {
+    switch (method) {
+      case "connected":
+        this.clearFallback();
+        break;
+      case "tool.fallback":
+        this.showFallback(params);
+        break;
+      case "approval.pending":
+        this.hooks.onApprovalPending?.(
+          {
+            graphId: typeof params.graphId === "string" ? params.graphId : void 0,
+            nodeId: typeof params.nodeId === "string" ? params.nodeId : void 0,
+            title: typeof params.title === "string" ? params.title : void 0
+          },
+          context
+        );
+        break;
+      case "run.status":
+        this.hooks.onRunStatus?.(
+          {
+            graphId: typeof params.graphId === "string" ? params.graphId : void 0,
+            status: typeof params.status === "string" ? params.status : void 0
+          },
+          context
+        );
+        break;
+    }
+  }
+  showFallback(params) {
+    const kind = typeof params.kind === "string" ? params.kind : "operation";
+    const mutating = params.mutating === true;
+    this.fallbackItem.text = "$(warning) LiberIDE: server fallback";
+    this.fallbackItem.tooltip = `A LiberIDE tool (${kind}) ran on the server instead of your live IDE (reason: ${String(params.fallbackReason ?? "unknown")}).`;
+    this.fallbackItem.show();
+    if (mutating && !this.warnedMutatingFallback) {
+      this.warnedMutatingFallback = true;
+      void vscode39.window.showWarningMessage(
+        "LiberIDE: edits are being applied on the server, not in your live IDE. Reconnect the extension to keep changes in-editor."
+      );
+    }
+    if (this.clearTimer) clearTimeout(this.clearTimer);
+    this.clearTimer = setTimeout(() => this.clearFallback(), FALLBACK_CLEAR_MS);
+    this.output?.appendLine(`[notifications] fallback active for ${kind}`);
+  }
+  clearFallback() {
+    if (this.clearTimer) {
+      clearTimeout(this.clearTimer);
+      this.clearTimer = void 0;
+    }
+    this.fallbackItem.hide();
+  }
+  dispose() {
+    if (this.clearTimer) clearTimeout(this.clearTimer);
+    this.fallbackItem.dispose();
+  }
+};
 
 // src/extension.ts
 var store;
@@ -21625,7 +23176,9 @@ var chat;
 async function activate(context) {
   context.subscriptions.push(initApiFromContext(context));
   initMachineIdentity(context);
-  const output = vscode36.window.createOutputChannel("LiberIDE");
+  const output = vscode40.window.createOutputChannel("LiberIDE");
+  void refreshIdeIdentity((message) => output.appendLine(`[identity] ${message}`));
+  void refreshWorkspaceIntelligence(output);
   store = new SpecStore(output);
   await store.initialize(context);
   const specsTree = new SpecsTreeProvider(store);
@@ -21637,38 +23190,56 @@ async function activate(context) {
       await store.refresh();
     }
   });
+  const approvalsTree = new ApprovalsTreeProvider((message) => output.appendLine(message));
+  const mcpTree = new McpTreeProvider((message) => output.appendLine(message));
   pipeline = new LiberidePipelineController(context, store, output, runsTree);
   chat = new LiberideChatPanelController(context, store, output);
+  const notificationCenter = new IdeNotificationCenter(output, {
+    onApprovalPending: ({ graphId, nodeId }) => {
+      if (graphId && nodeId) void pipeline.resolveApprovalForRun(graphId, nodeId);
+      approvalsTree.refresh();
+    },
+    onRunStatus: () => {
+      runsTree.refresh();
+      approvalsTree.refresh();
+    }
+  });
   context.subscriptions.push(
     output,
     store,
     pipeline,
     chat,
-    vscode36.window.registerWebviewViewProvider(LiberidePipelineController.viewType, pipeline, {
+    notificationCenter,
+    vscode40.window.registerWebviewViewProvider(LiberidePipelineController.viewType, pipeline, {
       webviewOptions: { retainContextWhenHidden: true }
     }),
-    vscode36.window.registerWebviewViewProvider(LiberideChatPanelController.viewType, chat, {
+    vscode40.window.registerWebviewViewProvider(LiberideChatPanelController.viewType, chat, {
       webviewOptions: { retainContextWhenHidden: true }
     }),
-    vscode36.window.registerTreeDataProvider("liberide.specs", specsTree),
-    vscode36.window.registerTreeDataProvider("liberide.tasks", tasksTree),
-    vscode36.window.registerTreeDataProvider("liberide.runs", runsTree),
+    vscode40.window.registerTreeDataProvider("liberide.specs", specsTree),
+    vscode40.window.registerTreeDataProvider("liberide.tasks", tasksTree),
+    vscode40.window.registerTreeDataProvider("liberide.runs", runsTree),
+    vscode40.window.registerTreeDataProvider("liberide.approvals", approvalsTree),
+    vscode40.window.registerTreeDataProvider("liberide.mcp", mcpTree),
     createThemeBridge(output),
-    statusBar(),
-    startIdeDelegateStream(output),
-    ...commands8(context, specsTree, tasksTree, runsTree),
-    vscode36.commands.registerCommand("liberide.pairWithServer", () => {
+    connectionStatus(output),
+    startIdeDelegateStream(output, notificationCenter.handler),
+    ...commands8(context, specsTree, tasksTree, runsTree, approvalsTree, mcpTree),
+    vscode40.commands.registerCommand("liberide.pairWithServer", () => {
       pairWithServerCommand(output).catch((err) => {
-        void vscode36.window.showErrorMessage(err instanceof Error ? err.message : String(err));
+        void vscode40.window.showErrorMessage(err instanceof Error ? err.message : String(err));
       });
     }),
-    vscode36.commands.registerCommand("liberide.runWorkflow", () => {
+    vscode40.commands.registerCommand("liberide.runWorkflow", () => {
       runIdeWorkflowCommand(output).catch((err) => {
-        void vscode36.window.showErrorMessage(err instanceof Error ? err.message : String(err));
+        void vscode40.window.showErrorMessage(err instanceof Error ? err.message : String(err));
       });
     }),
     ...continuation(output)
   );
+  approvalsTree.refresh();
+  mcpTree.refresh();
+  runsTree.refresh();
 }
 function continuation(output) {
   const open2 = (conversationId) => {
@@ -21677,10 +23248,10 @@ function continuation(output) {
     });
   };
   const updateContext = () => {
-    void vscode36.commands.executeCommand("setContext", "liberide.hasWebOrigin", Boolean(getWebOrigin()));
+    void vscode40.commands.executeCommand("setContext", "liberide.hasWebOrigin", Boolean(getWebOrigin()));
   };
   const checkLaunchRequest = () => {
-    const folders = (vscode36.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
+    const folders = (vscode40.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
     const conversationId = takeStartupConversationRequest(getIntegrationSnapshot(), folders);
     if (conversationId) open2(conversationId);
   };
@@ -21694,19 +23265,19 @@ function continuation(output) {
   return [
     { dispose: offRequests },
     { dispose: offFile },
-    vscode36.commands.registerCommand("liberide.continueInBrowser", async () => {
+    vscode40.commands.registerCommand("liberide.continueInBrowser", async () => {
       const conversationId = chat.activeConversationId();
       const url2 = continueInBrowserUrl(getWebOrigin(), conversationId);
       if (!url2 || !conversationId) {
-        void vscode36.window.showInformationMessage(getWebOrigin() ? "Open a saved conversation first." : "No web app address is known. Pair with the server (LiberIDE: Pair with Server\u2026) or open LiberIDE from the desktop app.");
+        void vscode40.window.showInformationMessage(getWebOrigin() ? "Open a saved conversation first." : "No web app address is known. Pair with the server (LiberIDE: Pair with Server\u2026) or open LiberIDE from the desktop app.");
         return;
       }
-      await vscode36.env.openExternal(vscode36.Uri.parse(await resolveContinueInBrowserUrl(url2, conversationId, createAuthHandoff)));
+      await vscode40.env.openExternal(vscode40.Uri.parse(await resolveContinueInBrowserUrl(url2, conversationId, createAuthHandoff)));
     }),
-    vscode36.commands.registerCommand("liberide.openConversation", async () => {
+    vscode40.commands.registerCommand("liberide.openConversation", async () => {
       try {
         const conversations = (await listConversations()).filter((conversation) => !conversation.archived);
-        const picked = await vscode36.window.showQuickPick(
+        const picked = await vscode40.window.showQuickPick(
           conversations.slice(0, 50).map((conversation) => ({
             label: conversation.title || "Untitled",
             description: conversation.folder ?? void 0,
@@ -21717,43 +23288,101 @@ function continuation(output) {
         );
         if (picked) open2(picked.id);
       } catch (err) {
-        void vscode36.window.showErrorMessage(`Could not list conversations: ${err instanceof Error ? err.message : String(err)}`);
+        void vscode40.window.showErrorMessage(`Could not list conversations: ${err instanceof Error ? err.message : String(err)}`);
       }
     })
   ];
 }
-function commands8(context, specsTree, tasksTree, runsTree) {
+function commands8(context, specsTree, tasksTree, runsTree, approvalsTree, mcpTree) {
   function safe(fn) {
     return (...args) => {
       fn(...args).catch((err) => {
-        void vscode36.window.showErrorMessage(err instanceof Error ? err.message : String(err));
+        void vscode40.window.showErrorMessage(err instanceof Error ? err.message : String(err));
       });
     };
   }
   return [
-    vscode36.commands.registerCommand("liberide.openChat", () => chat.show()),
-    vscode36.commands.registerCommand("liberide.newChat", safe(async () => {
+    vscode40.commands.registerCommand("liberide.openChat", () => chat.show()),
+    vscode40.commands.registerCommand("liberide.attachSelection", safe(async () => {
+      chat.show();
+      await chat.attachSelection();
+    })),
+    vscode40.commands.registerCommand("liberide.attachActiveFile", safe(async () => {
+      chat.show();
+      await chat.attachActiveFile();
+    })),
+    vscode40.commands.registerCommand("liberide.attachFileToChat", safe(async () => {
+      chat.show();
+      await chat.attachFilePick();
+    })),
+    vscode40.commands.registerCommand("liberide.attachTerminalOutput", safe(async () => {
+      chat.show();
+      await chat.attachTerminalOutput();
+    })),
+    vscode40.commands.registerCommand("liberide.attachGitDiff", safe(async () => {
+      chat.show();
+      await chat.attachGitDiff();
+    })),
+    vscode40.commands.registerCommand("liberide.newChat", safe(async () => {
       chat.show();
       await chat.newSession();
     })),
-    vscode36.commands.registerCommand("liberide.openSettings", () => chat.openSettings()),
-    vscode36.commands.registerCommand("liberide.openChatHistory", () => chat.openChatHistory()),
-    vscode36.commands.registerCommand("liberide.renameChat", safe(async () => {
+    vscode40.commands.registerCommand("liberide.openSettings", () => chat.openSettings()),
+    vscode40.commands.registerCommand("liberide.openChatHistory", () => chat.openChatHistory()),
+    vscode40.commands.registerCommand("liberide.renameChat", safe(async () => {
       await chat.renameActiveChat();
     })),
-    vscode36.commands.registerCommand("liberide.openPipeline", () => pipeline.show()),
-    vscode36.commands.registerCommand("liberide.refreshSpecs", safe(async () => {
+    vscode40.commands.registerCommand("liberide.openPipeline", () => pipeline.show()),
+    vscode40.commands.registerCommand("liberide.refreshSpecs", safe(async () => {
       await store.refresh();
       specsTree.refresh();
     })),
-    vscode36.commands.registerCommand("liberide.refreshTasks", safe(async () => {
+    vscode40.commands.registerCommand("liberide.refreshTasks", safe(async () => {
       await store.refresh();
       tasksTree.refresh();
     })),
-    vscode36.commands.registerCommand("liberide.refreshRuns", () => runsTree.refresh()),
-    vscode36.commands.registerCommand("liberide.scaffoldFeature", safe(async () => {
-      const folder = vscode36.workspace.workspaceFolders?.[0];
-      const name = await vscode36.window.showInputBox({ prompt: "Feature name" });
+    vscode40.commands.registerCommand("liberide.refreshRuns", () => runsTree.refresh()),
+    vscode40.commands.registerCommand("liberide.refreshApprovals", () => approvalsTree.refresh()),
+    vscode40.commands.registerCommand("liberide.revokeApprovalGrant", safe(async (arg) => {
+      const grantId = ApprovalsTreeProvider.grantIdOf(arg);
+      if (!grantId) {
+        void vscode40.window.showInformationMessage("Select an active grant in the Approvals view to revoke it.");
+        return;
+      }
+      await revokeApprovalGrant(grantId);
+      approvalsTree.refresh();
+    })),
+    vscode40.commands.registerCommand("liberide.selectActiveProject", safe(async () => {
+      const folders = vscode40.workspace.workspaceFolders ?? [];
+      if (folders.length < 2) {
+        void vscode40.window.showInformationMessage("Open a multi-root workspace to switch the active LiberIDE project.");
+        return;
+      }
+      const pick2 = await vscode40.window.showQuickPick(
+        folders.map((f) => ({ label: f.name, description: f.uri.fsPath, folder: f })),
+        { title: "Select active LiberIDE project", placeHolder: "Chat, specs, and dispatch bind to this folder" }
+      );
+      if (!pick2) return;
+      setActiveProjectFolder(pick2.folder);
+      await chat.reloadProject();
+      void vscode40.window.showInformationMessage(`LiberIDE active project: ${pick2.label}`);
+    })),
+    vscode40.commands.registerCommand("liberide.refreshMcpServers", () => mcpTree.refresh()),
+    vscode40.commands.registerCommand("liberide.enableMcpServer", safe(async (arg) => {
+      const server = McpTreeProvider.serverOf(arg);
+      if (!server) return;
+      await setMcpServerEnabledForUser(server.id, true);
+      mcpTree.refresh();
+    })),
+    vscode40.commands.registerCommand("liberide.disableMcpServer", safe(async (arg) => {
+      const server = McpTreeProvider.serverOf(arg);
+      if (!server) return;
+      await setMcpServerEnabledForUser(server.id, false);
+      mcpTree.refresh();
+    })),
+    vscode40.commands.registerCommand("liberide.scaffoldFeature", safe(async () => {
+      const folder = vscode40.workspace.workspaceFolders?.[0];
+      const name = await vscode40.window.showInputBox({ prompt: "Feature name" });
       if (!folder || !name) return;
       const root = await scaffoldFeature(folder, name);
       const id = root.path.split("/").pop() ?? name;
@@ -21762,51 +23391,146 @@ function commands8(context, specsTree, tasksTree, runsTree) {
       await store.refresh();
       specsTree.refresh();
     })),
-    vscode36.commands.registerCommand("liberide.setActiveFeature", safe(async (id) => {
+    vscode40.commands.registerCommand("liberide.setActiveFeature", safe(async (id) => {
       store.setActiveFeature(id);
       await context.workspaceState.update("liberide.activeFeatureId", id);
       tasksTree.refresh();
     })),
-    vscode36.commands.registerCommand("liberide.openTask", safe(async (arg) => {
+    vscode40.commands.registerCommand("liberide.openTask", safe(async (arg) => {
       const task = arg && store.getTask(arg.featureId, arg.task.id);
-      if (task) await vscode36.window.showTextDocument(task.filePath);
+      if (task) await vscode40.window.showTextDocument(task.filePath);
     })),
-    vscode36.commands.registerCommand("liberide.runTask", safe(async (arg) => {
+    vscode40.commands.registerCommand("liberide.runTask", safe(async (arg) => {
       const feature = arg && store.getFeature(arg.featureId);
       if (!feature || !arg) return;
       await pipeline.dispatch(feature.id, [arg.task.id]);
     })),
-    vscode36.commands.registerCommand("liberide.markTaskReady", safe(async (arg) => {
+    vscode40.commands.registerCommand("liberide.markTaskReady", safe(async (arg) => {
       const task = arg && store.getTask(arg.featureId, arg.task.id);
       if (task) await updateTaskStatus(task.filePath, "ready");
       await store.refresh();
     })),
-    vscode36.commands.registerCommand("liberide.dispatchFeature", safe(async () => {
+    vscode40.commands.registerCommand("liberide.dispatchFeature", safe(async () => {
       const feature = store.getActiveFeature();
       if (!feature) return;
       await pipeline.dispatch(feature.id);
     })),
-    vscode36.commands.registerCommand("liberide.regenerateTasksIndex", safe(async () => {
+    vscode40.commands.registerCommand("liberide.regenerateTasksIndex", safe(async () => {
       const feature = store.getActiveFeature();
-      if (feature?.tasksDirUri) await writeTextFile(vscode36.Uri.joinPath(feature.tasksDirUri, "index.md"), regenerateTasksIndex(feature.tasks));
+      if (feature?.tasksDirUri) await writeTextFile(vscode40.Uri.joinPath(feature.tasksDirUri, "index.md"), regenerateTasksIndex(feature.tasks));
     })),
-    vscode36.commands.registerCommand("liberide.cancelRun", safe(async (arg) => {
+    vscode40.commands.registerCommand("liberide.cancelRun", safe(async (arg) => {
       const graphId = typeof arg === "string" ? arg : arg?.run?.graphId;
       if (!graphId) {
-        void vscode36.window.showInformationMessage("Select an active run from the Agent Runs view to cancel it.");
+        void vscode40.window.showInformationMessage("Select an active run from the Agent Runs view to cancel it.");
         return;
       }
       await pipeline.cancel(graphId);
+    })),
+    vscode40.commands.registerCommand("liberide.resolveApproval", safe(async (arg) => {
+      const graphId = typeof arg === "string" ? arg : arg?.run?.graphId;
+      if (!graphId) {
+        void vscode40.window.showInformationMessage("Select a run awaiting approval from the Agent Runs view.");
+        return;
+      }
+      const nodeId = runsTree.getWaitingNodeId(graphId);
+      if (!nodeId) {
+        void vscode40.window.showInformationMessage("That run is not awaiting approval.");
+        return;
+      }
+      await pipeline.resolveApprovalForRun(graphId, nodeId);
+    })),
+    vscode40.commands.registerCommand("liberide.retryRun", safe(async (arg) => {
+      const graphId = typeof arg === "string" ? arg : arg?.run?.graphId;
+      if (!graphId) {
+        void vscode40.window.showInformationMessage("Select a finished run from the Agent Runs view to retry.");
+        return;
+      }
+      await pipeline.retryRun(graphId);
+    })),
+    vscode40.commands.registerCommand("liberide.replayFromNode", safe(async (arg) => {
+      if (!arg?.graphId || !arg?.nodeId) {
+        void vscode40.window.showInformationMessage("Select a node in the Agent Runs view to replay from.");
+        return;
+      }
+      await pipeline.replayFromNode(arg.graphId, arg.nodeId);
+    })),
+    vscode40.commands.registerCommand("liberide.showNodeDetail", safe(async (arg) => {
+      if (!arg?.graphId || !arg?.nodeId) return;
+      await pipeline.showNodeDetail(arg.graphId, arg.nodeId);
+    })),
+    vscode40.commands.registerCommand("liberide.viewArtifacts", safe(async (arg) => {
+      const graphId = typeof arg === "string" ? arg : arg?.run?.graphId;
+      if (!graphId) {
+        void vscode40.window.showInformationMessage("Select a run from the Agent Runs view to view its artifacts.");
+        return;
+      }
+      await pipeline.viewArtifacts(graphId);
+    })),
+    vscode40.commands.registerCommand("liberide.viewWorkingMemory", safe(async (arg) => {
+      const graphId = typeof arg === "string" ? arg : arg?.run?.graphId;
+      if (!graphId) {
+        void vscode40.window.showInformationMessage("Select a run from the Agent Runs view to inspect its working memory.");
+        return;
+      }
+      await pipeline.viewWorkingMemory(graphId);
+    })),
+    vscode40.commands.registerCommand("liberide.addWorkingMemoryNote", safe(async (arg) => {
+      const graphId = typeof arg === "string" ? arg : arg?.run?.graphId;
+      if (graphId) await pipeline.addWorkingMemoryNote(graphId);
+    })),
+    vscode40.commands.registerCommand("liberide.addFollowUp", safe(async (arg) => {
+      const graphId = typeof arg === "string" ? arg : arg?.run?.graphId;
+      if (graphId) await pipeline.addFollowUp(graphId);
+    })),
+    vscode40.commands.registerCommand("liberide.viewRunCost", safe(async (arg) => {
+      const graphId = typeof arg === "string" ? arg : arg?.run?.graphId;
+      if (!graphId) {
+        void vscode40.window.showInformationMessage("Select a run from the Agent Runs view to view its cost.");
+        return;
+      }
+      await pipeline.viewRunCost(graphId);
     }))
   ];
 }
-function statusBar() {
-  const item = vscode36.window.createStatusBarItem(vscode36.StatusBarAlignment.Left, 100);
-  item.text = "$(comment-discussion) LiberIDE";
-  item.tooltip = "Open LiberIDE chat";
-  item.command = "liberide.openChat";
-  item.show();
-  return item;
+function connectionStatus(output) {
+  const item = vscode40.window.createStatusBarItem(vscode40.StatusBarAlignment.Left, 100);
+  const warningBg = new vscode40.ThemeColor("statusBarItem.warningBackground");
+  let warned = false;
+  const apply = (state) => {
+    if (state === "ok") {
+      item.text = "$(comment-discussion) LiberIDE";
+      item.tooltip = "LiberIDE connected \u2014 open chat";
+      item.command = "liberide.openChat";
+      item.backgroundColor = void 0;
+    } else {
+      const label = state === "unconfigured" ? "not connected" : state === "unauthorized" ? "sign in" : "offline";
+      const icon = state === "unauthorized" ? "$(key)" : "$(debug-disconnect)";
+      item.text = `${icon} LiberIDE: ${label}`;
+      item.tooltip = "LiberIDE backend unavailable \u2014 click to check connection";
+      item.command = "liberide.checkConnection";
+      item.backgroundColor = warningBg;
+    }
+    item.show();
+  };
+  const refresh = async (notify) => {
+    item.text = "$(loading~spin) LiberIDE";
+    item.show();
+    const state = await probeBackend();
+    apply(state);
+    if (state === "ok" || !notify || warned) return;
+    warned = true;
+    const message = state === "unconfigured" ? "LiberIDE backend is not configured. Set LIBERIDE_API_ORIGIN + LIBERIDE_AUTH_TOKEN (or a libervox-integration.json)." : state === "unauthorized" ? "LiberIDE could not authenticate with the backend (token missing or expired)." : "LiberIDE backend is unreachable.";
+    const pick2 = await vscode40.window.showWarningMessage(message, "Details", "Retry");
+    if (pick2 === "Details") output.show(true);
+    else if (pick2 === "Retry") void refresh(true);
+  };
+  const cmd = vscode40.commands.registerCommand("liberide.checkConnection", () => {
+    warned = false;
+    void refresh(true);
+  });
+  void refresh(true);
+  return vscode40.Disposable.from(item, cmd);
 }
 function deactivate() {
   disposeAgentTerminals();
