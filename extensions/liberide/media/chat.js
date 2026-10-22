@@ -233,6 +233,13 @@
     return [...staticCommands, ...agentCommands].filter((command) => matchesSlashQuery(command.label, slashQuery));
   }
 
+  // ../../../packages/shared/src/runtime-mode.ts
+  var APPROVAL_MODES = ["ask", "auto", "full"];
+  var DEFAULT_APPROVAL_MODE = "auto";
+  function approvalModeRank(mode) {
+    return APPROVAL_MODES.indexOf(mode);
+  }
+
   // ../../../node_modules/zod/v4/classic/external.js
   var external_exports = {};
   __export(external_exports, {
@@ -15624,6 +15631,19 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     return scan(code, specs);
   }
 
+  // src/chat/approval-mode.ts
+  var APPROVAL_MODE_OPTIONS = [
+    { id: "ask", label: "Ask", description: "Ask before edits, commands and other gated actions." },
+    { id: "auto", label: "Auto", description: "Apply edits and run normal commands; still ask for destructive or irreversible actions." },
+    { id: "full", label: "Full access", description: "Never ask. Only hard-denied policies still block." }
+  ];
+  function approvalModeLabel(mode) {
+    return APPROVAL_MODE_OPTIONS.find((option) => option.id === mode)?.label ?? mode;
+  }
+  function approvalModeAllowed(mode, max) {
+    return !max || approvalModeRank(mode) <= approvalModeRank(max);
+  }
+
   // src/webview/chat-main.ts
   var vscode = acquireVsCodeApi();
   var state = {
@@ -15639,6 +15659,8 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     settingsOpen: false,
     modelPickerOpen: false,
     agentPickerOpen: false,
+    approvalPickerOpen: false,
+    approvalModeOffer: null,
     draft: "",
     streaming: false,
     expandedTimelines: /* @__PURE__ */ new Set(),
@@ -15673,7 +15695,8 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
       allowedAgentIds: o.allowedAgentIds?.length ? o.allowedAgentIds : defaultAllowed,
       skillIds: o.skillIds ?? [],
       mcpServerIds: o.mcpServerIds ?? [],
-      documentIds: o.documentIds ?? []
+      documentIds: o.documentIds ?? [],
+      approvalMode: o.approvalMode ?? DEFAULT_APPROVAL_MODE
     };
   }
   function selectedAttachments() {
@@ -15703,6 +15726,8 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     applySettings();
     applyModelPicker();
     applyAgentPicker();
+    applyApprovalPicker();
+    renderApprovalModeOffer();
     renderBackendBanner();
   }
   function shellHtml() {
@@ -15727,6 +15752,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
         <div class="project-bar" id="project-bar"></div>
         <div class="backend-banner" id="backend-banner" hidden></div>
         <div class="notice-stack" id="notice-stack"></div>
+        <div class="approval-mode-offer" id="approval-mode-offer" hidden></div>
         <section class="chat-transcript" id="transcript"></section>
         <footer class="chat-composer">
           <div class="composer-card">
@@ -15748,6 +15774,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
       <div class="modal-backdrop" id="modal-backdrop" hidden></div>
       <div class="popover" id="model-picker" hidden></div>
       <div class="popover" id="agent-picker" hidden></div>
+      <div class="popover" id="approval-picker" hidden></div>
       <aside class="settings-overlay" id="settings-overlay" hidden>
         <header class="settings-overlay-header">
           <span>LiberIDE Settings</span>
@@ -15781,6 +15808,10 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
       if (state.agentPickerOpen) {
         state.agentPickerOpen = false;
         applyAgentPicker();
+      }
+      if (state.approvalPickerOpen) {
+        state.approvalPickerOpen = false;
+        applyApprovalPicker();
       }
       if (state.settingsOpen) {
         state.settingsOpen = false;
@@ -15829,21 +15860,98 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     const el = root.querySelector("#settings-overlay");
     const backdrop = root.querySelector("#modal-backdrop");
     if (el) el.toggleAttribute("hidden", !state.settingsOpen);
-    if (backdrop) backdrop.toggleAttribute("hidden", !(state.settingsOpen || state.modelPickerOpen || state.agentPickerOpen));
+    if (backdrop) backdrop.toggleAttribute("hidden", !anyPopoverOpen());
     if (state.settingsOpen) renderSettings();
   }
   function applyModelPicker() {
     const el = root.querySelector("#model-picker");
     const backdrop = root.querySelector("#modal-backdrop");
     if (el) el.toggleAttribute("hidden", !state.modelPickerOpen);
-    if (backdrop) backdrop.toggleAttribute("hidden", !(state.settingsOpen || state.modelPickerOpen || state.agentPickerOpen));
+    if (backdrop) backdrop.toggleAttribute("hidden", !anyPopoverOpen());
     if (state.modelPickerOpen) renderModelPicker();
+  }
+  function anyPopoverOpen() {
+    return state.settingsOpen || state.modelPickerOpen || state.agentPickerOpen || state.approvalPickerOpen;
+  }
+  function applyApprovalPicker() {
+    const el = root.querySelector("#approval-picker");
+    const backdrop = root.querySelector("#modal-backdrop");
+    if (el) el.toggleAttribute("hidden", !state.approvalPickerOpen);
+    if (backdrop) backdrop.toggleAttribute("hidden", !anyPopoverOpen());
+    if (state.approvalPickerOpen) renderApprovalPicker();
+  }
+  function renderApprovalPicker() {
+    const el = root.querySelector("#approval-picker");
+    if (!el || !state.approvalPickerOpen) return;
+    const current = effective().approvalMode;
+    const max = state.catalog.maxApprovalMode;
+    el.innerHTML = `
+    <header class="popover-header">
+      <span>Approval mode</span>
+      <button class="icon-btn" id="approval-close">\u2715</button>
+    </header>
+    <div class="popover-body">
+      <ul>
+        ${APPROVAL_MODE_OPTIONS.map((option) => {
+      const allowed = approvalModeAllowed(option.id, max);
+      const classes = ["popover-row", `approval-mode-${option.id}`];
+      if (option.id === current) classes.push("selected");
+      if (!allowed) classes.push("disabled");
+      return `<li class="${classes.join(" ")}" data-mode="${escapeAttr(option.id)}" aria-disabled="${!allowed}">
+            <div class="popover-row-title">${escapeHtml2(option.label)}</div>
+            <div class="popover-row-detail">${escapeHtml2(allowed ? option.description : `${option.description} Not allowed by your administrator.`)}</div>
+          </li>`;
+    }).join("")}
+      </ul>
+    </div>
+  `;
+    el.querySelector("#approval-close")?.addEventListener("click", () => {
+      state.approvalPickerOpen = false;
+      applyApprovalPicker();
+    });
+    for (const li of el.querySelectorAll(".popover-row")) {
+      li.addEventListener("click", () => {
+        const mode = li.dataset.mode;
+        if (!mode || li.classList.contains("disabled")) return;
+        state.approvalPickerOpen = false;
+        applyApprovalPicker();
+        if (mode !== current) setOverrides({ approvalMode: mode });
+      });
+    }
+  }
+  function renderApprovalModeOffer() {
+    const el = root.querySelector("#approval-mode-offer");
+    if (!el) return;
+    const offer = state.approvalModeOffer;
+    if (!offer || offer.sessionId !== state.activeSession?.id || offer.approvals.length === 0) {
+      el.hidden = true;
+      el.innerHTML = "";
+      return;
+    }
+    const count = offer.approvals.length;
+    el.hidden = false;
+    el.innerHTML = `
+    <div class="approval-mode-offer-text">
+      ${escapeHtml2(`${count} pending approval${count === 1 ? "" : "s"} would be auto-approved in ${approvalModeLabel(offer.mode)} mode.`)}
+      <ul>${offer.approvals.slice(0, 5).map((a) => `<li>${escapeHtml2(a.action)}</li>`).join("")}${count > 5 ? `<li>\u2026</li>` : ""}</ul>
+    </div>
+    <div class="approval-mode-offer-actions">
+      <button class="btn-primary" id="approval-offer-approve" ${offer.busy ? "disabled" : ""}>${offer.busy ? "Approving\u2026" : `Approve ${count}`}</button>
+      <button class="btn-secondary small" id="approval-offer-dismiss" ${offer.busy ? "disabled" : ""}>Keep pending</button>
+    </div>
+  `;
+    el.querySelector("#approval-offer-approve")?.addEventListener("click", () => {
+      send({ type: "autoResolveApprovals", sessionId: offer.sessionId, ids: offer.approvals.map((a) => a.id) });
+    });
+    el.querySelector("#approval-offer-dismiss")?.addEventListener("click", () => {
+      send({ type: "dismissApprovalModeOffer", sessionId: offer.sessionId });
+    });
   }
   function applyAgentPicker() {
     const el = root.querySelector("#agent-picker");
     const backdrop = root.querySelector("#modal-backdrop");
     if (el) el.toggleAttribute("hidden", !state.agentPickerOpen);
-    if (backdrop) backdrop.toggleAttribute("hidden", !(state.settingsOpen || state.modelPickerOpen || state.agentPickerOpen));
+    if (backdrop) backdrop.toggleAttribute("hidden", !anyPopoverOpen());
     if (state.agentPickerOpen) renderAgentPicker();
   }
   function renderProjectBar() {
@@ -16185,7 +16293,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
   }
   function renderApprovalCard(card) {
     const pending = card.status === "pending";
-    const statusText = card.busy ? pending ? "Submitting\u2026" : "Continuing\u2026" : pending ? "Waiting for your decision" : card.status === "approved" ? "Approved" : "Rejected";
+    const statusText = card.busy ? pending ? "Submitting\u2026" : "Continuing\u2026" : pending ? "Waiting for your decision" : card.status === "approved" ? "Approved" : card.status === "auto_approved" ? "Auto-approved by the chat's approval mode" : "Rejected";
     return `<div class="approval-card status-${escapeAttr(card.status)}" data-approval-id="${escapeAttr(card.id)}">
     <div class="approval-head">
       <span class="approval-title">${escapeHtml2(card.action)}</span>
@@ -16788,6 +16896,10 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
       \u269B ${escapeHtml2(agentLabel)}
     </button>
     <span class="composer-spacer"></span>
+    <button class="chip chip-approval chip-approval-${escapeAttr(eff.approvalMode)}" id="chip-approval" title="${escapeAttr(`Approval mode: ${approvalModeLabel(eff.approvalMode)} \u2014 ${APPROVAL_MODE_OPTIONS.find((o) => o.id === eff.approvalMode)?.description ?? ""}`)}">
+      <span>${eff.approvalMode === "full" ? "\u26A0 " : ""}${escapeHtml2(approvalModeLabel(eff.approvalMode))}</span>
+      <span class="chip-caret">\u25BE</span>
+    </button>
     <button class="chip chip-model" id="chip-model" title="Pick model for this chat" ${state.catalog.models.length === 0 ? "disabled" : ""}>
       <span>${escapeHtml2(modelLabel)}</span>
       <span class="chip-caret">\u25BE</span>
@@ -16797,6 +16909,10 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     toolbar.querySelector("#chip-model")?.addEventListener("click", () => {
       state.modelPickerOpen = !state.modelPickerOpen;
       applyModelPicker();
+    });
+    toolbar.querySelector("#chip-approval")?.addEventListener("click", () => {
+      state.approvalPickerOpen = !state.approvalPickerOpen;
+      applyApprovalPicker();
     });
     toolbar.querySelector("#chip-agents")?.addEventListener("click", () => {
       state.agentPickerOpen = !state.agentPickerOpen;
@@ -17605,6 +17721,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
         renderBackendBanner();
         if (state.modelPickerOpen) renderModelPicker();
         if (state.agentPickerOpen) renderAgentPicker();
+        if (state.approvalPickerOpen) renderApprovalPicker();
         break;
       case "project":
         state.project = msg.project;
@@ -17622,6 +17739,10 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
         state.contextBlocks = msg.blocks;
         renderContextBlocks();
         break;
+      case "approvalModeOffer":
+        state.approvalModeOffer = msg.offer;
+        renderApprovalModeOffer();
+        break;
       case "sessions":
         state.sessions = msg.sessions;
         state.activeSessionId = msg.activeSessionId;
@@ -17635,6 +17756,8 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
         renderTranscript();
         renderComposer();
         renderComposerAttachments();
+        if (state.approvalPickerOpen) renderApprovalPicker();
+        renderApprovalModeOffer();
         break;
       case "messageStart":
         if (state.activeSession && state.activeSession.id === msg.sessionId) {

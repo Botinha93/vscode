@@ -34,6 +34,15 @@ import {
   mergeAgentRun,
   type AgentRunView,
 } from "./agent-runs";
+import { autoResolveApprovals, listAutoResolvableApprovals } from "../api";
+import {
+  approvalModeAllowed,
+  changeConversationApprovalMode,
+  conversationApprovalMode,
+  isApprovalMode,
+  maxApprovalModeFromConfig,
+  setActiveChatApprovalContext,
+} from "./approval-mode";
 import { onSettingsChange, readSettings, writeSetting, type LiberideSettings } from "../settings";
 import {
   conversationHasProjectTag,
@@ -79,6 +88,7 @@ import type {
 } from "./types";
 import type {
   ApprovalCardView,
+  ApprovalModeOfferView,
   FallbackProposalView,
   GraphProgressView,
   BackendCatalog,
@@ -511,7 +521,71 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
 
   private broadcastActiveSession(): void {
     const session = this.activeSession();
+    // Spec dispatch (pipeline panel) starts graphs with the active chat's mode.
+    setActiveChatApprovalContext({ conversationId: session?.conversationId, approvalMode: session?.overrides.approvalMode });
+    if (this.approvalModeOffer && this.approvalModeOffer.sessionId !== session?.id) this.setApprovalModeOffer(null);
     if (session) this.broadcast({ type: "session", session });
+  }
+
+  /** Pending approvals the newly chosen (looser) approval mode would auto-approve. */
+  private approvalModeOffer: ApprovalModeOfferView | null = null;
+
+  private setApprovalModeOffer(offer: ApprovalModeOfferView | null): void {
+    this.approvalModeOffer = offer;
+    this.broadcast({ type: "approvalModeOffer", offer });
+  }
+
+  private async resolveApprovalModeOffer(sessionId: string, ids: string[]): Promise<void> {
+    const offer = this.approvalModeOffer;
+    if (!offer || offer.sessionId !== sessionId || !this.conversations.has(sessionId)) return;
+    this.setApprovalModeOffer({ ...offer, busy: true });
+    try {
+      const result = await autoResolveApprovals(sessionId, ids.length ? ids : undefined);
+      this.setApprovalModeOffer(null);
+      const skipped = result.skipped.length ? ` (${result.skipped.length} skipped)` : "";
+      this.broadcast({ type: "log", message: `Approved ${result.resolved.length} pending request${result.resolved.length === 1 ? "" : "s"}${skipped}.`, severity: "info" });
+      await this.refreshSingleConversation(sessionId);
+      void this.attachRunningTurn(sessionId);
+    } catch (err) {
+      this.setApprovalModeOffer({ ...offer, busy: false });
+      this.broadcast({ type: "log", message: `Could not resolve pending approvals: ${err instanceof Error ? err.message : String(err)}`, severity: "error" });
+    }
+  }
+
+  /** Change the chat's approval mode (PATCH for a saved chat; kept on a draft until it is created). */
+  private async updateApprovalMode(id: string, next: unknown): Promise<void> {
+    if (!isApprovalMode(next)) return;
+    const max = this.catalog.maxApprovalMode;
+    if (id.startsWith("draft:") && this.draftSession?.id === id) {
+      if (!approvalModeAllowed(next, max)) return;
+      this.draftSession.overrides = { ...this.draftSession.overrides, approvalMode: next };
+      this.broadcastActiveSession();
+      return;
+    }
+    const conversation = this.conversations.get(id);
+    if (!conversation) return;
+    const result = await changeConversationApprovalMode(
+      { conversationId: id, previous: conversationApprovalMode(conversation), next, max },
+      { patch: patchConversation, listAutoResolvable: listAutoResolvableApprovals },
+    );
+    if (!result.ok) {
+      this.output.appendLine(`[chat.approvalMode] ${result.error}`);
+      this.broadcast({ type: "log", message: result.error, severity: "warning" });
+      this.broadcastActiveSession();
+      return;
+    }
+    this.conversations.set(id, result.conversation);
+    this.broadcastSessions();
+    this.broadcastActiveSession();
+    if (result.resolvable.length) {
+      this.setApprovalModeOffer({
+        sessionId: id,
+        mode: result.mode,
+        approvals: result.resolvable.map((a) => ({ id: a.id, action: a.action, reason: a.reason, risk: a.risk })),
+      });
+    } else if (this.approvalModeOffer?.sessionId === id) {
+      this.setApprovalModeOffer(null);
+    }
   }
 
   private async handleMessage(message: ChatWebviewToHost): Promise<void> {
@@ -563,6 +637,12 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
           break;
         case "setOverrides":
           await this.updateOverrides(message.sessionId, message.overrides);
+          break;
+        case "autoResolveApprovals":
+          await this.resolveApprovalModeOffer(message.sessionId, message.ids);
+          break;
+        case "dismissApprovalModeOffer":
+          if (this.approvalModeOffer?.sessionId === message.sessionId) this.setApprovalModeOffer(null);
           break;
         case "setSessionKind":
           await this.updateSessionKind(message.sessionId, message.kind);
@@ -1408,6 +1488,8 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       skillIds: stored.skillIds,
       mcpServerIds: stored.mcpServerIds,
       documentIds: stored.documentIds ?? [],
+      // The server's value wins (another surface may have changed it).
+      approvalMode: conversationApprovalMode(conv),
     };
   }
 
@@ -1699,6 +1781,13 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     const normalizedOverrides: ChatOverrides = { ...overrides };
     delete normalizedOverrides.chatMode;
     delete normalizedOverrides.toolsEnabled;
+    if (normalizedOverrides.approvalMode !== undefined) {
+      // Lives on the conversation, not in the local overrides cache.
+      const mode = normalizedOverrides.approvalMode;
+      delete normalizedOverrides.approvalMode;
+      await this.updateApprovalMode(id, mode);
+      if (Object.keys(normalizedOverrides).length === 0) return;
+    }
     if (id.startsWith("draft:") && this.draftSession?.id === id) {
       this.draftSession.overrides = { ...this.draftSession.overrides, ...normalizedOverrides };
       this.draftSession.updatedAt = Date.now();
@@ -2517,6 +2606,8 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       if (overrides.model) patch.model = overrides.model;
       if (overrides.agentId) patch.agentId = overrides.agentId;
       if (allowedAgentIds.length) patch.allowedAgentIds = allowedAgentIds;
+      // The mode picked on the draft becomes the new conversation's.
+      if (overrides.approvalMode && overrides.approvalMode !== conversationApprovalMode(conv)) patch.approvalMode = overrides.approvalMode;
       if (Object.keys(patch).length) {
         conv = await patchConversation(conv.id, patch);
       }
@@ -2946,6 +3037,7 @@ function catalogFromConfig(config: AppConfig, documents: BackendCatalog["documen
     mcpServers: config.mcpServers ?? [],
     documents,
     maxAgentSpawns: config.maxAgentSpawns ?? 3,
+    maxApprovalMode: maxApprovalModeFromConfig(config),
   };
 }
 

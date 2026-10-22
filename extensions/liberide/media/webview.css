@@ -1090,6 +1090,32 @@ button { font: inherit; }
   white-space: nowrap;
 }
 .chip-caret { font-size: 0.7em; opacity: 0.7; }
+/* Per-chat approval mode (Ask / Auto / Full access); Full access stands out. */
+.chip-approval { font-weight: 500; }
+.chip-approval-ask { color: var(--chatllm-muted); }
+.chip-approval-full {
+  background: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 18%, transparent);
+  border-color: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 70%, transparent);
+  color: var(--vscode-editorWarning-foreground, #cca700);
+}
+.popover-row.approval-mode-full .popover-row-title { color: var(--vscode-editorWarning-foreground, #cca700); }
+.popover-row.selected.approval-mode-full .popover-row-title { color: inherit; }
+.popover-row.disabled { opacity: 0.5; cursor: not-allowed; }
+.popover-row.disabled:hover { background: transparent; }
+.approval-mode-offer {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin: 6px 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--chatllm-border);
+  border-radius: 6px;
+  font-size: 0.85em;
+}
+.approval-mode-offer[hidden] { display: none; }
+.approval-mode-offer ul { margin: 4px 0 0; padding-left: 16px; color: var(--chatllm-muted); }
+.approval-mode-offer-actions { display: flex; gap: 6px; flex-shrink: 0; }
 
 .send-btn {
   width: 28px;

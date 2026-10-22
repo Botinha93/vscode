@@ -384,6 +384,16 @@ function detectIdeSpecSlashCommand(content) {
   };
 }
 
+// ../../../packages/shared/src/runtime-mode.ts
+var APPROVAL_MODES = ["ask", "auto", "full"];
+var DEFAULT_APPROVAL_MODE = "auto";
+function isApprovalMode(value) {
+  return typeof value === "string" && APPROVAL_MODES.includes(value);
+}
+function approvalModeRank(mode) {
+  return APPROVAL_MODES.indexOf(mode);
+}
+
 // ../../../node_modules/zod/v4/classic/external.js
 var external_exports = {};
 __export(external_exports, {
@@ -15619,6 +15629,19 @@ async function patchConversation(id, partial2) {
     })
   );
 }
+async function listAutoResolvableApprovals(conversationId) {
+  return readJson(
+    await apiFetch(`/api/conversations/${encodeURIComponent(conversationId)}/approvals/auto-resolvable`)
+  );
+}
+async function autoResolveApprovals(conversationId, ids) {
+  return readJson(
+    await apiFetch(`/api/conversations/${encodeURIComponent(conversationId)}/approvals/auto-resolve`, {
+      method: "POST",
+      body: JSON.stringify(ids ? { ids } : {})
+    })
+  );
+}
 async function deleteConversation(id) {
   await readNothing(
     await apiFetch(`/api/conversations/${encodeURIComponent(id)}`, { method: "DELETE" })
@@ -15933,6 +15956,53 @@ function takeStartupConversationRequest(snapshot, folders, now = Date.now()) {
 var import_node_crypto2 = require("node:crypto");
 var vscode5 = __toESM(require("vscode"));
 
+// src/chat/approval-mode.ts
+var APPROVAL_MODE_OPTIONS = [
+  { id: "ask", label: "Ask", description: "Ask before edits, commands and other gated actions." },
+  { id: "auto", label: "Auto", description: "Apply edits and run normal commands; still ask for destructive or irreversible actions." },
+  { id: "full", label: "Full access", description: "Never ask. Only hard-denied policies still block." }
+];
+function approvalModeLabel(mode) {
+  return APPROVAL_MODE_OPTIONS.find((option) => option.id === mode)?.label ?? mode;
+}
+function approvalModeAllowed(mode, max) {
+  return !max || approvalModeRank(mode) <= approvalModeRank(max);
+}
+function conversationApprovalMode(conversation) {
+  return isApprovalMode(conversation?.approvalMode) ? conversation.approvalMode : DEFAULT_APPROVAL_MODE;
+}
+function loosensApprovals(previous, next) {
+  return next !== "ask" && approvalModeRank(next) > approvalModeRank(previous);
+}
+function maxApprovalModeFromConfig(config2) {
+  return isApprovalMode(config2.maxApprovalMode) ? config2.maxApprovalMode : void 0;
+}
+async function changeConversationApprovalMode(input, deps) {
+  if (!isApprovalMode(input.next) || !APPROVAL_MODES.includes(input.next)) return { ok: false, error: `Unknown approval mode '${String(input.next)}'.` };
+  if (!approvalModeAllowed(input.next, input.max)) {
+    return { ok: false, error: `${approvalModeLabel(input.next)} is not allowed by your administrator (maximum: ${approvalModeLabel(input.max)}).` };
+  }
+  let conversation;
+  try {
+    conversation = await deps.patch(input.conversationId, { approvalMode: input.next });
+  } catch (err) {
+    return { ok: false, error: `Could not change the approval mode: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  const mode = conversationApprovalMode(conversation);
+  let resolvable = [];
+  if (loosensApprovals(input.previous, mode)) {
+    resolvable = await deps.listAutoResolvable(input.conversationId).then((r) => r.approvals ?? []).catch(() => []);
+  }
+  return { ok: true, conversation, mode, resolvable };
+}
+var activeChatApproval = {};
+function setActiveChatApprovalContext(context) {
+  activeChatApproval = { ...context };
+}
+function activeChatApprovalContext() {
+  return { ...activeChatApproval };
+}
+
 // src/spec/dag.ts
 function validateDag(tasks3) {
   const ids = new Set(tasks3.map((task) => task.id));
@@ -16006,6 +16076,8 @@ async function dispatchFeature(feature, options = {}) {
       conversationId: options.conversationId,
       ideContext: options.ideContext,
       priority: "FOREGROUND",
+      // The dispatching chat's approval mode: graph nodes ask (or not) like the chat.
+      ...options.approvalMode ? { approvalMode: options.approvalMode } : {},
       ...options.swarm ? { swarm: true, isolation: options.isolation ?? "shared" } : {},
       ...feature.documentation?.length ? { documentation: feature.documentation } : {},
       ...feature.blockers?.length ? { blockers: feature.blockers } : {},
@@ -16955,7 +17027,9 @@ var LiberidePipelineController = class _LiberidePipelineController {
       taskIds: selectedIds,
       ideContext: ideContext ? { ...ideContext } : void 0,
       swarm: settings.swarm,
-      isolation: settings.isolation
+      isolation: settings.isolation,
+      // Graphs started from the pipeline keep the active chat's approval mode.
+      approvalMode: activeChatApprovalContext().approvalMode
     });
     const startEvent = {
       graphId: result.graphId,
@@ -18690,7 +18764,66 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
   }
   broadcastActiveSession() {
     const session = this.activeSession();
+    setActiveChatApprovalContext({ conversationId: session?.conversationId, approvalMode: session?.overrides.approvalMode });
+    if (this.approvalModeOffer && this.approvalModeOffer.sessionId !== session?.id) this.setApprovalModeOffer(null);
     if (session) this.broadcast({ type: "session", session });
+  }
+  /** Pending approvals the newly chosen (looser) approval mode would auto-approve. */
+  approvalModeOffer = null;
+  setApprovalModeOffer(offer) {
+    this.approvalModeOffer = offer;
+    this.broadcast({ type: "approvalModeOffer", offer });
+  }
+  async resolveApprovalModeOffer(sessionId, ids) {
+    const offer = this.approvalModeOffer;
+    if (!offer || offer.sessionId !== sessionId || !this.conversations.has(sessionId)) return;
+    this.setApprovalModeOffer({ ...offer, busy: true });
+    try {
+      const result = await autoResolveApprovals(sessionId, ids.length ? ids : void 0);
+      this.setApprovalModeOffer(null);
+      const skipped = result.skipped.length ? ` (${result.skipped.length} skipped)` : "";
+      this.broadcast({ type: "log", message: `Approved ${result.resolved.length} pending request${result.resolved.length === 1 ? "" : "s"}${skipped}.`, severity: "info" });
+      await this.refreshSingleConversation(sessionId);
+      void this.attachRunningTurn(sessionId);
+    } catch (err) {
+      this.setApprovalModeOffer({ ...offer, busy: false });
+      this.broadcast({ type: "log", message: `Could not resolve pending approvals: ${err instanceof Error ? err.message : String(err)}`, severity: "error" });
+    }
+  }
+  /** Change the chat's approval mode (PATCH for a saved chat; kept on a draft until it is created). */
+  async updateApprovalMode(id, next) {
+    if (!isApprovalMode(next)) return;
+    const max = this.catalog.maxApprovalMode;
+    if (id.startsWith("draft:") && this.draftSession?.id === id) {
+      if (!approvalModeAllowed(next, max)) return;
+      this.draftSession.overrides = { ...this.draftSession.overrides, approvalMode: next };
+      this.broadcastActiveSession();
+      return;
+    }
+    const conversation = this.conversations.get(id);
+    if (!conversation) return;
+    const result = await changeConversationApprovalMode(
+      { conversationId: id, previous: conversationApprovalMode(conversation), next, max },
+      { patch: patchConversation, listAutoResolvable: listAutoResolvableApprovals }
+    );
+    if (!result.ok) {
+      this.output.appendLine(`[chat.approvalMode] ${result.error}`);
+      this.broadcast({ type: "log", message: result.error, severity: "warning" });
+      this.broadcastActiveSession();
+      return;
+    }
+    this.conversations.set(id, result.conversation);
+    this.broadcastSessions();
+    this.broadcastActiveSession();
+    if (result.resolvable.length) {
+      this.setApprovalModeOffer({
+        sessionId: id,
+        mode: result.mode,
+        approvals: result.resolvable.map((a) => ({ id: a.id, action: a.action, reason: a.reason, risk: a.risk }))
+      });
+    } else if (this.approvalModeOffer?.sessionId === id) {
+      this.setApprovalModeOffer(null);
+    }
   }
   async handleMessage(message) {
     try {
@@ -18740,6 +18873,12 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
           break;
         case "setOverrides":
           await this.updateOverrides(message.sessionId, message.overrides);
+          break;
+        case "autoResolveApprovals":
+          await this.resolveApprovalModeOffer(message.sessionId, message.ids);
+          break;
+        case "dismissApprovalModeOffer":
+          if (this.approvalModeOffer?.sessionId === message.sessionId) this.setApprovalModeOffer(null);
           break;
         case "setSessionKind":
           await this.updateSessionKind(message.sessionId, message.kind);
@@ -19507,7 +19646,9 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
       allowedAgentIds: conv.allowedAgentIds?.length ? conv.allowedAgentIds : stored.allowedAgentIds?.length ? stored.allowedAgentIds : defaultAllowed,
       skillIds: stored.skillIds,
       mcpServerIds: stored.mcpServerIds,
-      documentIds: stored.documentIds ?? []
+      documentIds: stored.documentIds ?? [],
+      // The server's value wins (another surface may have changed it).
+      approvalMode: conversationApprovalMode(conv)
     };
   }
   projectInfo() {
@@ -19765,6 +19906,12 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     const normalizedOverrides = { ...overrides };
     delete normalizedOverrides.chatMode;
     delete normalizedOverrides.toolsEnabled;
+    if (normalizedOverrides.approvalMode !== void 0) {
+      const mode = normalizedOverrides.approvalMode;
+      delete normalizedOverrides.approvalMode;
+      await this.updateApprovalMode(id, mode);
+      if (Object.keys(normalizedOverrides).length === 0) return;
+    }
     if (id.startsWith("draft:") && this.draftSession?.id === id) {
       this.draftSession.overrides = { ...this.draftSession.overrides, ...normalizedOverrides };
       this.draftSession.updatedAt = Date.now();
@@ -20455,6 +20602,7 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
       if (overrides.model) patch.model = overrides.model;
       if (overrides.agentId) patch.agentId = overrides.agentId;
       if (allowedAgentIds.length) patch.allowedAgentIds = allowedAgentIds;
+      if (overrides.approvalMode && overrides.approvalMode !== conversationApprovalMode(conv)) patch.approvalMode = overrides.approvalMode;
       if (Object.keys(patch).length) {
         conv = await patchConversation(conv.id, patch);
       }
@@ -20862,7 +21010,8 @@ function catalogFromConfig(config2, documents) {
     skills: config2.skills ?? [],
     mcpServers: config2.mcpServers ?? [],
     documents,
-    maxAgentSpawns: config2.maxAgentSpawns ?? 3
+    maxAgentSpawns: config2.maxAgentSpawns ?? 3,
+    maxApprovalMode: maxApprovalModeFromConfig(config2)
   };
 }
 function parsePipelineSections(buffer) {

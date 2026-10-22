@@ -1,4 +1,4 @@
-import type { AgentApprovalRequest, AgentRunCardMetadata, ModelCapability, ModelProfileV1, ModelRoutingResolution, Provider } from "@nexus/shared";
+import type { AgentApprovalRequest, AgentRunCardMetadata, ApprovalMode, ModelCapability, ModelProfileV1, ModelRoutingResolution, Provider } from "@nexus/shared";
 
 export type { AgentApprovalRequest } from "@nexus/shared";
 export type FallbackRequiredResolution = Extract<ModelRoutingResolution, { status: "approval_required" }>;
@@ -89,6 +89,8 @@ export interface Conversation {
   model?: string;
   modelSelection?: ChatModelSelectionMode;
   chatMode?: ConversationChatMode;
+  /** Per-chat approval mode (ask | auto | full); the server reads it for every run started from the chat. */
+  approvalMode?: ApprovalMode;
   agentId?: string;
   allowedAgentIds?: string[];
   folder?: string;
@@ -130,6 +132,8 @@ export interface AppConfig {
   agents: AgentDefinition[];
   mcpServers?: McpServer[];
   maxAgentSpawns: number;
+  /** Most permissive approval mode the admin allows (absent on older servers). */
+  maxApprovalMode?: ApprovalMode;
 }
 
 export interface IdeToolContextPayload {
@@ -179,6 +183,8 @@ export interface ChatRequest {
   allowedAgentIds: string[];
   maxAgentSpawns: number;
   ideContext?: IdeToolContextPayload;
+  /** Only for a chat created by this turn; otherwise the server reads the conversation's mode. */
+  approvalMode?: ApprovalMode;
 }
 
 export interface ToolCallEvent {

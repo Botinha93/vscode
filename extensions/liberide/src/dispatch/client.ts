@@ -2,6 +2,7 @@ import { apiFetch, getApiOrigin } from "../api";
 import { backoffDelay, readSseStream } from "../sse";
 import type { FeatureSpec, TaskContract } from "../spec/schema";
 import type { IdeToolContextPayload } from "../chat/types";
+import type { ApprovalMode } from "@nexus/shared";
 import { validateDag } from "../spec/dag";
 
 export interface SpecDispatchResult {
@@ -25,7 +26,7 @@ function taskInput(feature: FeatureSpec, task: TaskContract): string {
   ].join("\n").slice(0, 2000);
 }
 
-export async function dispatchFeature(feature: FeatureSpec, options: { conversationId?: string; taskIds?: string[]; ideContext?: IdeToolContextPayload; swarm?: boolean; isolation?: "worktree" | "shared" } = {}): Promise<SpecDispatchResult> {
+export async function dispatchFeature(feature: FeatureSpec, options: { conversationId?: string; taskIds?: string[]; ideContext?: IdeToolContextPayload; swarm?: boolean; isolation?: "worktree" | "shared"; approvalMode?: ApprovalMode } = {}): Promise<SpecDispatchResult> {
   const tasks = options.taskIds?.length ? feature.tasks.filter((task) => options.taskIds!.includes(task.id)) : feature.tasks;
   const validation = validateDag(tasks);
   if (!validation.ok) throw new Error(validation.error);
@@ -37,6 +38,8 @@ export async function dispatchFeature(feature: FeatureSpec, options: { conversat
       conversationId: options.conversationId,
       ideContext: options.ideContext,
       priority: "FOREGROUND",
+      // The dispatching chat's approval mode: graph nodes ask (or not) like the chat.
+      ...(options.approvalMode ? { approvalMode: options.approvalMode } : {}),
       ...(options.swarm ? { swarm: true, isolation: options.isolation ?? "shared" } : {}),
       ...(feature.documentation?.length ? { documentation: feature.documentation } : {}),
       ...(feature.blockers?.length ? { blockers: feature.blockers } : {}),

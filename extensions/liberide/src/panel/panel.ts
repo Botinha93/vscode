@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import * as vscode from "vscode";
+import { activeChatApprovalContext } from "../chat/approval-mode";
 import { addFollowUp, cancelExecutionGraph, dispatchFeature, fetchGraphDetail, getGraphMetrics, getWorkingMemory, listGraphArtifacts, patchWorkingMemory, replayFromNode, resolveGraphApproval, resolveNodeApproval, retryGraph, subscribeExecutionGraphEvents, taskStatusFromEvent, type GraphArtifact, type GraphMetrics, type WorkingMemorySnapshot } from "../dispatch/client";
 import { buildIdeContextPayload } from "../ide-delegate/context";
 import { onSettingsChange, readSettings } from "../settings";
@@ -260,6 +261,8 @@ export class LiberidePipelineController implements vscode.WebviewViewProvider, v
       ideContext: ideContext ? { ...ideContext } : undefined,
       swarm: settings.swarm,
       isolation: settings.isolation,
+      // Graphs started from the pipeline keep the active chat's approval mode.
+      approvalMode: activeChatApprovalContext().approvalMode,
     });
     const startEvent = {
       graphId: result.graphId,
