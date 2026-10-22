@@ -25,6 +25,8 @@ type IntegrationSnapshot = {
 };
 
 let integrationPath: string | undefined;
+/** Non-secret fallback supplied by the VS Code installation or workspace settings. */
+let configuredApiOrigin = "";
 let cachedIntegration: IntegrationSnapshot | null | undefined;
 /** Path the cached snapshot was read from (written back after a token refresh). */
 let cachedIntegrationSource: string | undefined;
@@ -170,7 +172,18 @@ export function clearIntegrationCache(): void {
 export function getApiOrigin(): string {
   const fromEnv = process.env.LIBERIDE_API_ORIGIN ?? process.env.CHATLLM_API_ORIGIN;
   if (fromEnv) return fromEnv.replace(/\/$/, "");
-  return (loadIntegrationFile()?.apiOrigin || "").replace(/\/$/, "");
+  const fromIntegration = loadIntegrationFile()?.apiOrigin;
+  if (fromIntegration) return fromIntegration.replace(/\/$/, "");
+  return configuredApiOrigin;
+}
+
+/**
+ * Configure the server origin from `liberide.apiOrigin`. This setting carries
+ * no credentials and is only used when launch variables and pairing data do
+ * not provide an origin.
+ */
+export function setConfiguredApiOrigin(value: string | undefined): void {
+  configuredApiOrigin = typeof value === "string" ? normalizeServerUrl(value) ?? "" : "";
 }
 
 /**
@@ -311,6 +324,7 @@ export function normalizeServerUrl(input: string): string | undefined {
   try {
     const url = new URL(input.trim());
     if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+    if (url.username || url.password || url.search || url.hash) return undefined;
     return `${url.origin}${url.pathname}`.replace(/\/+$/, "");
   } catch {
     return undefined;

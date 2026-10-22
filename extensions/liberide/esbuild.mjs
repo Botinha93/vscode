@@ -9,6 +9,9 @@ const common = {
   bundle: true,
   sourcemap: true,
   logLevel: "info",
+  // Shared Nexus sources live outside this extension's directory, so make its
+  // installed dependencies visible when resolving imports from those sources.
+  nodePaths: [join(__dirname, "node_modules")],
   alias: {
     "@nexus/shared": join(sharedRoot, "index.ts"),
   },

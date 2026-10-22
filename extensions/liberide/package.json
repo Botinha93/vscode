@@ -29,6 +29,12 @@
     "configuration": {
       "title": "LiberIDE",
       "properties": {
+        "liberide.apiOrigin": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "description": "HTTP(S) server URL used when no server origin is provided by the launch environment or pairing integration file. This setting contains no secret."
+        },
         "liberide.modelSelection": {
           "type": "string",
           "enum": ["auto", "manual"],
@@ -623,7 +629,8 @@
     "@nexus/shared": "file:../../../packages/shared",
     "cytoscape": "^3.30.0",
     "cytoscape-dagre": "^2.5.0",
-    "mermaid": "^11.15.0"
+    "mermaid": "^11.15.0",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
