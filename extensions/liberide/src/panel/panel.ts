@@ -1,11 +1,11 @@
 import { randomBytes } from "node:crypto";
 import * as vscode from "vscode";
-import { cancelExecutionGraph, dispatchFeature, subscribeExecutionGraphEvents } from "../dispatch/client";
+import { cancelExecutionGraph, dispatchFeature, subscribeExecutionGraphEvents, taskStatusFromEvent } from "../dispatch/client";
 import { buildIdeContextPayload } from "../ide-delegate/context";
 import { onSettingsChange, readSettings } from "../settings";
 import { computeTaskReadiness, validateDag } from "../spec/dag";
 import type { SpecStore } from "../spec/store";
-import { scaffoldFeature, updateTaskStatus } from "../spec/writer";
+import { scaffoldFeature } from "../spec/writer";
 import { getApiOrigin } from "../api";
 import type { FeatureSummary, PipelineHostToWebview, PipelineWebviewToHost, TaskSummary } from "./protocol";
 import type { RunsTreeProvider } from "../views/runsTree";
@@ -217,13 +217,12 @@ export class LiberidePipelineController implements vscode.WebviewViewProvider, v
       });
     }
     const dispose = subscribeExecutionGraphEvents(result.graphId, (event) => {
-      if (event.type === "node_status" && event.nodeId && event.status) {
-        const mapped = mapStatus(event.status);
-        if (mapped) {
-          const task = this.store.getTask(feature.id, event.nodeId);
-          if (task) void updateTaskStatus(task.filePath, mapped).then(() => this.store.refresh());
-        }
-        this.broadcast({ type: "graphNode", payload: { graphId: result.graphId, nodeId: event.nodeId, status: event.status } });
+      // Task files are updated by the runs tree (trackRun above); here only the webview.
+      const update = taskStatusFromEvent(event, result.graphId);
+      if (update) {
+        const { taskId, status, error } = update;
+        this.broadcast({ type: "graphNode", payload: { graphId: result.graphId, nodeId: taskId, status, ...(error ? { error } : {}) } });
+        if (error) this.broadcast({ type: "log", message: `${taskId} failed: ${error}`, severity: "error" });
       }
       if (event.type === "done" && event.status) {
         this.broadcast({ type: "graphDone", payload: { graphId: result.graphId, status: event.status } });
@@ -273,11 +272,6 @@ export class LiberidePipelineController implements vscode.WebviewViewProvider, v
 </body>
 </html>`;
   }
-}
-
-function mapStatus(status: string): "running" | "completed" | "failed" | "blocked" | undefined {
-  if (status === "running" || status === "completed" || status === "failed" || status === "blocked") return status;
-  return undefined;
 }
 
 function randomNonce(): string {

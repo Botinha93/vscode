@@ -28,10 +28,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   const specsTree = new SpecsTreeProvider(store);
   const tasksTree = new TasksTreeProvider(store);
-  const runsTree = new RunsTreeProvider(async (featureId, taskId, status) => {
+  const runsTree = new RunsTreeProvider(async (featureId, taskId, status, error) => {
     const task = store.getTask(featureId, taskId);
     if (task) {
-      await updateTaskStatus(task.filePath, status);
+      await updateTaskStatus(task.filePath, status, error);
       await store.refresh();
     }
   });

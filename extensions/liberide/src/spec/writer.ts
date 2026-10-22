@@ -9,33 +9,53 @@ export async function writeTextFile(uri: vscode.Uri, content: string): Promise<v
   await vscode.workspace.fs.writeFile(uri, Buffer.from(content, "utf8"));
 }
 
-export async function updateTaskStatus(uri: vscode.Uri, status: TaskStatus): Promise<void> {
+/**
+ * Frontmatter in the forms `parseFrontmatter` reads back: lists as dash
+ * items (an inline `[a, b]` list splits items at their commas) and multi-line
+ * text as `|` blocks (a bare `key: a\nb` keeps only its first line).
+ */
+/** Keys always written as `|` blocks, even on one line. */
+const BLOCK_KEYS = new Set(["architecture_hints"]);
+
+function serializeFrontmatter(data: Record<string, unknown>): string {
+  const lines: string[] = [];
+  for (const [key, value] of Object.entries(data)) {
+    if (Array.isArray(value)) {
+      if (value.length === 0) lines.push(`${key}: []`);
+      else lines.push(`${key}:`, ...value.map((item) => `  - ${String(item).replace(/\s*\n\s*/g, " ")}`));
+    } else if (typeof value === "string" && (value.includes("\n") || BLOCK_KEYS.has(key))) {
+      lines.push(`${key}: |`, ...value.split("\n").map((line) => `  ${line}`));
+    } else {
+      lines.push(`${key}: ${value ?? ""}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+/** `error` records why a run failed the task; any other status clears it. */
+export async function updateTaskStatus(uri: vscode.Uri, status: TaskStatus, error?: string): Promise<void> {
   const raw = await readTextFile(uri);
   const { data, body } = parseFrontmatter(raw);
   data.status = status;
-  const frontmatter = Object.entries(data).map(([key, value]) =>
-    Array.isArray(value) ? `${key}: [${value.join(", ")}]` : `${key}: ${value}`,
-  );
-  await writeTextFile(uri, `---\n${frontmatter.join("\n")}\n---\n${body}`);
+  if (status === "failed" && error) data.error = error.replace(/\s*\n\s*/g, " ");
+  else delete data.error;
+  await writeTextFile(uri, `---\n${serializeFrontmatter(data)}\n---\n${body}`);
 }
 
 export async function writeTaskContract(task: TaskContract): Promise<void> {
-  const content = `---
-id: ${task.id}
-title: ${task.title}
-status: ${task.status}
-requirement_refs: [${task.requirementRefs.join(", ")}]
-design_refs: [${task.designRefs.join(", ")}]
-depends_on: [${task.dependsOn.join(", ")}]
-expected_files: [${task.expectedFiles.join(", ")}]
-architecture_hints: |
-${task.architectureHints.split("\n").map((line) => `  ${line}`).join("\n")}
-acceptance: [${task.acceptance.join(", ")}]
-agent: ${task.agent}
----
-${task.body}
-`;
-  await writeTextFile(task.filePath, content);
+  const frontmatter = serializeFrontmatter({
+    id: task.id,
+    title: task.title,
+    status: task.status,
+    requirement_refs: task.requirementRefs,
+    design_refs: task.designRefs,
+    depends_on: task.dependsOn,
+    expected_files: task.expectedFiles,
+    architecture_hints: task.architectureHints,
+    acceptance: task.acceptance,
+    agent: task.agent,
+  });
+  await writeTextFile(task.filePath, `---\n${frontmatter}\n---\n${task.body}\n`);
 }
 
 export async function scaffoldFeature(folder: vscode.WorkspaceFolder, featureName: string): Promise<vscode.Uri> {

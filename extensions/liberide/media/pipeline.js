@@ -38508,7 +38508,14 @@
         chip.className = "node-chip";
         chip.dataset.status = node.status;
         chip.textContent = `${id2} \xB7 ${node.status}`;
+        if (node.error) chip.title = node.error;
         nodesEl.appendChild(chip);
+        if (node.error) {
+          const reason = document.createElement("div");
+          reason.className = "meta node-error";
+          reason.textContent = `${id2}: ${node.error}`;
+          nodesEl.appendChild(reason);
+        }
       }
       wrapper.addEventListener("click", () => focusGraph(run.graphId));
       wrapper.querySelector(".run-cancel")?.addEventListener("click", (event3) => {
@@ -38649,7 +38656,10 @@
         const run = state.runs.get(ev.graphId);
         if (run) {
           const node = run.nodes.get(ev.nodeId);
-          if (node) node.status = ev.status;
+          if (node) {
+            node.status = ev.status;
+            node.error = ev.error;
+          }
         }
         updateGraphNode(ev.graphId, ev.nodeId, ev.status);
         renderRuns();

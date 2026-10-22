@@ -28,7 +28,7 @@ interface RunState {
   label: string;
   featureId: string;
   status: string;
-  nodes: Map<string, { label: string; status: string; dependsOn: string[] }>;
+  nodes: Map<string, { label: string; status: string; dependsOn: string[]; error?: string }>;
 }
 
 interface AppState {
@@ -219,7 +219,14 @@ function renderRuns(): void {
       chip.className = "node-chip";
       chip.dataset.status = node.status;
       chip.textContent = `${id} \u00b7 ${node.status}`;
+      if (node.error) chip.title = node.error;
       nodesEl.appendChild(chip);
+      if (node.error) {
+        const reason = document.createElement("div");
+        reason.className = "meta node-error";
+        reason.textContent = `${id}: ${node.error}`;
+        nodesEl.appendChild(reason);
+      }
     }
     wrapper.addEventListener("click", () => focusGraph(run.graphId));
     wrapper.querySelector<HTMLButtonElement>(".run-cancel")?.addEventListener("click", (event) => {
@@ -370,7 +377,10 @@ function handleMessage(msg: PipelineHostToWebview): void {
       const run = state.runs.get(ev.graphId);
       if (run) {
         const node = run.nodes.get(ev.nodeId);
-        if (node) node.status = ev.status;
+        if (node) {
+          node.status = ev.status;
+          node.error = ev.error;
+        }
       }
       updateGraphNode(ev.graphId, ev.nodeId, ev.status);
       renderRuns();

@@ -77,6 +77,47 @@ export interface ExecutionGraphEvent {
   [key: string]: unknown;
 }
 
+/**
+ * The task a node_status event is about. Server node ids are prefixed with
+ * the graph id (`<graphId>_T-1`); the task id travels as `templateNodeId`.
+ */
+export function taskIdFromNodeEvent(event: ExecutionGraphEvent, graphId: string): string | undefined {
+  if (typeof event.templateNodeId === "string" && event.templateNodeId) return event.templateNodeId;
+  if (!event.nodeId) return undefined;
+  const prefix = `${graphId}_`;
+  return event.nodeId.startsWith(prefix) ? event.nodeId.slice(prefix.length) : event.nodeId;
+}
+
+/** Why a failed node failed, when the server sent it. */
+export function nodeEventError(event: ExecutionGraphEvent): string | undefined {
+  return event.status === "failed" && typeof event.error === "string" && event.error.trim() ? event.error.trim() : undefined;
+}
+
+export interface TaskStatusUpdate {
+  taskId: string;
+  status: string;
+  error?: string;
+}
+
+/**
+ * The task status an event reports, if any:
+ * - `task_status`: swarm graphs, where a task runs as several nodes
+ *   (implement, verify, repairs…) and the server folds them into one status;
+ * - `node_status` for a task's own node (one node per task). Swarm nodes
+ *   carry a `taskId` and are skipped: their task's `task_status` covers them.
+ */
+export function taskStatusFromEvent(event: ExecutionGraphEvent, graphId: string): TaskStatusUpdate | undefined {
+  if (!event.status) return undefined;
+  if (event.type === "task_status") {
+    if (typeof event.taskId !== "string" || !event.taskId) return undefined;
+    return { taskId: event.taskId, status: event.status, ...(nodeEventError(event) ? { error: nodeEventError(event)! } : {}) };
+  }
+  if (event.type !== "node_status" || typeof event.taskId === "string") return undefined;
+  const taskId = taskIdFromNodeEvent(event, graphId);
+  if (!taskId) return undefined;
+  return { taskId, status: event.status, ...(nodeEventError(event) ? { error: nodeEventError(event)! } : {}) };
+}
+
 export interface GraphSubscriptionOptions {
   /** Connection problems. `willRetry` is false when the subscription gave up. */
   onError?: (message: string, willRetry: boolean) => void;

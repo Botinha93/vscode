@@ -721,6 +721,26 @@ var TERMINAL_GRAPH_STATUSES = /* @__PURE__ */ new Set(["completed", "failed", "c
 function isTerminalGraphStatus(status) {
   return Boolean(status && TERMINAL_GRAPH_STATUSES.has(status));
 }
+function taskIdFromNodeEvent(event, graphId) {
+  if (typeof event.templateNodeId === "string" && event.templateNodeId) return event.templateNodeId;
+  if (!event.nodeId) return void 0;
+  const prefix = `${graphId}_`;
+  return event.nodeId.startsWith(prefix) ? event.nodeId.slice(prefix.length) : event.nodeId;
+}
+function nodeEventError(event) {
+  return event.status === "failed" && typeof event.error === "string" && event.error.trim() ? event.error.trim() : void 0;
+}
+function taskStatusFromEvent(event, graphId) {
+  if (!event.status) return void 0;
+  if (event.type === "task_status") {
+    if (typeof event.taskId !== "string" || !event.taskId) return void 0;
+    return { taskId: event.taskId, status: event.status, ...nodeEventError(event) ? { error: nodeEventError(event) } : {} };
+  }
+  if (event.type !== "node_status" || typeof event.taskId === "string") return void 0;
+  const taskId = taskIdFromNodeEvent(event, graphId);
+  if (!taskId) return void 0;
+  return { taskId, status: event.status, ...nodeEventError(event) ? { error: nodeEventError(event) } : {} };
+}
 var GRAPH_POLL_MS = 1e4;
 var MAX_RECONNECT_ATTEMPTS = 8;
 function subscribeExecutionGraphEvents(graphId, onEvent, options = {}) {
@@ -1068,35 +1088,50 @@ async function readTextFile(uri) {
 async function writeTextFile(uri, content) {
   await vscode3.workspace.fs.writeFile(uri, Buffer.from(content, "utf8"));
 }
-async function updateTaskStatus(uri, status) {
+var BLOCK_KEYS = /* @__PURE__ */ new Set(["architecture_hints"]);
+function serializeFrontmatter(data) {
+  const lines = [];
+  for (const [key, value] of Object.entries(data)) {
+    if (Array.isArray(value)) {
+      if (value.length === 0) lines.push(`${key}: []`);
+      else lines.push(`${key}:`, ...value.map((item) => `  - ${String(item).replace(/\s*\n\s*/g, " ")}`));
+    } else if (typeof value === "string" && (value.includes("\n") || BLOCK_KEYS.has(key))) {
+      lines.push(`${key}: |`, ...value.split("\n").map((line) => `  ${line}`));
+    } else {
+      lines.push(`${key}: ${value ?? ""}`);
+    }
+  }
+  return lines.join("\n");
+}
+async function updateTaskStatus(uri, status, error51) {
   const raw = await readTextFile(uri);
   const { data, body } = parseFrontmatter(raw);
   data.status = status;
-  const frontmatter = Object.entries(data).map(
-    ([key, value]) => Array.isArray(value) ? `${key}: [${value.join(", ")}]` : `${key}: ${value}`
-  );
+  if (status === "failed" && error51) data.error = error51.replace(/\s*\n\s*/g, " ");
+  else delete data.error;
   await writeTextFile(uri, `---
-${frontmatter.join("\n")}
+${serializeFrontmatter(data)}
 ---
 ${body}`);
 }
 async function writeTaskContract(task) {
-  const content = `---
-id: ${task.id}
-title: ${task.title}
-status: ${task.status}
-requirement_refs: [${task.requirementRefs.join(", ")}]
-design_refs: [${task.designRefs.join(", ")}]
-depends_on: [${task.dependsOn.join(", ")}]
-expected_files: [${task.expectedFiles.join(", ")}]
-architecture_hints: |
-${task.architectureHints.split("\n").map((line) => `  ${line}`).join("\n")}
-acceptance: [${task.acceptance.join(", ")}]
-agent: ${task.agent}
+  const frontmatter = serializeFrontmatter({
+    id: task.id,
+    title: task.title,
+    status: task.status,
+    requirement_refs: task.requirementRefs,
+    design_refs: task.designRefs,
+    depends_on: task.dependsOn,
+    expected_files: task.expectedFiles,
+    architecture_hints: task.architectureHints,
+    acceptance: task.acceptance,
+    agent: task.agent
+  });
+  await writeTextFile(task.filePath, `---
+${frontmatter}
 ---
 ${task.body}
-`;
-  await writeTextFile(task.filePath, content);
+`);
 }
 async function scaffoldFeature(folder, featureName) {
   const slug = featureName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "new-feature";
@@ -1305,13 +1340,11 @@ var LiberidePipelineController = class _LiberidePipelineController {
       });
     }
     const dispose = subscribeExecutionGraphEvents(result.graphId, (event) => {
-      if (event.type === "node_status" && event.nodeId && event.status) {
-        const mapped = mapStatus(event.status);
-        if (mapped) {
-          const task = this.store.getTask(feature.id, event.nodeId);
-          if (task) void updateTaskStatus(task.filePath, mapped).then(() => this.store.refresh());
-        }
-        this.broadcast({ type: "graphNode", payload: { graphId: result.graphId, nodeId: event.nodeId, status: event.status } });
+      const update = taskStatusFromEvent(event, result.graphId);
+      if (update) {
+        const { taskId, status, error: error51 } = update;
+        this.broadcast({ type: "graphNode", payload: { graphId: result.graphId, nodeId: taskId, status, ...error51 ? { error: error51 } : {} } });
+        if (error51) this.broadcast({ type: "log", message: `${taskId} failed: ${error51}`, severity: "error" });
       }
       if (event.type === "done" && event.status) {
         this.broadcast({ type: "graphDone", payload: { graphId: result.graphId, status: event.status } });
@@ -1360,10 +1393,6 @@ var LiberidePipelineController = class _LiberidePipelineController {
 </html>`;
   }
 };
-function mapStatus(status) {
-  if (status === "running" || status === "completed" || status === "failed" || status === "blocked") return status;
-  return void 0;
-}
 function randomNonce() {
   return (0, import_node_crypto2.randomBytes)(16).toString("hex");
 }
@@ -19339,10 +19368,11 @@ var RunsTreeProvider = class {
   trackRun(graphId, featureId, label, nodeIds) {
     const run = { graphId, featureId, label, status: "running", nodes: new Map(nodeIds.map((id) => [id, "queued"])) };
     run.dispose = subscribeExecutionGraphEvents(graphId, (event) => {
-      if (event.type === "node_status" && event.nodeId && event.status) {
-        run.nodes.set(event.nodeId, event.status);
-        const mapped = mapStatus2(event.status);
-        if (mapped) void this.writeback?.(featureId, event.nodeId, mapped);
+      const update = taskStatusFromEvent(event, graphId);
+      if (update) {
+        run.nodes.set(update.taskId, update.status);
+        const mapped = mapStatus(update.status);
+        if (mapped) void this.writeback?.(featureId, update.taskId, mapped, update.error);
       }
       if (event.type === "done" && event.status) {
         run.status = event.status;
@@ -19382,8 +19412,9 @@ var RunsTreeProvider = class {
     return [];
   }
 };
-function mapStatus2(status) {
+function mapStatus(status) {
   if (status === "running" || status === "completed" || status === "failed" || status === "blocked") return status;
+  if (status === "skipped") return "blocked";
   return void 0;
 }
 
@@ -21591,10 +21622,10 @@ async function activate(context) {
   await store.initialize(context);
   const specsTree = new SpecsTreeProvider(store);
   const tasksTree = new TasksTreeProvider(store);
-  const runsTree = new RunsTreeProvider(async (featureId, taskId, status) => {
+  const runsTree = new RunsTreeProvider(async (featureId, taskId, status, error51) => {
     const task = store.getTask(featureId, taskId);
     if (task) {
-      await updateTaskStatus(task.filePath, status);
+      await updateTaskStatus(task.filePath, status, error51);
       await store.refresh();
     }
   });

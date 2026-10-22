@@ -22,6 +22,8 @@ export interface GraphNodeUpdate {
   graphId: string;
   nodeId: string;
   status: string;
+  /** Why the task failed (failed nodes only). */
+  error?: string;
 }
 
 export interface GraphStartEvent {

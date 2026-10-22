@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { subscribeExecutionGraphEvents } from "../dispatch/client";
+import { subscribeExecutionGraphEvents, taskStatusFromEvent } from "../dispatch/client";
 import type { TaskStatus } from "../spec/schema";
 
 type Run = { graphId: string; featureId: string; label: string; status: string; nodes: Map<string, string>; dispose?: () => void };
@@ -12,16 +12,17 @@ export class RunsTreeProvider implements vscode.TreeDataProvider<Item> {
   readonly onDidChangeTreeData = this.emitter.event;
   private runs = new Map<string, Run>();
 
-  constructor(private readonly writeback?: (featureId: string, taskId: string, status: TaskStatus) => Promise<void>) {}
+  constructor(private readonly writeback?: (featureId: string, taskId: string, status: TaskStatus, error?: string) => Promise<void>) {}
 
   refresh(): void { this.emitter.fire(undefined); }
   trackRun(graphId: string, featureId: string, label: string, nodeIds: string[]): void {
     const run: Run = { graphId, featureId, label, status: "running", nodes: new Map(nodeIds.map((id) => [id, "queued"])) };
     run.dispose = subscribeExecutionGraphEvents(graphId, (event) => {
-      if (event.type === "node_status" && event.nodeId && event.status) {
-        run.nodes.set(event.nodeId, event.status);
-        const mapped = mapStatus(event.status);
-        if (mapped) void this.writeback?.(featureId, event.nodeId, mapped);
+      const update = taskStatusFromEvent(event, graphId);
+      if (update) {
+        run.nodes.set(update.taskId, update.status);
+        const mapped = mapStatus(update.status);
+        if (mapped) void this.writeback?.(featureId, update.taskId, mapped, update.error);
       }
       if (event.type === "done" && event.status) {
         run.status = event.status;
@@ -62,5 +63,7 @@ export class RunsTreeProvider implements vscode.TreeDataProvider<Item> {
 
 function mapStatus(status: string): TaskStatus | undefined {
   if (status === "running" || status === "completed" || status === "failed" || status === "blocked") return status;
+  // Skipped because a task it depends on failed.
+  if (status === "skipped") return "blocked";
   return undefined;
 }
