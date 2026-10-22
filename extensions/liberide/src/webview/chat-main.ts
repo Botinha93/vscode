@@ -12,11 +12,13 @@ import type {
   ChatWebviewToHost,
   EditedFileSummary,
   ProjectInfo,
+  RunApprovalView,
   SessionSummary,
   ToolTimelineEntry,
 } from "../chat/chat-protocol";
 import type { ConfiguredProvider, DocumentRecord } from "../chat/types";
-import { modelCapabilityBadges, providerLabel } from "../chat/models";
+import { effectiveModelSelection, modelCapabilityBadges, modelChipLabel, providerLabel, type ModelSelectionMode } from "../chat/models";
+import { isActiveAgentRunStatus, layoutAgentRuns, type AgentRunLayout, type AgentRunView } from "../chat/agent-runs";
 import type { ContextBlockChip } from "../chat/context-blocks";
 import type { WorkspaceIntelligence } from "../workspace/intelligence";
 import { buildChatSlashCommands, parseSlashQuery, parseTaskContractBlock, type TaskContractView } from "@nexus/shared";
@@ -55,6 +57,12 @@ interface AppState {
   consumedPipelineCards: Set<string>;
   /** Inline context chips applied to the next message. */
   contextBlocks: ContextBlockChip[];
+  /** Agent runs of the active chat, by run id. */
+  agentRuns: Map<string, AgentRunView>;
+  /** Pending approvals raised by the active chat's agent runs. */
+  runApprovals: RunApprovalView[];
+  /** False while the live agent-run stream reconnects. */
+  agentsConnected: boolean;
 }
 
 const state: AppState = {
@@ -76,6 +84,9 @@ const state: AppState = {
   expandedEditCards: new Set(),
   consumedPipelineCards: new Set(),
   contextBlocks: [],
+  agentRuns: new Map(),
+  runApprovals: [],
+  agentsConnected: true,
 };
 
 const root = document.getElementById("root") as HTMLDivElement;
@@ -91,6 +102,7 @@ function send(msg: ChatWebviewToHost): void {
 interface ResolvedSelections {
   provider?: ConfiguredProvider;
   model?: string;
+  modelSelection: ModelSelectionMode;
   chatMode: "normal" | "agent";
   useRag: boolean;
   toolsEnabled: boolean;
@@ -112,9 +124,11 @@ function effective(): ResolvedSelections {
   const defaultAllowed = s?.defaultAllowedAgentIds?.length
     ? s.defaultAllowedAgentIds.filter((id) => invokableAgents(state.catalog.agents).some((agent) => agent.id === id))
     : invokableAgents(state.catalog.agents).map((agent) => agent.id);
+  const modelSelection = effectiveModelSelection(o.modelSelection, o.model, s?.modelSelection ?? "auto");
   return {
     provider: o.provider ?? fallbackModel?.provider,
-    model: o.model ?? fallbackModel?.modelId,
+    model: o.model && (o.model !== "auto" || modelSelection === "auto") ? o.model : fallbackModel?.modelId,
+    modelSelection,
     chatMode: "agent",
     useRag: o.useRag ?? s?.useRag ?? false,
     toolsEnabled: true,
@@ -409,21 +423,103 @@ function renderBackendBanner(): void {
 // Transcript
 // ---------------------------------------------------------------------------
 
-function renderTranscript(): void {
+/** Where each agent run of the active chat is drawn (recomputed per render). */
+let runLayout: AgentRunLayout = layoutAgentRuns([], []);
+
+function computeRunLayout(): AgentRunLayout {
+  const messages = state.activeSession?.messages ?? [];
+  runLayout = layoutAgentRuns(
+    messages.map((m) => ({ id: m.id, agentRunId: m.agentRunId, graphId: m.graph?.graphId })),
+    [...state.agentRuns.values()],
+  );
+  return runLayout;
+}
+
+/** `keepScroll`: live updates stay where the user scrolled unless they were at the bottom. */
+function renderTranscript(options: { keepScroll?: boolean } = {}): void {
   const transcript = root.querySelector<HTMLDivElement>("#transcript");
   if (!transcript) return;
+  const atBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 40;
+  const previousTop = transcript.scrollTop;
   transcript.innerHTML = "";
   const messages = state.activeSession?.messages ?? [];
-  if (messages.length === 0) {
+  const layout = computeRunLayout();
+  if (messages.length === 0 && layout.orphans.length === 0 && state.runApprovals.length === 0) {
     transcript.appendChild(renderEmptyState());
     renderActivity();
     return;
   }
   for (const m of messages) {
+    if (layout.hiddenMessageIds.has(m.id)) continue;
     transcript.appendChild(renderMessage(m));
   }
-  transcript.scrollTop = transcript.scrollHeight;
+  const tail = renderRunsTail();
+  if (tail) transcript.appendChild(tail);
+  transcript.scrollTop = options.keepScroll && !atBottom ? previousTop : transcript.scrollHeight;
   renderActivity();
+}
+
+/** Runs (and run approvals) with no message to sit in: after the transcript. */
+function renderRunsTail(): HTMLElement | null {
+  const placed = new Set(runIdsInLayout());
+  const approvals = state.runApprovals.filter((a) => !a.agentRunId || !placed.has(a.agentRunId));
+  if (runLayout.orphans.length === 0 && approvals.length === 0) return null;
+  const el = document.createElement("article");
+  el.className = "turn turn-assistant agent-runs-tail";
+  el.dataset.messageId = RUNS_TAIL_ID;
+  el.innerHTML = `${runLayout.orphans.map((id) => renderAgentRunCard(id, 0)).join("")}${approvals.map(renderRunApprovalCard).join("")}`;
+  bindRunCards(el);
+  return el;
+}
+
+const RUNS_TAIL_ID = "__agent-runs-tail__";
+
+function runIdsInLayout(): string[] {
+  const ids: string[] = [...runLayout.orphans];
+  for (const list of runLayout.rootsByMessage.values()) ids.push(...list);
+  for (const nodes of runLayout.nodeRuns.values()) for (const list of nodes.values()) ids.push(...list);
+  for (const list of runLayout.childrenByRun.values()) ids.push(...list);
+  return ids;
+}
+
+/** The message a run is drawn in (its root's host), or the tail. */
+function ownerOfRun(runId: string): string {
+  const seen = new Set<string>();
+  let current = state.agentRuns.get(runId);
+  while (current?.parentRunId && state.agentRuns.has(current.parentRunId) && !seen.has(current.parentRunId)) {
+    seen.add(current.runId);
+    current = state.agentRuns.get(current.parentRunId);
+  }
+  const rootId = current?.runId ?? runId;
+  for (const [messageId, list] of runLayout.rootsByMessage) if (list.includes(rootId)) return messageId;
+  if (current?.graphId && current.nodeId && runLayout.nodeRuns.get(current.graphId)?.get(current.nodeId)?.includes(rootId)) {
+    const host = state.activeSession?.messages.find((m) => m.graph?.graphId === current!.graphId);
+    if (host) return host.id;
+  }
+  return RUNS_TAIL_ID;
+}
+
+/** Re-render the messages hosting `runIds`; the whole transcript when their placement changed. */
+function rerenderRuns(runIds: string[], placementChanged: boolean): void {
+  if (placementChanged) {
+    renderTranscript({ keepScroll: true });
+    return;
+  }
+  const transcript = root.querySelector<HTMLDivElement>("#transcript");
+  const atBottom = transcript ? transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 40 : false;
+  const owners = new Set(runIds.map(ownerOfRun));
+  for (const owner of owners) {
+    if (owner === RUNS_TAIL_ID) {
+      const current = root.querySelector<HTMLElement>(`.turn[data-message-id="${cssAttr(RUNS_TAIL_ID)}"]`);
+      const next = renderRunsTail();
+      if (current && next) current.replaceWith(next);
+      else if (!current && next) transcript?.appendChild(next);
+      else current?.remove();
+    } else {
+      rerenderMessageInDom(owner);
+    }
+  }
+  if (transcript && atBottom) transcript.scrollTop = transcript.scrollHeight;
 }
 
 function renderEmptyState(): HTMLElement {
@@ -486,6 +582,23 @@ function renderMessage(message: ChatMessage): HTMLElement {
   turn.className = `turn turn-${message.role}` + (message.status === "streaming" ? " streaming" : "") + (message.status === "error" ? " error" : "");
   turn.dataset.messageId = message.id;
 
+  if (message.note) {
+    turn.className = `turn turn-note note-${message.note}`;
+    turn.innerHTML = `<div class="chat-note"><span class="chat-note-icon">${message.note === "error" ? "\u2717" : message.note === "warning" ? "\u26A0" : "\u2139"}</span><div class="turn-content"></div></div>`;
+    const content = turn.querySelector<HTMLDivElement>(".turn-content")!;
+    content.innerHTML = renderMarkdownish(message.content);
+    bindMarkdownExtras(content);
+    return turn;
+  }
+
+  // The server's card for an agent run: the run itself, live.
+  if (message.role === "assistant" && message.agentRunId && state.agentRuns.has(message.agentRunId)) {
+    turn.classList.add("turn-agent-run");
+    turn.innerHTML = renderMessageRuns(message.id);
+    bindRunCards(turn);
+    return turn;
+  }
+
   if (message.role === "user") {
     turn.innerHTML = `
       <div class="bubble bubble-user">
@@ -517,6 +630,7 @@ function renderMessage(message: ChatMessage): HTMLElement {
     <div class="turn-content"></div>
     ${message.status === "error" && message.error ? `<div class="turn-error">${escapeHtml(message.error)}</div>` : ""}
     ${renderTurnExtras(message)}
+    ${renderMessageRuns(message.id)}
     ${message.status === "complete" ? `<div class="assistant-actions">
       <button class="icon-btn small" title="Copy" aria-label="Copy" data-act="copy">\u2398</button>
       <button class="icon-btn small" title="Helpful" aria-label="Helpful" data-act="up">\u{1F44D}</button>
@@ -540,6 +654,7 @@ function renderMessage(message: ChatMessage): HTMLElement {
   }
   bindAssistantMeta(turn, message);
   bindTurnExtras(turn, message);
+  bindRunCards(turn);
   turn.querySelector<HTMLButtonElement>('[data-act="copy"]')?.addEventListener("click", async () => {
     try { await navigator.clipboard.writeText(message.content); } catch { /* clipboard blocked */ }
   });
@@ -642,24 +757,220 @@ function stepIcon(status: string): string {
   }
 }
 
+/** User-toggled open state of graph steps (`graphId|nodeId`) and run cards; unset = default. */
+const stepToggles = new Map<string, boolean>();
+const runToggles = new Map<string, boolean>();
+/** Finished runs whose tool calls were already requested. */
+const requestedToolCalls = new Set<string>();
+
+function stepKey(graphId: string, nodeId: string): string {
+  return `${graphId}|${nodeId}`;
+}
+
+function stepOpen(graphId: string, step: GraphProgressView["steps"][number], runIds: string[]): boolean {
+  const toggled = stepToggles.get(stepKey(graphId, step.nodeId));
+  if (toggled !== undefined) return toggled;
+  // Live, failed and blocked-on-you steps show their output without a click.
+  return step.status === "running" || step.status === "failed" || step.status === "waiting_approval"
+    || runIds.some((id) => isActiveAgentRunStatus(state.agentRuns.get(id)?.status));
+}
+
+function renderGraphStep(graph: GraphProgressView, step: GraphProgressView["steps"][number]): string {
+  const runIds = runLayout.nodeRuns.get(graph.graphId)?.get(step.nodeId) ?? [];
+  const hasDetail = Boolean(step.error || step.output || runIds.length || step.status === "waiting_approval" || step.status === "failed");
+  const open = hasDetail && stepOpen(graph.graphId, step, runIds);
+  const key = stepKey(graph.graphId, step.nodeId);
+  const detail = open ? `<div class="graph-step-detail">
+      ${step.error ? `<pre class="graph-step-error">${escapeHtml(step.error)}</pre>` : ""}
+      ${step.output ? `<div class="graph-step-output">${renderMarkdownish(step.output)}</div>` : ""}
+      ${runIds.map((id) => renderAgentRunCard(id, 1)).join("")}
+      ${step.status === "waiting_approval" ? `<div class="approval-actions">
+        <span class="approval-status">Waiting for your decision</span>
+        <button class="btn-secondary small" type="button" data-step-approval="rejected" data-graph-id="${escapeAttr(graph.graphId)}" data-node-id="${escapeAttr(step.nodeId)}">Reject</button>
+        <button class="btn-primary small" type="button" data-step-approval="approved" data-graph-id="${escapeAttr(graph.graphId)}" data-node-id="${escapeAttr(step.nodeId)}">Approve</button>
+      </div>` : ""}
+      ${step.status === "failed" ? `<div class="approval-actions"><span class="approval-status"></span><button class="btn-secondary small" type="button" data-step-replay data-graph-id="${escapeAttr(graph.graphId)}" data-node-id="${escapeAttr(step.nodeId)}">Replay from here</button></div>` : ""}
+    </div>` : "";
+  return `<div class="graph-step-block${open ? " open" : ""}" data-step-key="${escapeAttr(key)}">
+    <button class="graph-step status-${escapeAttr(step.status)}" type="button"${hasDetail ? ` data-step-toggle="${escapeAttr(key)}"` : " disabled"}>
+      <span class="timeline-icon">${stepIcon(step.status)}</span>
+      <span class="graph-step-title">${escapeHtml(step.title || step.nodeId)}</span>
+      ${runIds.length ? `<span class="graph-step-runs">${runIds.length} agent${runIds.length === 1 ? "" : "s"}</span>` : ""}
+      <span class="graph-step-status">${escapeHtml(step.status.replace(/_/g, " "))}</span>
+      ${hasDetail ? `<span class="graph-step-chevron">${open ? "\u25BE" : "\u25B8"}</span>` : ""}
+    </button>
+    ${detail}
+  </div>`;
+}
+
 function renderGraphCard(graph: GraphProgressView): string {
   const terminal = isTerminalGraph(graph.status);
-  // A finished graph from history with no live steps needs no card: the badge covers it.
-  if (terminal && graph.steps.length === 0 && !graph.error) return "";
+  const nodeRuns = runLayout.nodeRuns.get(graph.graphId);
+  // A finished graph from history with no live steps or runs needs no card: the badge covers it.
+  if (terminal && graph.steps.length === 0 && !graph.error && !nodeRuns?.size) return "";
   const done = graph.steps.filter((s) => s.status === "completed" || s.status === "skipped").length;
-  const rows = graph.steps
-    .map((step) => `<div class="graph-step status-${escapeAttr(step.status)}"><span class="timeline-icon">${stepIcon(step.status)}</span><span class="graph-step-title">${escapeHtml(step.title || step.nodeId)}</span><span class="graph-step-status">${escapeHtml(step.status.replace(/_/g, " "))}</span></div>`)
-    .join("");
+  // Swarm tasks run as parallel branches: draw each task's steps side by side.
+  const branched = graph.steps.some((step) => step.taskId);
+  let body = "";
+  if (branched) {
+    const branches = new Map<string, GraphProgressView["steps"]>();
+    for (const step of graph.steps) {
+      const key = step.taskId ?? "";
+      branches.set(key, [...(branches.get(key) ?? []), step]);
+    }
+    body = `<div class="graph-branches">${[...branches].map(([taskId, steps]) => `<div class="graph-branch">
+      ${taskId ? `<div class="graph-branch-title">${escapeHtml(taskId)}</div>` : ""}
+      ${steps.map((step) => renderGraphStep(graph, step)).join("")}
+    </div>`).join("")}</div>`;
+  } else if (graph.steps.length) {
+    body = `<div class="graph-steps">${graph.steps.map((step) => renderGraphStep(graph, step)).join("")}</div>`;
+  }
+  // Runs of nodes the step list has not seen yet (e.g. a card hydrated from history).
+  const known = new Set(graph.steps.map((step) => step.nodeId));
+  const unplaced = [...(nodeRuns ?? [])].filter(([nodeId]) => !known.has(nodeId)).flatMap(([, ids]) => ids);
+  const reconnecting = graph.reconnecting || (!state.agentsConnected && [...(nodeRuns?.values() ?? [])].flat().some((id) => isActiveAgentRunStatus(state.agentRuns.get(id)?.status)));
   return `<div class="graph-card status-${escapeAttr(graph.status)}" data-graph-id="${escapeAttr(graph.graphId)}">
     <div class="graph-head">
       ${terminal ? "" : `<span class="turn-indicator"></span>`}
       <span class="graph-title">${terminal ? `Graph ${escapeHtml(graph.status)}` : `Running graph \u2014 ${escapeHtml(graph.status.replace(/_/g, " "))}`}</span>
+      ${reconnecting ? `<span class="graph-reconnecting" title="${escapeAttr(graph.error ?? "Reconnecting to live output")}">Reconnecting\u2026</span>` : ""}
       ${graph.steps.length ? `<span class="graph-count">${done}/${graph.steps.length}</span>` : ""}
       ${terminal ? "" : `<button class="btn-secondary small" type="button" data-graph-cancel${graph.cancelling ? " disabled" : ""}>${graph.cancelling ? "Cancelling\u2026" : "Cancel"}</button>`}
     </div>
-    ${rows ? `<div class="graph-steps">${rows}</div>` : ""}
-    ${graph.error ? `<div class="${graph.reconnecting ? "graph-warning" : "turn-error"}">${escapeHtml(graph.error)}</div>` : ""}
+    ${body}
+    ${unplaced.map((id) => renderAgentRunCard(id, 1)).join("")}
+    ${graph.error && !graph.reconnecting ? `<div class="turn-error">${escapeHtml(graph.error)}</div>` : ""}
   </div>`;
+}
+
+/** Top-level run cards of a message (its anchor run, or runs its turn started). */
+function renderMessageRuns(messageId: string): string {
+  const ids = runLayout.rootsByMessage.get(messageId) ?? [];
+  return ids.length ? `<div class="agent-run-list">${ids.map((id) => renderAgentRunCard(id, 0)).join("")}</div>` : "";
+}
+
+const RUN_STATUS_LABEL: Record<string, string> = {
+  queued: "Queued",
+  running: "Running",
+  waiting_approval: "Waiting for approval",
+  needs_followup: "Needs follow-up",
+  waiting_for_machine: "Waiting for machine",
+  completed: "Completed",
+  failed: "Failed",
+  cancelled: "Cancelled",
+};
+
+function runOpen(run: AgentRunView): boolean {
+  const toggled = runToggles.get(run.runId);
+  return toggled ?? true;
+}
+
+/** One agent run: status, live text, tool calls, result or full error, and its sub-agents. */
+function renderAgentRunCard(runId: string, depth: number): string {
+  const run = state.agentRuns.get(runId);
+  if (!run) return "";
+  const active = isActiveAgentRunStatus(run.status);
+  const open = runOpen(run);
+  const children = runLayout.childrenByRun.get(runId) ?? [];
+  const approvals = state.runApprovals.filter((a) => a.agentRunId === runId);
+  const title = run.agentName || (run.nodeId ? `Node ${run.nodeId}` : "Agent");
+  const tools = run.toolCalls.map((call) => {
+    const icon = call.status === "running" ? `<span class="turn-indicator"></span>` : call.status === "error" ? "\u2717" : "\u2713";
+    return `<div class="timeline-row status-${escapeAttr(call.status === "complete" ? "complete" : call.status)}" title="${escapeAttr(call.result?.slice(0, 500) ?? "")}">
+      <span class="timeline-icon">${icon}</span><span>${escapeHtml(call.name.replace(/^ide_/, "").replace(/_/g, " "))}${call.summary ? ` <code>${escapeHtml(call.summary)}</code>` : ""}</span>
+    </div>`;
+  }).join("");
+  const excerpt = !open && run.text ? `<span class="agent-run-excerpt">${escapeHtml(run.text.replace(/\s+/g, " ").slice(0, 120))}</span>` : "";
+  const reconnecting = active && !state.agentsConnected;
+  const body = open ? `<div class="agent-run-body">
+      ${tools ? `<div class="agent-run-tools">${tools}</div>` : ""}
+      ${run.text ? `<div class="agent-run-text${active ? " streaming" : ""}" data-run-text="${escapeAttr(runId)}">${renderMarkdownish(run.text)}</div>`
+        : active ? `<div class="assistant-status"><span class="turn-indicator"></span><span>${reconnecting ? "Reconnecting to live output\u2026" : "Working\u2026"}</span></div>` : ""}
+      ${run.error ? `<pre class="agent-run-error">${escapeHtml(run.error)}</pre>` : ""}
+      ${approvals.map(renderRunApprovalCard).join("")}
+      ${children.length ? `<div class="agent-run-children">${children.map((id) => renderAgentRunCard(id, depth + 1)).join("")}</div>` : ""}
+    </div>` : approvals.map(renderRunApprovalCard).join("");
+  return `<div class="agent-run-card status-${escapeAttr(run.status)}${depth ? " nested" : ""}" data-run-id="${escapeAttr(runId)}">
+    <button class="agent-run-head" type="button" data-run-toggle="${escapeAttr(runId)}">
+      <span class="timeline-icon">${active ? `<span class="turn-indicator"></span>` : stepIcon(run.status)}</span>
+      <span class="agent-run-title">${escapeHtml(title)}</span>
+      ${excerpt}
+      ${children.length ? `<span class="graph-step-runs">${children.length} sub-agent${children.length === 1 ? "" : "s"}</span>` : ""}
+      ${reconnecting ? `<span class="graph-reconnecting">Reconnecting\u2026</span>` : ""}
+      <span class="agent-run-status">${escapeHtml(RUN_STATUS_LABEL[run.status] ?? run.status.replace(/_/g, " "))}</span>
+      <span class="graph-step-chevron">${open ? "\u25BE" : "\u25B8"}</span>
+    </button>
+    ${body}
+  </div>`;
+}
+
+function renderRunApprovalCard(card: RunApprovalView): string {
+  return renderApprovalCard(card).replace(/data-approval="/g, `data-run-approval-id="${escapeAttr(card.id)}" data-run-approval="`);
+}
+
+/** Wire run cards, graph steps and run approvals inside `scope`. */
+function bindRunCards(scope: HTMLElement): void {
+  const sessionId = state.activeSession?.id;
+  scope.querySelectorAll<HTMLButtonElement>("[data-run-toggle]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const runId = btn.dataset.runToggle!;
+      const run = state.agentRuns.get(runId);
+      if (!run) return;
+      runToggles.set(runId, !runOpen(run));
+      rerenderRuns([runId], false);
+    });
+  });
+  scope.querySelectorAll<HTMLButtonElement>("[data-step-toggle]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const key = btn.dataset.stepToggle!;
+      const block = btn.closest<HTMLElement>(".graph-step-block");
+      stepToggles.set(key, !block?.classList.contains("open"));
+      const owner = btn.closest<HTMLElement>(".turn")?.dataset.messageId;
+      if (owner) rerenderMessageInDom(owner);
+    });
+  });
+  if (!sessionId) return;
+  scope.querySelectorAll<HTMLButtonElement>("[data-step-approval]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const messageId = btn.closest<HTMLElement>(".turn")?.dataset.messageId ?? "";
+      btn.closest(".approval-actions")?.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+      send({
+        type: "resolveNodeApproval",
+        sessionId,
+        messageId,
+        graphId: btn.dataset.graphId!,
+        nodeId: btn.dataset.nodeId!,
+        decision: btn.dataset.stepApproval === "approved" ? "approved" : "rejected",
+      });
+    });
+  });
+  scope.querySelectorAll<HTMLButtonElement>("[data-step-replay]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      btn.disabled = true;
+      send({ type: "replayNode", sessionId, graphId: btn.dataset.graphId!, nodeId: btn.dataset.nodeId! });
+    });
+  });
+  scope.querySelectorAll<HTMLButtonElement>("[data-run-approval]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const approvalId = btn.dataset.runApprovalId!;
+      const card = state.runApprovals.find((a) => a.id === approvalId);
+      if (card?.busy) return;
+      if (card) card.busy = true;
+      btn.closest(".approval-actions")?.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+      send({ type: "resolveRunApproval", sessionId, approvalId, decision: btn.dataset.runApproval === "approved" ? "approved" : "rejected" });
+    });
+  });
+  // Follow live output; fetch the tool calls of finished runs once.
+  scope.querySelectorAll<HTMLElement>("[data-run-text]").forEach((el) => {
+    if (el.classList.contains("streaming")) el.scrollTop = el.scrollHeight;
+  });
+  scope.querySelectorAll<HTMLElement>(".agent-run-card").forEach((card) => {
+    const runId = card.dataset.runId!;
+    const run = state.agentRuns.get(runId);
+    if (!run || !runOpen(run) || isActiveAgentRunStatus(run.status) || run.toolCalls.length || requestedToolCalls.has(runId)) return;
+    requestedToolCalls.add(runId);
+    send({ type: "loadRunToolCalls", sessionId, runId });
+  });
 }
 
 function renderFallbackCard(fallback: FallbackProposalView): string {
@@ -1064,7 +1375,13 @@ function renderComposer(): void {
   const toolbar = root.querySelector<HTMLDivElement>("#chip-row");
   if (!toolbar) return;
   const eff = effective();
-  const modelLabel = describeModel(eff.provider, eff.model);
+  const modelLabel = modelChipLabel({
+    models: state.catalog.models,
+    selection: eff.modelSelection,
+    provider: eff.provider,
+    model: eff.model,
+    routed: state.activeSession?.routedModel,
+  });
   const primaryAgent = state.catalog.agents.find((agent) => agent.id === eff.agentId);
   const agentLabel = primaryAgent ? primaryAgent.name : "Agent";
 
@@ -1266,12 +1583,20 @@ function renderModelPicker(): void {
         <button class="icon-btn" id="picker-close">\u2715</button>
       </header>
       <div class="popover-body">
+        <section class="popover-group">
+          <ul>
+            <li class="popover-row popover-row-auto${eff.modelSelection === "auto" ? " selected" : ""}" data-auto="true">
+              <div class="popover-row-title">Auto</div>
+              <div class="popover-row-detail">Route each turn to a suitable model${state.activeSession?.routedModel?.model ? ` \u2014 last: ${escapeHtml(state.activeSession.routedModel.model)}` : ""}</div>
+            </li>
+          </ul>
+        </section>
         ${grouped.map((g) => `
           <section class="popover-group">
             <h4>${escapeHtml(g.label)}</h4>
             <ul>
               ${g.models.map((m) => {
-                const selected = m.provider === eff.provider && m.modelId === eff.model;
+                const selected = eff.modelSelection === "manual" && m.provider === eff.provider && m.modelId === eff.model;
                 const cap = modelCapabilityBadges(m).slice(0, 3).join(", ");
                 return `<li class="popover-row${selected ? " selected" : ""}" data-provider="${escapeAttr(m.provider)}" data-model="${escapeAttr(m.modelId)}">
                   <div class="popover-row-title">${escapeHtml(m.displayName)}</div>
@@ -1290,10 +1615,9 @@ function renderModelPicker(): void {
   });
   for (const li of el.querySelectorAll<HTMLLIElement>(".popover-row")) {
     li.addEventListener("click", () => {
-      setOverrides({
-        provider: li.dataset.provider as ConfiguredProvider,
-        model: li.dataset.model,
-      });
+      setOverrides(li.dataset.auto
+        ? { modelSelection: "auto", model: "auto" }
+        : { modelSelection: "manual", provider: li.dataset.provider as ConfiguredProvider, model: li.dataset.model });
       state.modelPickerOpen = false;
       applyModelPicker();
     });
@@ -1367,7 +1691,7 @@ function renderSettings(): void {
     ${projectLine}
 
     <h2>Local defaults</h2>
-    <label for="set-mode">Model selection mode</label>
+    <label for="set-mode">Model selection for new chats</label>
     <select id="set-mode" data-key="modelSelection">
       <option value="manual" ${s.modelSelection==="manual"?"selected":""}>manual</option>
       <option value="auto" ${s.modelSelection==="auto"?"selected":""}>auto</option>
@@ -1913,6 +2237,51 @@ function rerenderMessageInDom(messageId: string): void {
 
 function cssAttr(id: string): string { return id.replace(/"/g, '\\"'); }
 
+/** Take the run state that comes with a (re)sent session; a different chat starts clean. */
+function adoptSessionRuns(session: ChatSession | null): void {
+  if (!session) {
+    state.agentRuns = new Map();
+    state.runApprovals = [];
+    state.agentsConnected = true;
+    return;
+  }
+  const sameChat = state.activeSession?.id === session.id;
+  const next = new Map((session.agentRuns ?? []).map((run) => [run.runId, run] as const));
+  // Live updates newer than the session snapshot (it is built from the same host state) are kept.
+  if (sameChat) for (const [id, run] of state.agentRuns) if (!next.has(id)) next.set(id, run);
+  state.agentRuns = next;
+  state.runApprovals = session.runApprovals ?? [];
+  state.agentsConnected = session.agentsConnected ?? true;
+}
+
+/** A fingerprint of where runs are drawn: a change needs a full transcript render. */
+function runPlacement(): string {
+  const parts: string[] = [];
+  for (const [messageId, ids] of runLayout.rootsByMessage) parts.push(`m:${messageId}=${ids.join(",")}`);
+  for (const [graphId, nodes] of runLayout.nodeRuns) for (const [nodeId, ids] of nodes) parts.push(`g:${graphId}/${nodeId}=${ids.join(",")}`);
+  for (const [parent, ids] of runLayout.childrenByRun) parts.push(`p:${parent}=${ids.join(",")}`);
+  parts.push(`o:${runLayout.orphans.join(",")}`, `h:${[...runLayout.hiddenMessageIds].join(",")}`);
+  return parts.join(";");
+}
+
+/** Expand a graph node's step (and its runs) and scroll to it. */
+function revealGraphNode(graphId: string, requestedNodeId: string): void {
+  const host = state.activeSession?.messages.find((m) => m.graph?.graphId === graphId);
+  // The Runs view may name the node by task id (`T-1`); steps use the server's id.
+  const steps = host?.graph?.steps ?? [];
+  const nodeId = steps.find((step) => step.nodeId === requestedNodeId)?.nodeId
+    ?? steps.find((step) => step.nodeId === `${graphId}_${requestedNodeId}` || step.nodeId.startsWith(`${graphId}_${requestedNodeId}_`))?.nodeId
+    ?? requestedNodeId;
+  stepToggles.set(stepKey(graphId, nodeId), true);
+  for (const id of runLayout.nodeRuns.get(graphId)?.get(nodeId) ?? []) runToggles.set(id, true);
+  if (host) rerenderMessageInDom(host.id);
+  const block = root.querySelector<HTMLElement>(`.graph-step-block[data-step-key="${cssAttr(stepKey(graphId, nodeId))}"]`)
+    ?? root.querySelector<HTMLElement>(`.graph-card[data-graph-id="${cssAttr(graphId)}"]`);
+  block?.scrollIntoView({ block: "center" });
+  block?.classList.add("flash");
+  setTimeout(() => block?.classList.remove("flash"), 1500);
+}
+
 function showNotice(message: string, severity: "info" | "warning" | "error" = "warning"): void {
   const stack = root.querySelector<HTMLDivElement>("#notice-stack");
   if (!stack) return;
@@ -1938,6 +2307,7 @@ function handleMessage(msg: ChatHostToWebview): void {
       state.catalog = msg.catalog;
       state.backendStatus = msg.backendStatus;
       state.apiOrigin = msg.apiOrigin;
+      adoptSessionRuns(msg.activeSession);
       // A recreated view must keep Stop while the host is still streaming.
       state.streaming = Boolean(msg.activeSession?.messages.some((message) => message.status === "streaming"));
       render();
@@ -1978,6 +2348,7 @@ function handleMessage(msg: ChatHostToWebview): void {
       renderSidebar();
       break;
     case "session":
+      adoptSessionRuns(msg.session);
       state.activeSession = msg.session;
       state.activeSessionId = msg.session.id;
       state.streaming = msg.session.messages.some((m) => m.status === "streaming");
@@ -2067,7 +2438,11 @@ function handleMessage(msg: ChatHostToWebview): void {
         const m = state.activeSession.messages.find((x) => x.id === msg.messageId);
         if (m) {
           Object.assign(m, msg.patch);
-          rerenderMessageInDom(msg.messageId);
+          const before = runPlacement();
+          computeRunLayout();
+          // A graph card appearing can adopt runs drawn elsewhere until now.
+          if (msg.patch.graph && runPlacement() !== before) renderTranscript({ keepScroll: true });
+          else rerenderMessageInDom(msg.messageId);
           if (msg.patch.content !== undefined) {
             const transcript = root.querySelector<HTMLDivElement>("#transcript");
             if (transcript) transcript.scrollTop = transcript.scrollHeight;
@@ -2086,6 +2461,28 @@ function handleMessage(msg: ChatHostToWebview): void {
           composer.focus();
         }
       }
+      break;
+    case "agentRuns":
+      if (state.activeSession && state.activeSession.id === msg.sessionId) {
+        if (msg.connected !== undefined && msg.connected !== state.agentsConnected) {
+          state.agentsConnected = msg.connected;
+          renderTranscript({ keepScroll: true });
+        }
+        if (!msg.runs.length) break;
+        const before = runPlacement();
+        for (const run of msg.runs) state.agentRuns.set(run.runId, run);
+        computeRunLayout();
+        rerenderRuns(msg.runs.map((run) => run.runId), runPlacement() !== before);
+      }
+      break;
+    case "runApprovals":
+      if (state.activeSession && state.activeSession.id === msg.sessionId) {
+        state.runApprovals = msg.approvals;
+        renderTranscript({ keepScroll: true });
+      }
+      break;
+    case "revealGraphNode":
+      if (state.activeSession && state.activeSession.id === msg.sessionId) revealGraphNode(msg.graphId, msg.nodeId);
       break;
     case "log":
       console.warn("[liberide]", msg.message);

@@ -1,6 +1,7 @@
 import type { LiberideSettings } from "../settings";
 import type { WorkspaceIntelligence } from "../workspace/intelligence";
 import type { ContextBlockChip } from "./context-blocks";
+import type { AgentRunView } from "./agent-runs";
 import type {
   AgentDefinition,
   ConfiguredModel,
@@ -60,6 +61,12 @@ export interface GraphStepView {
   nodeId: string;
   title?: string;
   status: string;
+  /** Full error of a failed node. */
+  error?: string;
+  /** The node's output/summary, when the server sent it. */
+  output?: string;
+  /** Swarm task the node works on: steps of one task are drawn as one branch. */
+  taskId?: string;
 }
 
 /** Live progress of the execution graph producing a message. */
@@ -104,11 +111,24 @@ export interface ChatMessage {
   approval?: ApprovalCardView;
   graph?: GraphProgressView;
   fallback?: FallbackProposalView;
+  /** Set on the server's agent-run anchor cards. */
+  agentRunId?: string;
+  /** Model that produced this reply (the routed one for auto turns). */
+  model?: { provider?: string; model?: string };
+  /** A local note in the transcript (run actions, errors), not a model reply. */
+  note?: "info" | "warning" | "error";
+}
+
+/** A pending approval raised by an agent run (not a paused chat turn). */
+export interface RunApprovalView extends ApprovalCardView {
+  agentRunId?: string;
 }
 
 export interface ChatOverrides {
   provider?: ConfiguredProvider;
   model?: string;
+  /** `auto`: the server routes each turn (model `auto`); `manual`: the pinned model. */
+  modelSelection?: "auto" | "manual";
   chatMode?: ConversationChatMode;
   toolGroupIds?: string[];
   useRag?: boolean;
@@ -132,6 +152,14 @@ export interface ChatSession {
   createdAt: number;
   updatedAt: number;
   kind: ChatSessionKind;
+  /** Model the last auto-routed reply ran on ("Auto → …" on the chip). */
+  routedModel?: { provider?: string; model?: string };
+  /** Agent runs of this chat, drawn as cards inside their graph / parent / anchor. */
+  agentRuns?: AgentRunView[];
+  /** Pending approvals of this chat's agent runs. */
+  runApprovals?: RunApprovalView[];
+  /** False while the live agent-run stream is reconnecting. */
+  agentsConnected?: boolean;
 }
 
 export interface SessionSummary {
@@ -201,6 +229,11 @@ export type ChatHostToWebview =
   | { type: "project"; project: ProjectInfo }
   | { type: "openSidebar" }
   | { type: "contextBlocks"; blocks: ContextBlockChip[] }
+  /** Upsert agent runs of a session (live output, tool calls, status). */
+  | { type: "agentRuns"; sessionId: string; runs: AgentRunView[]; connected?: boolean }
+  | { type: "runApprovals"; sessionId: string; approvals: RunApprovalView[] }
+  /** Expand and scroll to a graph node's step (Runs view → Show Node Detail). */
+  | { type: "revealGraphNode"; sessionId: string; graphId: string; nodeId: string }
   | { type: "log"; message: string; severity?: "info" | "warning" | "error" };
 
 export type ChatWebviewToHost =
@@ -228,4 +261,8 @@ export type ChatWebviewToHost =
   | { type: "resolveApproval"; sessionId: string; messageId: string; approvalId: string; decision: "approved" | "rejected"; response?: string }
   | { type: "cancelGraph"; sessionId: string; messageId: string; graphId: string }
   | { type: "retryWithModel"; sessionId: string; messageId: string; provider: Provider; model: string; content: string }
-  | { type: "removeContextBlock"; id: string };
+  | { type: "removeContextBlock"; id: string }
+  | { type: "resolveNodeApproval"; sessionId: string; messageId: string; graphId: string; nodeId: string; decision: "approved" | "rejected" }
+  | { type: "resolveRunApproval"; sessionId: string; approvalId: string; decision: "approved" | "rejected" }
+  | { type: "replayNode"; sessionId: string; graphId: string; nodeId: string }
+  | { type: "loadRunToolCalls"; sessionId: string; runId: string };

@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import * as vscode from "vscode";
-import { addFollowUp, cancelExecutionGraph, dispatchFeature, fetchGraphDetail, getGraphMetrics, getWorkingMemory, listGraphArtifacts, patchWorkingMemory, replayFromNode, resolveGraphApproval, resolveNodeApproval, retryGraph, subscribeExecutionGraphEvents, taskStatusFromEvent, type GraphArtifact, type WorkingMemorySnapshot } from "../dispatch/client";
+import { addFollowUp, cancelExecutionGraph, dispatchFeature, fetchGraphDetail, getGraphMetrics, getWorkingMemory, listGraphArtifacts, patchWorkingMemory, replayFromNode, resolveGraphApproval, resolveNodeApproval, retryGraph, subscribeExecutionGraphEvents, taskStatusFromEvent, type GraphArtifact, type GraphMetrics, type WorkingMemorySnapshot } from "../dispatch/client";
 import { buildIdeContextPayload } from "../ide-delegate/context";
 import { onSettingsChange, readSettings } from "../settings";
 import { computeTaskReadiness, validateDag } from "../spec/dag";
@@ -10,6 +10,7 @@ import { getApiOrigin } from "../api";
 import { resolveContainedRelativePath } from "../ide-delegate/handlers/path-containment";
 import type { FeatureSummary, PipelineHostToWebview, PipelineWebviewToHost, TaskSummary } from "./protocol";
 import type { RunsTreeProvider } from "../views/runsTree";
+import { featureConversation, resolveDispatchConversation, type ChatRunLink } from "../dispatch/conversation-link";
 
 interface ActiveGraph {
   graphId: string;
@@ -25,12 +26,15 @@ export class LiberidePipelineController implements vscode.WebviewViewProvider, v
   /** Dedup approval prompts per `${graphId}:${nodeId}` (SSE replays node_status on reconnect). */
   private readonly promptedApprovals = new Set<string>();
   private disposed = false;
+  /** The chat the pipeline was opened from: its dispatches report there. */
+  private linkedConversationId?: string;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
     private readonly store: SpecStore,
     private readonly output: vscode.OutputChannel,
     private readonly runsTree: RunsTreeProvider,
+    private readonly chat: ChatRunLink,
   ) {
     this.disposables.push(
       onSettingsChange((settings) => this.broadcast({ type: "settings", settings })),
@@ -50,7 +54,9 @@ export class LiberidePipelineController implements vscode.WebviewViewProvider, v
     });
   }
 
-  show(): void {
+  /** Focus the pipeline; `conversationId`: the chat it was opened from (its dispatches report there). */
+  show(conversationId?: string): void {
+    if (conversationId) this.linkedConversationId = conversationId;
     void vscode.commands.executeCommand(`${LiberidePipelineController.viewType}.focus`);
   }
 
@@ -173,7 +179,8 @@ export class LiberidePipelineController implements vscode.WebviewViewProvider, v
           break;
         }
         case "openChat":
-          await vscode.commands.executeCommand("liberide.openChat");
+          if (this.linkedConversationId) await this.chat.showConversation(this.linkedConversationId);
+          else await vscode.commands.executeCommand("liberide.openChat");
           break;
       }
     } catch (error) {
@@ -201,7 +208,7 @@ export class LiberidePipelineController implements vscode.WebviewViewProvider, v
     this.broadcast({ type: "operation", action: "scaffold", status: "success", message: `Created ${name}.` });
   }
 
-  async dispatch(featureId: string, taskIds?: string[]): Promise<void> {
+  async dispatch(featureId: string, taskIds?: string[], conversationId?: string): Promise<void> {
     this.broadcast({ type: "operation", action: "dispatch", status: "running" });
     const feature = this.store.getFeature(featureId);
     if (!feature) {
@@ -239,8 +246,16 @@ export class LiberidePipelineController implements vscode.WebviewViewProvider, v
       return;
     }
     const readiness = computeTaskReadiness(feature.tasks);
-    const ideContext = buildIdeContextPayload();
+    // Every run reports to a chat: the one the pipeline came from, the one
+    // that generated the feature, the open one, or a new one.
+    const chatId = resolveDispatchConversation({
+      explicit: conversationId ?? this.linkedConversationId,
+      feature: featureConversation(this.context.workspaceState, feature.id),
+      active: this.chat.activeConversationId(),
+    }) ?? await this.chat.ensureConversation(`Dispatch: ${feature.name}`);
+    const ideContext = buildIdeContextPayload(chatId);
     const result = await dispatchFeature(feature, {
+      conversationId: chatId,
       taskIds: selectedIds,
       ideContext: ideContext ? { ...ideContext } : undefined,
       swarm: settings.swarm,
@@ -267,7 +282,23 @@ export class LiberidePipelineController implements vscode.WebviewViewProvider, v
       });
     }
     this.subscribeToGraph(result.graphId);
+    if (chatId) await this.chat.trackGraph(chatId, result.graphId);
     this.broadcast({ type: "operation", action: "dispatch", status: "success", message: `Dispatched ${startEvent.label}.` });
+  }
+
+  /**
+   * Result or error of a run action: a note in the chat that owns the run,
+   * else the pipeline's log (never the output channel or a popup).
+   */
+  private report(graphId: string, message: string, severity: "info" | "warning" | "error" = "info"): void {
+    const conversationId = this.chat.conversationForGraph(graphId);
+    if (conversationId) {
+      this.chat.postNote(conversationId, message, severity);
+      void this.chat.showConversation(conversationId);
+      return;
+    }
+    this.broadcast({ type: "log", message, severity });
+    this.show();
   }
 
   /**
@@ -344,11 +375,9 @@ export class LiberidePipelineController implements vscode.WebviewViewProvider, v
       await retryGraph(graphId);
       if (meta) this.runsTree.trackRun(graphId, meta.featureId, meta.label, meta.nodeIds);
       this.subscribeToGraph(graphId);
-      this.broadcast({ type: "log", message: `Retrying run ${graphId}.`, severity: "info" });
+      this.report(graphId, `Retrying run ${meta?.label ?? graphId}.`);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.output.appendLine(`[pipeline.retry] ${msg}`);
-      void vscode.window.showErrorMessage(`Retry failed: ${msg}`);
+      this.report(graphId, `Retry failed: ${err instanceof Error ? err.message : String(err)}`, "error");
     }
   }
 
@@ -356,43 +385,46 @@ export class LiberidePipelineController implements vscode.WebviewViewProvider, v
   async replayFromNode(graphId: string, nodeId: string): Promise<void> {
     const meta = this.runsTree.getRunMeta(graphId);
     try {
-      const count = await replayFromNode(graphId, nodeId);
+      // The server replays by its own node id; the Runs view and task files know task ids.
+      const serverNodeId = await this.resolveServerNodeId(graphId, nodeId);
+      const count = await replayFromNode(graphId, serverNodeId);
       if (meta) this.runsTree.trackRun(graphId, meta.featureId, meta.label, meta.nodeIds);
       this.subscribeToGraph(graphId);
-      this.broadcast({ type: "log", message: `Replaying ${count} node(s) from ${nodeId}.`, severity: "info" });
+      this.report(graphId, `Replaying ${count} node(s) from ${nodeId}.`);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.output.appendLine(`[pipeline.replay] ${msg}`);
-      void vscode.window.showErrorMessage(`Replay failed: ${msg}`);
+      this.report(graphId, `Replay failed: ${err instanceof Error ? err.message : String(err)}`, "error");
     }
   }
 
-  /** Show a run's aggregated token/cost usage (totals + per-node breakdown). */
+  /**
+   * The server node id for a task id or node id: the Runs view's map, else
+   * the graph's nodes (`<graphId>_<taskId>`, or the first node of a swarm task).
+   */
+  private async resolveServerNodeId(graphId: string, nodeId: string): Promise<string> {
+    const mapped = this.runsTree.serverNodeIdFor(graphId, nodeId);
+    if (mapped) return mapped;
+    try {
+      const { nodes } = await fetchGraphDetail(graphId);
+      return pickServerNodeId(graphId, nodeId, nodes.map((n) => n.id)) ?? nodeId;
+    } catch {
+      return nodeId;
+    }
+  }
+
+  /** A run's aggregated token/cost usage (totals + per-node breakdown), as a chat note. */
   async viewRunCost(graphId: string): Promise<void> {
     let metrics: Awaited<ReturnType<typeof getGraphMetrics>>;
     try {
       metrics = await getGraphMetrics(graphId);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.output.appendLine(`[pipeline.cost] ${msg}`);
-      void vscode.window.showErrorMessage(`Failed to load run cost: ${msg}`);
+      this.report(graphId, `Failed to load run cost: ${err instanceof Error ? err.message : String(err)}`, "error");
       return;
     }
     if (!metrics || metrics.callCount === 0) {
-      void vscode.window.showInformationMessage("No usage recorded for this run yet.");
+      this.report(graphId, "No usage recorded for this run yet.");
       return;
     }
-    const cost = metrics.estimatedCostUsd ? `$${metrics.estimatedCostUsd.toFixed(4)}` : "n/a";
-    void vscode.window.showInformationMessage(
-      `Run cost: ${cost} · ${metrics.inputTokens} in / ${metrics.outputTokens} out tokens · ${metrics.callCount} calls`,
-    );
-    this.output.appendLine(`\n── Cost for run ${graphId} ──`);
-    this.output.appendLine(`Total: ${cost} · ${metrics.inputTokens} in / ${metrics.outputTokens} out · ${metrics.callCount} calls`);
-    for (const n of metrics.perNode) {
-      const c = n.estimatedCostUsd ? `$${n.estimatedCostUsd.toFixed(4)}` : "n/a";
-      this.output.appendLine(`  ${n.nodeId} (${n.title}): ${c} · ${n.inputTokens}/${n.outputTokens} tok`);
-    }
-    this.output.show(true);
+    this.report(graphId, formatRunCost(metrics));
   }
 
   /** List a run's artifacts in a QuickPick and open the chosen one in an editor tab. */
@@ -401,13 +433,11 @@ export class LiberidePipelineController implements vscode.WebviewViewProvider, v
     try {
       artifacts = await listGraphArtifacts(graphId);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.output.appendLine(`[pipeline.artifacts] ${msg}`);
-      void vscode.window.showErrorMessage(`Failed to load artifacts: ${msg}`);
+      this.report(graphId, `Failed to load artifacts: ${err instanceof Error ? err.message : String(err)}`, "error");
       return;
     }
     if (artifacts.length === 0) {
-      void vscode.window.showInformationMessage("This run has not produced any artifacts yet.");
+      this.report(graphId, "This run has not produced any artifacts yet.");
       return;
     }
     const pick = await vscode.window.showQuickPick(
@@ -422,7 +452,7 @@ export class LiberidePipelineController implements vscode.WebviewViewProvider, v
     await vscode.window.showTextDocument(doc, { preview: true });
   }
 
-  private async inspectGraph(graphId: string, nodeId?: string): Promise<void> {
+  async inspectGraph(graphId: string, nodeId?: string): Promise<void> {
     try {
       const [detail, artifacts, metrics, workingMemory] = await Promise.all([
         fetchGraphDetail(graphId),
@@ -522,13 +552,11 @@ export class LiberidePipelineController implements vscode.WebviewViewProvider, v
     try {
       memory = await getWorkingMemory(graphId);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.output.appendLine(`[pipeline.memory] ${msg}`);
-      void vscode.window.showErrorMessage(`Failed to load working memory: ${msg}`);
+      this.report(graphId, `Failed to load working memory: ${err instanceof Error ? err.message : String(err)}`, "error");
       return;
     }
     if (!memory) {
-      void vscode.window.showInformationMessage("This run has no working memory yet.");
+      this.report(graphId, "This run has no working memory yet.");
       return;
     }
     const doc = await vscode.workspace.openTextDocument({
@@ -546,11 +574,9 @@ export class LiberidePipelineController implements vscode.WebviewViewProvider, v
       const memory = await getWorkingMemory(graphId);
       const assumptions = [...(memory?.assumptions ?? []), note.trim()];
       await patchWorkingMemory(graphId, { assumptions });
-      this.broadcast({ type: "log", message: "Added context to working memory.", severity: "info" });
+      this.report(graphId, `Added to the run's working memory: ${note.trim()}`);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.output.appendLine(`[pipeline.memory] ${msg}`);
-      void vscode.window.showErrorMessage(`Failed to update working memory: ${msg}`);
+      this.report(graphId, `Failed to update working memory: ${err instanceof Error ? err.message : String(err)}`, "error");
     }
   }
 
@@ -560,48 +586,31 @@ export class LiberidePipelineController implements vscode.WebviewViewProvider, v
     if (!goal?.trim()) return;
     try {
       await addFollowUp(graphId, goal.trim());
-      this.broadcast({ type: "log", message: "Follow-up queued.", severity: "info" });
+      this.report(graphId, `Follow-up queued: ${goal.trim()}`);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.output.appendLine(`[pipeline.followup] ${msg}`);
-      void vscode.window.showErrorMessage(`Follow-up failed: ${msg}`);
+      this.report(graphId, `Follow-up failed: ${err instanceof Error ? err.message : String(err)}`, "error");
     }
   }
 
-  /** Show a node's status, summary, and error in the output channel (trace inspection). */
+  /**
+   * A node's detail (status, input, full error, output, its agents): in the
+   * chat that owns the run, expanded there; else in the pipeline's inspector.
+   */
   async showNodeDetail(graphId: string, nodeId: string): Promise<void> {
-    try {
-      const { nodes } = await fetchGraphDetail(graphId);
-      const node = nodes.find((n) => n.id === nodeId);
-      if (!node) {
-        void vscode.window.showInformationMessage(`No detail for node ${nodeId}.`);
-        return;
-      }
-      this.output.appendLine("");
-      this.output.appendLine(`── Node ${node.id} (${node.type}) — ${node.status} ──`);
-      this.output.appendLine(node.title);
-      if (node.inputSummary) this.output.appendLine(`Input: ${node.inputSummary}`);
-      if (node.error) this.output.appendLine(`Error: ${node.error}`);
-      try {
-        const metrics = await getGraphMetrics(graphId);
-        const nodeCost = metrics?.perNode.find((n) => n.nodeId === nodeId);
-        if (nodeCost) {
-          const c = nodeCost.estimatedCostUsd ? `$${nodeCost.estimatedCostUsd.toFixed(4)}` : "n/a";
-          this.output.appendLine(`Cost: ${c} · ${nodeCost.inputTokens}/${nodeCost.outputTokens} tokens`);
-        }
-      } catch {
-        // metrics are best-effort in node detail
-      }
-      this.output.show(true);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.output.appendLine(`[pipeline.nodeDetail] ${msg}`);
-      void vscode.window.showErrorMessage(`Failed to load node detail: ${msg}`);
-    }
+    if (await this.chat.revealGraphNode(graphId, nodeId)) return;
+    this.show();
+    await this.inspectGraph(graphId, nodeId);
+  }
+
+  /** Server push: a run waits on an approval (the chat's card covers runs that report to a chat). */
+  async approvalPending(graphId: string, nodeId: string): Promise<void> {
+    await this.promptApproval(graphId, nodeId);
   }
 
   /** Re-open the approval prompt on demand (Runs-tree "Resolve Approval" action). */
   async resolveApprovalForRun(graphId: string, nodeId: string): Promise<void> {
+    // The chat's graph card has Approve/Reject on the waiting step.
+    if (await this.chat.revealGraphNode(graphId, nodeId)) return;
     this.promptedApprovals.delete(`${graphId}:${nodeId}`);
     await this.promptApproval(graphId, nodeId);
   }
@@ -613,6 +622,8 @@ export class LiberidePipelineController implements vscode.WebviewViewProvider, v
    */
   private async promptApproval(graphId: string, nodeId: string): Promise<void> {
     if (this.disposed) return;
+    // Runs that report to a chat are approved from the card there.
+    if (this.chat.conversationForGraph(graphId)) return;
     const key = `${graphId}:${nodeId}`;
     if (this.promptedApprovals.has(key)) return;
     this.promptedApprovals.add(key);
@@ -655,9 +666,7 @@ export class LiberidePipelineController implements vscode.WebviewViewProvider, v
       this.broadcast({ type: "log", message: `Approval ${decision} for ${nodeId}.`, severity: "info" });
     } catch (err) {
       this.promptedApprovals.delete(key);
-      const msg = err instanceof Error ? err.message : String(err);
-      this.output.appendLine(`[pipeline.approval] ${msg}`);
-      void vscode.window.showErrorMessage(`Failed to submit approval: ${msg}`);
+      this.report(graphId, `Failed to submit approval: ${err instanceof Error ? err.message : String(err)}`, "error");
     }
   }
 
@@ -755,4 +764,28 @@ function languageForArtifact(path?: string, kind?: string): string {
 
 function randomNonce(): string {
   return randomBytes(16).toString("hex");
+}
+
+/** A run's cost as a markdown note: totals, then one row per node. */
+export function formatRunCost(metrics: GraphMetrics): string {
+  const usd = (value: number) => (value ? `$${value.toFixed(4)}` : "n/a");
+  const lines = [
+    `**Run cost:** ${usd(metrics.estimatedCostUsd)} \u00b7 ${metrics.inputTokens} in / ${metrics.outputTokens} out tokens \u00b7 ${metrics.callCount} calls`,
+  ];
+  if (metrics.perNode.length) {
+    lines.push("", "| Node | Cost | Tokens in/out |", "| --- | --- | --- |");
+    for (const n of metrics.perNode) lines.push(`| ${n.title || n.nodeId} | ${usd(n.estimatedCostUsd)} | ${n.inputTokens}/${n.outputTokens} |`);
+  }
+  return lines.join("\n");
+}
+
+/**
+ * The server's id for a node named by task id (`T-1`) or server id: an exact
+ * match, `<graphId>_<id>`, or the first node of that swarm task (`<graphId>_<id>_…`).
+ */
+export function pickServerNodeId(graphId: string, nodeId: string, serverIds: string[]): string | undefined {
+  if (serverIds.includes(nodeId)) return nodeId;
+  const prefixed = `${graphId}_${nodeId}`;
+  if (serverIds.includes(prefixed)) return prefixed;
+  return serverIds.find((id) => id.startsWith(`${prefixed}_`));
 }

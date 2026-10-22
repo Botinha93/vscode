@@ -28,6 +28,9 @@
   function providerLabel(provider) {
     return PROVIDER_LABELS[provider] ?? provider;
   }
+  function toWireProvider(provider) {
+    return provider === "ollama-internal" ? "ollama" : provider;
+  }
   var PROFILE_FEATURE_BADGES = [
     ["tool-calling", "tools"],
     ["image-input", "vision"],
@@ -39,6 +42,32 @@
       return PROFILE_FEATURE_BADGES.filter(([feature]) => features[feature]?.value === "supported").map(([, badge]) => badge);
     }
     return [...model.capabilities ?? []];
+  }
+  function findConfiguredModel(models, provider, modelId) {
+    if (!provider || !modelId) return void 0;
+    return models.find((m) => m.provider === provider && m.modelId === modelId);
+  }
+  function describeModelLabel(models, provider, modelId) {
+    if (!provider || !modelId) return "No model";
+    const m = findConfiguredModel(models, provider, modelId);
+    if (m) return m.displayName;
+    return `${providerLabel(provider)} \xB7 ${modelId}`;
+  }
+  function effectiveModelSelection(conversationSelection, model, globalDefault) {
+    if (model === "auto") return "auto";
+    return conversationSelection ?? globalDefault;
+  }
+  function modelChipLabel(input) {
+    if (input.selection === "auto" || input.model === "auto") {
+      const routed = input.routed;
+      if (routed?.model && routed.model !== "auto") {
+        const known = input.models.find((m) => m.modelId === routed.model && (!routed.provider || toWireProvider(m.provider) === routed.provider));
+        return `Auto \u2192 ${known?.displayName ?? routed.model}`;
+      }
+      return "Auto";
+    }
+    if (!input.provider || !input.model) return input.models.length === 0 ? "No models configured" : "Pick a model";
+    return describeModelLabel(input.models, input.provider, input.model);
   }
 
   // ../../../packages/shared/src/task-contract.ts
@@ -108,6 +137,12 @@
       architectureHints: String(data.architecture_hints ?? "").trim(),
       acceptance: list(data.acceptance)
     };
+  }
+
+  // ../../../packages/shared/src/agent-stream.ts
+  var TERMINAL_AGENT_RUN_STATUSES = ["completed", "failed", "cancelled"];
+  function isTerminalAgentRunStatus(status) {
+    return TERMINAL_AGENT_RUN_STATUSES.includes(String(status));
   }
 
   // ../../../packages/shared/src/chat-commands.ts
@@ -14829,6 +14864,71 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     researchFindingHandoffSchema
   ]);
 
+  // src/chat/agent-runs.ts
+  function isActiveAgentRunStatus(status) {
+    return Boolean(status) && !isTerminalAgentRunStatus(status);
+  }
+  function push(map2, key, value) {
+    const list2 = map2.get(key);
+    if (list2) list2.push(value);
+    else map2.set(key, [value]);
+  }
+  function layoutAgentRuns(messages, runs) {
+    const byId = new Map(runs.map((run) => [run.runId, run]));
+    const messageIds = new Set(messages.map((m) => m.id));
+    const graphMessage = /* @__PURE__ */ new Map();
+    const anchorMessage = /* @__PURE__ */ new Map();
+    for (const m of messages) {
+      if (m.graphId && !graphMessage.has(m.graphId)) graphMessage.set(m.graphId, m.id);
+      if (m.agentRunId) anchorMessage.set(m.agentRunId, m.id);
+    }
+    const hasLiveParent = (run) => {
+      const seen = /* @__PURE__ */ new Set([run.runId]);
+      let parentId = run.parentRunId;
+      while (parentId) {
+        if (seen.has(parentId)) return false;
+        const parent = byId.get(parentId);
+        if (!parent) return false;
+        seen.add(parentId);
+        parentId = parent.parentRunId;
+      }
+      return Boolean(run.parentRunId);
+    };
+    const layout = {
+      hiddenMessageIds: /* @__PURE__ */ new Set(),
+      rootsByMessage: /* @__PURE__ */ new Map(),
+      nodeRuns: /* @__PURE__ */ new Map(),
+      childrenByRun: /* @__PURE__ */ new Map(),
+      orphans: []
+    };
+    for (const run of runs) {
+      const anchor = anchorMessage.get(run.runId);
+      if (run.parentRunId && hasLiveParent(run)) {
+        push(layout.childrenByRun, run.parentRunId, run.runId);
+      } else if (run.graphId && graphMessage.has(run.graphId) && graphMessage.get(run.graphId) !== anchor) {
+        if (run.nodeId) {
+          let nodes = layout.nodeRuns.get(run.graphId);
+          if (!nodes) {
+            nodes = /* @__PURE__ */ new Map();
+            layout.nodeRuns.set(run.graphId, nodes);
+          }
+          push(nodes, run.nodeId, run.runId);
+        } else {
+          push(layout.rootsByMessage, graphMessage.get(run.graphId), run.runId);
+        }
+      } else if (anchor) {
+        push(layout.rootsByMessage, anchor, run.runId);
+        continue;
+      } else if (run.messageId && messageIds.has(run.messageId)) {
+        push(layout.rootsByMessage, run.messageId, run.runId);
+      } else {
+        layout.orphans.push(run.runId);
+      }
+      if (anchor) layout.hiddenMessageIds.add(anchor);
+    }
+    return layout;
+  }
+
   // src/webview/highlight.ts
   var KEYWORDS_JS = /* @__PURE__ */ new Set([
     "abstract",
@@ -15544,7 +15644,10 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     expandedTimelines: /* @__PURE__ */ new Set(),
     expandedEditCards: /* @__PURE__ */ new Set(),
     consumedPipelineCards: /* @__PURE__ */ new Set(),
-    contextBlocks: []
+    contextBlocks: [],
+    agentRuns: /* @__PURE__ */ new Map(),
+    runApprovals: [],
+    agentsConnected: true
   };
   var root = document.getElementById("root");
   function send(msg) {
@@ -15558,9 +15661,11 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     const o = state.activeSession?.overrides ?? {};
     const fallbackModel = state.catalog.models.find((m) => m.enabled);
     const defaultAllowed = s?.defaultAllowedAgentIds?.length ? s.defaultAllowedAgentIds.filter((id) => invokableAgents(state.catalog.agents).some((agent) => agent.id === id)) : invokableAgents(state.catalog.agents).map((agent) => agent.id);
+    const modelSelection = effectiveModelSelection(o.modelSelection, o.model, s?.modelSelection ?? "auto");
     return {
       provider: o.provider ?? fallbackModel?.provider,
-      model: o.model ?? fallbackModel?.modelId,
+      model: o.model && (o.model !== "auto" || modelSelection === "auto") ? o.model : fallbackModel?.modelId,
+      modelSelection,
       chatMode: "agent",
       useRag: o.useRag ?? s?.useRag ?? false,
       toolsEnabled: true,
@@ -15821,21 +15926,91 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
       banner.querySelector("#retry-backend")?.addEventListener("click", () => send({ type: "refreshCatalog" }));
     }
   }
-  function renderTranscript() {
+  var runLayout = layoutAgentRuns([], []);
+  function computeRunLayout() {
+    const messages = state.activeSession?.messages ?? [];
+    runLayout = layoutAgentRuns(
+      messages.map((m) => ({ id: m.id, agentRunId: m.agentRunId, graphId: m.graph?.graphId })),
+      [...state.agentRuns.values()]
+    );
+    return runLayout;
+  }
+  function renderTranscript(options = {}) {
     const transcript = root.querySelector("#transcript");
     if (!transcript) return;
+    const atBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 40;
+    const previousTop = transcript.scrollTop;
     transcript.innerHTML = "";
     const messages = state.activeSession?.messages ?? [];
-    if (messages.length === 0) {
+    const layout = computeRunLayout();
+    if (messages.length === 0 && layout.orphans.length === 0 && state.runApprovals.length === 0) {
       transcript.appendChild(renderEmptyState());
       renderActivity();
       return;
     }
     for (const m of messages) {
+      if (layout.hiddenMessageIds.has(m.id)) continue;
       transcript.appendChild(renderMessage(m));
     }
-    transcript.scrollTop = transcript.scrollHeight;
+    const tail = renderRunsTail();
+    if (tail) transcript.appendChild(tail);
+    transcript.scrollTop = options.keepScroll && !atBottom ? previousTop : transcript.scrollHeight;
     renderActivity();
+  }
+  function renderRunsTail() {
+    const placed = new Set(runIdsInLayout());
+    const approvals = state.runApprovals.filter((a) => !a.agentRunId || !placed.has(a.agentRunId));
+    if (runLayout.orphans.length === 0 && approvals.length === 0) return null;
+    const el = document.createElement("article");
+    el.className = "turn turn-assistant agent-runs-tail";
+    el.dataset.messageId = RUNS_TAIL_ID;
+    el.innerHTML = `${runLayout.orphans.map((id) => renderAgentRunCard(id, 0)).join("")}${approvals.map(renderRunApprovalCard).join("")}`;
+    bindRunCards(el);
+    return el;
+  }
+  var RUNS_TAIL_ID = "__agent-runs-tail__";
+  function runIdsInLayout() {
+    const ids = [...runLayout.orphans];
+    for (const list2 of runLayout.rootsByMessage.values()) ids.push(...list2);
+    for (const nodes of runLayout.nodeRuns.values()) for (const list2 of nodes.values()) ids.push(...list2);
+    for (const list2 of runLayout.childrenByRun.values()) ids.push(...list2);
+    return ids;
+  }
+  function ownerOfRun(runId) {
+    const seen = /* @__PURE__ */ new Set();
+    let current = state.agentRuns.get(runId);
+    while (current?.parentRunId && state.agentRuns.has(current.parentRunId) && !seen.has(current.parentRunId)) {
+      seen.add(current.runId);
+      current = state.agentRuns.get(current.parentRunId);
+    }
+    const rootId = current?.runId ?? runId;
+    for (const [messageId, list2] of runLayout.rootsByMessage) if (list2.includes(rootId)) return messageId;
+    if (current?.graphId && current.nodeId && runLayout.nodeRuns.get(current.graphId)?.get(current.nodeId)?.includes(rootId)) {
+      const host = state.activeSession?.messages.find((m) => m.graph?.graphId === current.graphId);
+      if (host) return host.id;
+    }
+    return RUNS_TAIL_ID;
+  }
+  function rerenderRuns(runIds, placementChanged) {
+    if (placementChanged) {
+      renderTranscript({ keepScroll: true });
+      return;
+    }
+    const transcript = root.querySelector("#transcript");
+    const atBottom = transcript ? transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 40 : false;
+    const owners = new Set(runIds.map(ownerOfRun));
+    for (const owner of owners) {
+      if (owner === RUNS_TAIL_ID) {
+        const current = root.querySelector(`.turn[data-message-id="${cssAttr(RUNS_TAIL_ID)}"]`);
+        const next = renderRunsTail();
+        if (current && next) current.replaceWith(next);
+        else if (!current && next) transcript?.appendChild(next);
+        else current?.remove();
+      } else {
+        rerenderMessageInDom(owner);
+      }
+    }
+    if (transcript && atBottom) transcript.scrollTop = transcript.scrollHeight;
   }
   function renderEmptyState() {
     const el = document.createElement("div");
@@ -15891,6 +16066,20 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     const turn = document.createElement("article");
     turn.className = `turn turn-${message.role}` + (message.status === "streaming" ? " streaming" : "") + (message.status === "error" ? " error" : "");
     turn.dataset.messageId = message.id;
+    if (message.note) {
+      turn.className = `turn turn-note note-${message.note}`;
+      turn.innerHTML = `<div class="chat-note"><span class="chat-note-icon">${message.note === "error" ? "\u2717" : message.note === "warning" ? "\u26A0" : "\u2139"}</span><div class="turn-content"></div></div>`;
+      const content2 = turn.querySelector(".turn-content");
+      content2.innerHTML = renderMarkdownish(message.content);
+      bindMarkdownExtras(content2);
+      return turn;
+    }
+    if (message.role === "assistant" && message.agentRunId && state.agentRuns.has(message.agentRunId)) {
+      turn.classList.add("turn-agent-run");
+      turn.innerHTML = renderMessageRuns(message.id);
+      bindRunCards(turn);
+      return turn;
+    }
     if (message.role === "user") {
       turn.innerHTML = `
       <div class="bubble bubble-user">
@@ -15919,6 +16108,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     <div class="turn-content"></div>
     ${message.status === "error" && message.error ? `<div class="turn-error">${escapeHtml2(message.error)}</div>` : ""}
     ${renderTurnExtras(message)}
+    ${renderMessageRuns(message.id)}
     ${message.status === "complete" ? `<div class="assistant-actions">
       <button class="icon-btn small" title="Copy" aria-label="Copy" data-act="copy">\u2398</button>
       <button class="icon-btn small" title="Helpful" aria-label="Helpful" data-act="up">\u{1F44D}</button>
@@ -15936,6 +16126,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     }
     bindAssistantMeta(turn, message);
     bindTurnExtras(turn, message);
+    bindRunCards(turn);
     turn.querySelector('[data-act="copy"]')?.addEventListener("click", async () => {
       try {
         await navigator.clipboard.writeText(message.content);
@@ -16031,21 +16222,202 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
         return "\u25CB";
     }
   }
+  var stepToggles = /* @__PURE__ */ new Map();
+  var runToggles = /* @__PURE__ */ new Map();
+  var requestedToolCalls = /* @__PURE__ */ new Set();
+  function stepKey(graphId, nodeId) {
+    return `${graphId}|${nodeId}`;
+  }
+  function stepOpen(graphId, step, runIds) {
+    const toggled = stepToggles.get(stepKey(graphId, step.nodeId));
+    if (toggled !== void 0) return toggled;
+    return step.status === "running" || step.status === "failed" || step.status === "waiting_approval" || runIds.some((id) => isActiveAgentRunStatus(state.agentRuns.get(id)?.status));
+  }
+  function renderGraphStep(graph, step) {
+    const runIds = runLayout.nodeRuns.get(graph.graphId)?.get(step.nodeId) ?? [];
+    const hasDetail = Boolean(step.error || step.output || runIds.length || step.status === "waiting_approval" || step.status === "failed");
+    const open = hasDetail && stepOpen(graph.graphId, step, runIds);
+    const key = stepKey(graph.graphId, step.nodeId);
+    const detail = open ? `<div class="graph-step-detail">
+      ${step.error ? `<pre class="graph-step-error">${escapeHtml2(step.error)}</pre>` : ""}
+      ${step.output ? `<div class="graph-step-output">${renderMarkdownish(step.output)}</div>` : ""}
+      ${runIds.map((id) => renderAgentRunCard(id, 1)).join("")}
+      ${step.status === "waiting_approval" ? `<div class="approval-actions">
+        <span class="approval-status">Waiting for your decision</span>
+        <button class="btn-secondary small" type="button" data-step-approval="rejected" data-graph-id="${escapeAttr(graph.graphId)}" data-node-id="${escapeAttr(step.nodeId)}">Reject</button>
+        <button class="btn-primary small" type="button" data-step-approval="approved" data-graph-id="${escapeAttr(graph.graphId)}" data-node-id="${escapeAttr(step.nodeId)}">Approve</button>
+      </div>` : ""}
+      ${step.status === "failed" ? `<div class="approval-actions"><span class="approval-status"></span><button class="btn-secondary small" type="button" data-step-replay data-graph-id="${escapeAttr(graph.graphId)}" data-node-id="${escapeAttr(step.nodeId)}">Replay from here</button></div>` : ""}
+    </div>` : "";
+    return `<div class="graph-step-block${open ? " open" : ""}" data-step-key="${escapeAttr(key)}">
+    <button class="graph-step status-${escapeAttr(step.status)}" type="button"${hasDetail ? ` data-step-toggle="${escapeAttr(key)}"` : " disabled"}>
+      <span class="timeline-icon">${stepIcon(step.status)}</span>
+      <span class="graph-step-title">${escapeHtml2(step.title || step.nodeId)}</span>
+      ${runIds.length ? `<span class="graph-step-runs">${runIds.length} agent${runIds.length === 1 ? "" : "s"}</span>` : ""}
+      <span class="graph-step-status">${escapeHtml2(step.status.replace(/_/g, " "))}</span>
+      ${hasDetail ? `<span class="graph-step-chevron">${open ? "\u25BE" : "\u25B8"}</span>` : ""}
+    </button>
+    ${detail}
+  </div>`;
+  }
   function renderGraphCard(graph) {
     const terminal = isTerminalGraph(graph.status);
-    if (terminal && graph.steps.length === 0 && !graph.error) return "";
+    const nodeRuns = runLayout.nodeRuns.get(graph.graphId);
+    if (terminal && graph.steps.length === 0 && !graph.error && !nodeRuns?.size) return "";
     const done = graph.steps.filter((s) => s.status === "completed" || s.status === "skipped").length;
-    const rows = graph.steps.map((step) => `<div class="graph-step status-${escapeAttr(step.status)}"><span class="timeline-icon">${stepIcon(step.status)}</span><span class="graph-step-title">${escapeHtml2(step.title || step.nodeId)}</span><span class="graph-step-status">${escapeHtml2(step.status.replace(/_/g, " "))}</span></div>`).join("");
+    const branched = graph.steps.some((step) => step.taskId);
+    let body = "";
+    if (branched) {
+      const branches = /* @__PURE__ */ new Map();
+      for (const step of graph.steps) {
+        const key = step.taskId ?? "";
+        branches.set(key, [...branches.get(key) ?? [], step]);
+      }
+      body = `<div class="graph-branches">${[...branches].map(([taskId, steps]) => `<div class="graph-branch">
+      ${taskId ? `<div class="graph-branch-title">${escapeHtml2(taskId)}</div>` : ""}
+      ${steps.map((step) => renderGraphStep(graph, step)).join("")}
+    </div>`).join("")}</div>`;
+    } else if (graph.steps.length) {
+      body = `<div class="graph-steps">${graph.steps.map((step) => renderGraphStep(graph, step)).join("")}</div>`;
+    }
+    const known = new Set(graph.steps.map((step) => step.nodeId));
+    const unplaced = [...nodeRuns ?? []].filter(([nodeId]) => !known.has(nodeId)).flatMap(([, ids]) => ids);
+    const reconnecting = graph.reconnecting || !state.agentsConnected && [...nodeRuns?.values() ?? []].flat().some((id) => isActiveAgentRunStatus(state.agentRuns.get(id)?.status));
     return `<div class="graph-card status-${escapeAttr(graph.status)}" data-graph-id="${escapeAttr(graph.graphId)}">
     <div class="graph-head">
       ${terminal ? "" : `<span class="turn-indicator"></span>`}
       <span class="graph-title">${terminal ? `Graph ${escapeHtml2(graph.status)}` : `Running graph \u2014 ${escapeHtml2(graph.status.replace(/_/g, " "))}`}</span>
+      ${reconnecting ? `<span class="graph-reconnecting" title="${escapeAttr(graph.error ?? "Reconnecting to live output")}">Reconnecting\u2026</span>` : ""}
       ${graph.steps.length ? `<span class="graph-count">${done}/${graph.steps.length}</span>` : ""}
       ${terminal ? "" : `<button class="btn-secondary small" type="button" data-graph-cancel${graph.cancelling ? " disabled" : ""}>${graph.cancelling ? "Cancelling\u2026" : "Cancel"}</button>`}
     </div>
-    ${rows ? `<div class="graph-steps">${rows}</div>` : ""}
-    ${graph.error ? `<div class="${graph.reconnecting ? "graph-warning" : "turn-error"}">${escapeHtml2(graph.error)}</div>` : ""}
+    ${body}
+    ${unplaced.map((id) => renderAgentRunCard(id, 1)).join("")}
+    ${graph.error && !graph.reconnecting ? `<div class="turn-error">${escapeHtml2(graph.error)}</div>` : ""}
   </div>`;
+  }
+  function renderMessageRuns(messageId) {
+    const ids = runLayout.rootsByMessage.get(messageId) ?? [];
+    return ids.length ? `<div class="agent-run-list">${ids.map((id) => renderAgentRunCard(id, 0)).join("")}</div>` : "";
+  }
+  var RUN_STATUS_LABEL = {
+    queued: "Queued",
+    running: "Running",
+    waiting_approval: "Waiting for approval",
+    needs_followup: "Needs follow-up",
+    waiting_for_machine: "Waiting for machine",
+    completed: "Completed",
+    failed: "Failed",
+    cancelled: "Cancelled"
+  };
+  function runOpen(run) {
+    const toggled = runToggles.get(run.runId);
+    return toggled ?? true;
+  }
+  function renderAgentRunCard(runId, depth) {
+    const run = state.agentRuns.get(runId);
+    if (!run) return "";
+    const active = isActiveAgentRunStatus(run.status);
+    const open = runOpen(run);
+    const children = runLayout.childrenByRun.get(runId) ?? [];
+    const approvals = state.runApprovals.filter((a) => a.agentRunId === runId);
+    const title = run.agentName || (run.nodeId ? `Node ${run.nodeId}` : "Agent");
+    const tools = run.toolCalls.map((call) => {
+      const icon = call.status === "running" ? `<span class="turn-indicator"></span>` : call.status === "error" ? "\u2717" : "\u2713";
+      return `<div class="timeline-row status-${escapeAttr(call.status === "complete" ? "complete" : call.status)}" title="${escapeAttr(call.result?.slice(0, 500) ?? "")}">
+      <span class="timeline-icon">${icon}</span><span>${escapeHtml2(call.name.replace(/^ide_/, "").replace(/_/g, " "))}${call.summary ? ` <code>${escapeHtml2(call.summary)}</code>` : ""}</span>
+    </div>`;
+    }).join("");
+    const excerpt = !open && run.text ? `<span class="agent-run-excerpt">${escapeHtml2(run.text.replace(/\s+/g, " ").slice(0, 120))}</span>` : "";
+    const reconnecting = active && !state.agentsConnected;
+    const body = open ? `<div class="agent-run-body">
+      ${tools ? `<div class="agent-run-tools">${tools}</div>` : ""}
+      ${run.text ? `<div class="agent-run-text${active ? " streaming" : ""}" data-run-text="${escapeAttr(runId)}">${renderMarkdownish(run.text)}</div>` : active ? `<div class="assistant-status"><span class="turn-indicator"></span><span>${reconnecting ? "Reconnecting to live output\u2026" : "Working\u2026"}</span></div>` : ""}
+      ${run.error ? `<pre class="agent-run-error">${escapeHtml2(run.error)}</pre>` : ""}
+      ${approvals.map(renderRunApprovalCard).join("")}
+      ${children.length ? `<div class="agent-run-children">${children.map((id) => renderAgentRunCard(id, depth + 1)).join("")}</div>` : ""}
+    </div>` : approvals.map(renderRunApprovalCard).join("");
+    return `<div class="agent-run-card status-${escapeAttr(run.status)}${depth ? " nested" : ""}" data-run-id="${escapeAttr(runId)}">
+    <button class="agent-run-head" type="button" data-run-toggle="${escapeAttr(runId)}">
+      <span class="timeline-icon">${active ? `<span class="turn-indicator"></span>` : stepIcon(run.status)}</span>
+      <span class="agent-run-title">${escapeHtml2(title)}</span>
+      ${excerpt}
+      ${children.length ? `<span class="graph-step-runs">${children.length} sub-agent${children.length === 1 ? "" : "s"}</span>` : ""}
+      ${reconnecting ? `<span class="graph-reconnecting">Reconnecting\u2026</span>` : ""}
+      <span class="agent-run-status">${escapeHtml2(RUN_STATUS_LABEL[run.status] ?? run.status.replace(/_/g, " "))}</span>
+      <span class="graph-step-chevron">${open ? "\u25BE" : "\u25B8"}</span>
+    </button>
+    ${body}
+  </div>`;
+  }
+  function renderRunApprovalCard(card) {
+    return renderApprovalCard(card).replace(/data-approval="/g, `data-run-approval-id="${escapeAttr(card.id)}" data-run-approval="`);
+  }
+  function bindRunCards(scope) {
+    const sessionId = state.activeSession?.id;
+    scope.querySelectorAll("[data-run-toggle]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const runId = btn.dataset.runToggle;
+        const run = state.agentRuns.get(runId);
+        if (!run) return;
+        runToggles.set(runId, !runOpen(run));
+        rerenderRuns([runId], false);
+      });
+    });
+    scope.querySelectorAll("[data-step-toggle]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const key = btn.dataset.stepToggle;
+        const block = btn.closest(".graph-step-block");
+        stepToggles.set(key, !block?.classList.contains("open"));
+        const owner = btn.closest(".turn")?.dataset.messageId;
+        if (owner) rerenderMessageInDom(owner);
+      });
+    });
+    if (!sessionId) return;
+    scope.querySelectorAll("[data-step-approval]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const messageId = btn.closest(".turn")?.dataset.messageId ?? "";
+        btn.closest(".approval-actions")?.querySelectorAll("button").forEach((b) => {
+          b.disabled = true;
+        });
+        send({
+          type: "resolveNodeApproval",
+          sessionId,
+          messageId,
+          graphId: btn.dataset.graphId,
+          nodeId: btn.dataset.nodeId,
+          decision: btn.dataset.stepApproval === "approved" ? "approved" : "rejected"
+        });
+      });
+    });
+    scope.querySelectorAll("[data-step-replay]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        btn.disabled = true;
+        send({ type: "replayNode", sessionId, graphId: btn.dataset.graphId, nodeId: btn.dataset.nodeId });
+      });
+    });
+    scope.querySelectorAll("[data-run-approval]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const approvalId = btn.dataset.runApprovalId;
+        const card = state.runApprovals.find((a) => a.id === approvalId);
+        if (card?.busy) return;
+        if (card) card.busy = true;
+        btn.closest(".approval-actions")?.querySelectorAll("button").forEach((b) => {
+          b.disabled = true;
+        });
+        send({ type: "resolveRunApproval", sessionId, approvalId, decision: btn.dataset.runApproval === "approved" ? "approved" : "rejected" });
+      });
+    });
+    scope.querySelectorAll("[data-run-text]").forEach((el) => {
+      if (el.classList.contains("streaming")) el.scrollTop = el.scrollHeight;
+    });
+    scope.querySelectorAll(".agent-run-card").forEach((card) => {
+      const runId = card.dataset.runId;
+      const run = state.agentRuns.get(runId);
+      if (!run || !runOpen(run) || isActiveAgentRunStatus(run.status) || run.toolCalls.length || requestedToolCalls.has(runId)) return;
+      requestedToolCalls.add(runId);
+      send({ type: "loadRunToolCalls", sessionId, runId });
+    });
   }
   function renderFallbackCard(fallback) {
     const buttons = fallback.alternatives.map((alt, i) => `<button class="btn-secondary" type="button" data-fallback-index="${i}">${escapeHtml2(describeModel(alt.provider, alt.model))}</button>`).join("");
@@ -16401,7 +16773,13 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     const toolbar = root.querySelector("#chip-row");
     if (!toolbar) return;
     const eff = effective();
-    const modelLabel = describeModel(eff.provider, eff.model);
+    const modelLabel = modelChipLabel({
+      models: state.catalog.models,
+      selection: eff.modelSelection,
+      provider: eff.provider,
+      model: eff.model,
+      routed: state.activeSession?.routedModel
+    });
     const primaryAgent = state.catalog.agents.find((agent) => agent.id === eff.agentId);
     const agentLabel = primaryAgent ? primaryAgent.name : "Agent";
     toolbar.innerHTML = `
@@ -16581,12 +16959,20 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
         <button class="icon-btn" id="picker-close">\u2715</button>
       </header>
       <div class="popover-body">
+        <section class="popover-group">
+          <ul>
+            <li class="popover-row popover-row-auto${eff.modelSelection === "auto" ? " selected" : ""}" data-auto="true">
+              <div class="popover-row-title">Auto</div>
+              <div class="popover-row-detail">Route each turn to a suitable model${state.activeSession?.routedModel?.model ? ` \u2014 last: ${escapeHtml2(state.activeSession.routedModel.model)}` : ""}</div>
+            </li>
+          </ul>
+        </section>
         ${grouped.map((g) => `
           <section class="popover-group">
             <h4>${escapeHtml2(g.label)}</h4>
             <ul>
               ${g.models.map((m) => {
-        const selected = m.provider === eff.provider && m.modelId === eff.model;
+        const selected = eff.modelSelection === "manual" && m.provider === eff.provider && m.modelId === eff.model;
         const cap = modelCapabilityBadges(m).slice(0, 3).join(", ");
         return `<li class="popover-row${selected ? " selected" : ""}" data-provider="${escapeAttr(m.provider)}" data-model="${escapeAttr(m.modelId)}">
                   <div class="popover-row-title">${escapeHtml2(m.displayName)}</div>
@@ -16605,10 +16991,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     });
     for (const li of el.querySelectorAll(".popover-row")) {
       li.addEventListener("click", () => {
-        setOverrides({
-          provider: li.dataset.provider,
-          model: li.dataset.model
-        });
+        setOverrides(li.dataset.auto ? { modelSelection: "auto", model: "auto" } : { modelSelection: "manual", provider: li.dataset.provider, model: li.dataset.model });
         state.modelPickerOpen = false;
         applyModelPicker();
       });
@@ -16674,7 +17057,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     ${projectLine}
 
     <h2>Local defaults</h2>
-    <label for="set-mode">Model selection mode</label>
+    <label for="set-mode">Model selection for new chats</label>
     <select id="set-mode" data-key="modelSelection">
       <option value="manual" ${s.modelSelection === "manual" ? "selected" : ""}>manual</option>
       <option value="auto" ${s.modelSelection === "auto" ? "selected" : ""}>auto</option>
@@ -17149,6 +17532,42 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
   function cssAttr(id) {
     return id.replace(/"/g, '\\"');
   }
+  function adoptSessionRuns(session) {
+    if (!session) {
+      state.agentRuns = /* @__PURE__ */ new Map();
+      state.runApprovals = [];
+      state.agentsConnected = true;
+      return;
+    }
+    const sameChat = state.activeSession?.id === session.id;
+    const next = new Map((session.agentRuns ?? []).map((run) => [run.runId, run]));
+    if (sameChat) {
+      for (const [id, run] of state.agentRuns) if (!next.has(id)) next.set(id, run);
+    }
+    state.agentRuns = next;
+    state.runApprovals = session.runApprovals ?? [];
+    state.agentsConnected = session.agentsConnected ?? true;
+  }
+  function runPlacement() {
+    const parts = [];
+    for (const [messageId, ids] of runLayout.rootsByMessage) parts.push(`m:${messageId}=${ids.join(",")}`);
+    for (const [graphId, nodes] of runLayout.nodeRuns) for (const [nodeId, ids] of nodes) parts.push(`g:${graphId}/${nodeId}=${ids.join(",")}`);
+    for (const [parent, ids] of runLayout.childrenByRun) parts.push(`p:${parent}=${ids.join(",")}`);
+    parts.push(`o:${runLayout.orphans.join(",")}`, `h:${[...runLayout.hiddenMessageIds].join(",")}`);
+    return parts.join(";");
+  }
+  function revealGraphNode(graphId, requestedNodeId) {
+    const host = state.activeSession?.messages.find((m) => m.graph?.graphId === graphId);
+    const steps = host?.graph?.steps ?? [];
+    const nodeId = steps.find((step) => step.nodeId === requestedNodeId)?.nodeId ?? steps.find((step) => step.nodeId === `${graphId}_${requestedNodeId}` || step.nodeId.startsWith(`${graphId}_${requestedNodeId}_`))?.nodeId ?? requestedNodeId;
+    stepToggles.set(stepKey(graphId, nodeId), true);
+    for (const id of runLayout.nodeRuns.get(graphId)?.get(nodeId) ?? []) runToggles.set(id, true);
+    if (host) rerenderMessageInDom(host.id);
+    const block = root.querySelector(`.graph-step-block[data-step-key="${cssAttr(stepKey(graphId, nodeId))}"]`) ?? root.querySelector(`.graph-card[data-graph-id="${cssAttr(graphId)}"]`);
+    block?.scrollIntoView({ block: "center" });
+    block?.classList.add("flash");
+    setTimeout(() => block?.classList.remove("flash"), 1500);
+  }
   function showNotice(message, severity = "warning") {
     const stack = root.querySelector("#notice-stack");
     if (!stack) return;
@@ -17169,6 +17588,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
         state.catalog = msg.catalog;
         state.backendStatus = msg.backendStatus;
         state.apiOrigin = msg.apiOrigin;
+        adoptSessionRuns(msg.activeSession);
         state.streaming = Boolean(msg.activeSession?.messages.some((message) => message.status === "streaming"));
         render();
         break;
@@ -17208,6 +17628,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
         renderSidebar();
         break;
       case "session":
+        adoptSessionRuns(msg.session);
         state.activeSession = msg.session;
         state.activeSessionId = msg.session.id;
         state.streaming = msg.session.messages.some((m) => m.status === "streaming");
@@ -17296,7 +17717,10 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
           const m = state.activeSession.messages.find((x) => x.id === msg.messageId);
           if (m) {
             Object.assign(m, msg.patch);
-            rerenderMessageInDom(msg.messageId);
+            const before = runPlacement();
+            computeRunLayout();
+            if (msg.patch.graph && runPlacement() !== before) renderTranscript({ keepScroll: true });
+            else rerenderMessageInDom(msg.messageId);
             if (msg.patch.content !== void 0) {
               const transcript = root.querySelector("#transcript");
               if (transcript) transcript.scrollTop = transcript.scrollHeight;
@@ -17315,6 +17739,28 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
             composer.focus();
           }
         }
+        break;
+      case "agentRuns":
+        if (state.activeSession && state.activeSession.id === msg.sessionId) {
+          if (msg.connected !== void 0 && msg.connected !== state.agentsConnected) {
+            state.agentsConnected = msg.connected;
+            renderTranscript({ keepScroll: true });
+          }
+          if (!msg.runs.length) break;
+          const before = runPlacement();
+          for (const run of msg.runs) state.agentRuns.set(run.runId, run);
+          computeRunLayout();
+          rerenderRuns(msg.runs.map((run) => run.runId), runPlacement() !== before);
+        }
+        break;
+      case "runApprovals":
+        if (state.activeSession && state.activeSession.id === msg.sessionId) {
+          state.runApprovals = msg.approvals;
+          renderTranscript({ keepScroll: true });
+        }
+        break;
+      case "revealGraphNode":
+        if (state.activeSession && state.activeSession.id === msg.sessionId) revealGraphNode(msg.graphId, msg.nodeId);
         break;
       case "log":
         console.warn("[liberide]", msg.message);

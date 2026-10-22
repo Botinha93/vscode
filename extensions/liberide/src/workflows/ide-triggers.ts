@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import * as path from "node:path";
 import { apiFetch } from "../api";
 import { activeWorkspaceFolder } from "../ide-delegate/context";
+import type { ChatRunLink } from "../dispatch/conversation-link";
 
 /** One entry of `GET /api/workflows/triggers/ide`. */
 export interface IdeWorkflowTrigger {
@@ -60,8 +61,13 @@ export function ideWorkflowPayload(): Record<string, unknown> {
   };
 }
 
-/** "LiberIDE: Run Workflow…": pick an IDE-triggerable workflow and run it with the active folder's context. */
-export async function runIdeWorkflowCommand(output: vscode.OutputChannel): Promise<void> {
+/**
+ * "LiberIDE: Run Workflow…": pick an IDE-triggerable workflow and run it with
+ * the active folder's context. The run reports to the open chat (or a new
+ * one): the server posts its agent cards there, so its output is read in the
+ * chat, not in an output channel.
+ */
+export async function runIdeWorkflowCommand(output: vscode.OutputChannel, chat: ChatRunLink): Promise<void> {
   const triggers = await listIdeWorkflowTriggers();
   if (!triggers.length) {
     void vscode.window.showInformationMessage("No workflows have an IDE command trigger. Add one to a workflow in the LiberIDE app.");
@@ -84,11 +90,13 @@ export async function runIdeWorkflowCommand(output: vscode.OutputChannel): Promi
   });
   if (input === undefined) return;
 
-  const payload = ideWorkflowPayload();
-  output.appendLine(`[workflow] ${picked.trigger.pipelineName}: starting (${picked.trigger.command})`);
-  output.show(true);
+  const name = picked.trigger.pipelineName;
+  const conversationId = await chat.ensureConversation(`Workflow: ${name}`);
+  if (conversationId) await chat.showConversation(conversationId);
+  const body = ideWorkflowRunBody(picked.trigger.command, input, ideWorkflowPayload(), conversationId);
+  output.appendLine(`[workflow] ${name}: starting (${picked.trigger.command})${conversationId ? ` in chat ${conversationId}` : ""}`);
   const run = await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: `Running ${picked.trigger.pipelineName}…`, cancellable: true },
+    { location: vscode.ProgressLocation.Notification, title: `Running ${name}…`, cancellable: true },
     async (_progress, token) => {
       const abort = new AbortController();
       const subscription = token.onCancellationRequested(() => abort.abort());
@@ -96,7 +104,7 @@ export async function runIdeWorkflowCommand(output: vscode.OutputChannel): Promi
         return await readJsonOrThrow<WorkflowRunResult>(await apiFetch("/api/workflows/triggers/ide/run", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ command: picked.trigger.command, input: input.trim() || undefined, payload }),
+          body: JSON.stringify(body),
           signal: abort.signal,
         }));
       } finally {
@@ -104,16 +112,38 @@ export async function runIdeWorkflowCommand(output: vscode.OutputChannel): Promi
       }
     },
   ).then((result) => result, (err: unknown) => {
-    const message = err instanceof Error ? (err.name === "AbortError" ? "stopped waiting (the run continues on the server)" : err.message) : String(err);
-    output.appendLine(`[workflow] ${picked.trigger.pipelineName}: ${message}`);
-    if (!(err instanceof Error && err.name === "AbortError")) void vscode.window.showErrorMessage(`Workflow failed: ${message}`);
+    const aborted = err instanceof Error && err.name === "AbortError";
+    const message = aborted ? "stopped waiting (the run continues on the server)" : err instanceof Error ? err.message : String(err);
+    output.appendLine(`[workflow] ${name}: ${message}`);
+    if (conversationId) chat.postNote(conversationId, `Workflow **${name}**: ${message}`, aborted ? "info" : "error");
+    else if (!aborted) void vscode.window.showErrorMessage(`Workflow failed: ${message}`);
     return undefined;
   });
   if (!run) return;
-  output.appendLine(`[workflow] ${run.pipelineName ?? picked.trigger.pipelineName}: ${run.status} (run ${run.id})`);
-  if (run.output) output.appendLine(run.output);
-  if (run.error) output.appendLine(`error: ${run.error}`);
-  const summary = `Workflow ${run.pipelineName ?? picked.trigger.pipelineName}: ${run.status}`;
-  if (run.status === "failed" || run.error) void vscode.window.showErrorMessage(summary, "Show Output").then((choice) => choice && output.show());
-  else void vscode.window.showInformationMessage(summary, "Show Output").then((choice) => choice && output.show());
+  output.appendLine(`[workflow] ${run.pipelineName ?? name}: ${run.status} (run ${run.id})`);
+  const failed = run.status === "failed" || Boolean(run.error);
+  if (conversationId) {
+    // The run's output is in the chat (the server's cards); reload to show it.
+    if (failed && run.error) chat.postNote(conversationId, `Workflow **${run.pipelineName ?? name}** failed: ${run.error}`, "error");
+    await chat.showConversation(conversationId);
+    return;
+  }
+  const summary = `Workflow ${run.pipelineName ?? name}: ${run.status}${run.error ? ` — ${run.error}` : ""}`;
+  if (failed) void vscode.window.showErrorMessage(summary);
+  else void vscode.window.showInformationMessage(summary);
+}
+
+/** Body of `POST /api/workflows/triggers/ide/run`: the chat it reports to travels at the top and in the payload. */
+export function ideWorkflowRunBody(
+  command: string,
+  input: string,
+  payload: Record<string, unknown>,
+  conversationId?: string,
+): Record<string, unknown> {
+  return {
+    command,
+    input: input.trim() || undefined,
+    payload: conversationId ? { ...payload, conversationId } : payload,
+    ...(conversationId ? { conversationId } : {}),
+  };
 }

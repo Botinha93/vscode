@@ -351,2555 +351,26 @@ __export(extension_exports, {
 module.exports = __toCommonJS(extension_exports);
 var vscode40 = __toESM(require("vscode"));
 
-// src/api.ts
-var import_node_fs = require("node:fs");
-var import_node_path = require("node:path");
-
-// src/sse.ts
-var SseIdleTimeoutError = class extends Error {
-  constructor(ms) {
-    super(`Stream idle for ${Math.round(ms / 1e3)}s \u2014 the server may be stuck.`);
-    this.name = "SseIdleTimeoutError";
-  }
-};
-var MAX_BUFFER_CHARS = 4e6;
-function parseFrame(raw) {
-  let event;
-  const dataLines = [];
-  for (const line of raw.split(/\r?\n/)) {
-    if (!line || line.startsWith(":")) continue;
-    if (line.startsWith("event:")) event = line.slice(6).trim();
-    else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
-  }
-  if (!dataLines.length) return null;
-  const text = dataLines.join("\n");
-  let data;
-  try {
-    data = JSON.parse(text);
-  } catch {
-    console.warn("[liberide.sse] could not parse SSE data:", text.slice(0, 200));
-    return null;
-  }
-  if (!event) {
-    const type = data && typeof data === "object" ? data.type : void 0;
-    event = typeof type === "string" ? type : "message";
-  }
-  return { event, data };
-}
-async function readSseStream(body, onEvent, options = {}) {
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let skippingOversized = false;
-  const idleMs = options.idleTimeoutMs;
-  try {
-    while (true) {
-      let timer;
-      const chunk = idleMs ? await Promise.race([
-        reader.read(),
-        new Promise((_, reject) => {
-          timer = setTimeout(() => reject(new SseIdleTimeoutError(idleMs)), idleMs);
-        })
-      ]).finally(() => {
-        if (timer) clearTimeout(timer);
-      }) : await reader.read();
-      buffer += decoder.decode(chunk.value, { stream: !chunk.done });
-      const parts = buffer.split(/\r?\n\r?\n/);
-      buffer = parts.pop() ?? "";
-      for (const [index, part] of parts.entries()) {
-        if (index === 0 && skippingOversized) {
-          skippingOversized = false;
-          continue;
-        }
-        const frame = parseFrame(part);
-        if (frame) onEvent(frame);
-      }
-      if (buffer.length > MAX_BUFFER_CHARS) {
-        buffer = "";
-        skippingOversized = true;
-        options.onOversizedFrame?.();
-      }
-      if (chunk.done) break;
-    }
-    if (buffer.trim() && !skippingOversized) {
-      const frame = parseFrame(buffer);
-      if (frame) onEvent(frame);
-    }
-  } finally {
-    reader.cancel().catch(() => void 0);
-  }
-}
-function backoffDelay(attempt, baseMs = 1e3, maxMs = 3e4) {
-  const exp = Math.min(baseMs * 2 ** attempt, maxMs);
-  return Math.round(exp / 2 + Math.random() * (exp / 2));
-}
-
-// src/api.ts
-var integrationPath;
-var cachedIntegration;
-var cachedIntegrationSource;
-var cachedIntegrationMtimeMs;
-var announcedToken;
-var refreshedAuth;
-var refreshTimer;
-var refreshInFlight;
-var authListeners = /* @__PURE__ */ new Set();
-var integrationListeners = /* @__PURE__ */ new Set();
-var REFRESH_LEAD_MS = 5 * 6e4;
-var MIN_REFRESH_DELAY_MS = 3e4;
-var WATCH_INTERVAL_MS = 2e3;
-function integrationCandidates() {
-  return [
-    process.env.LIBERVOX_INTEGRATION_FILE,
-    process.env.CHATLLM_INTEGRATION_FILE,
-    integrationPath
-  ].filter((p) => Boolean(p));
-}
-function initApiFromContext(context) {
-  integrationPath = (0, import_node_path.join)(context.globalStorageUri.fsPath, "../../../libervox-integration.json");
-  clearIntegrationCache();
-  announcedToken = getAuthToken();
-  const watched = [...new Set(integrationCandidates())];
-  for (const path11 of watched) {
-    (0, import_node_fs.watchFile)(path11, { interval: WATCH_INTERVAL_MS, persistent: false }, (curr, prev) => {
-      if (curr.mtimeMs === prev.mtimeMs && curr.size === prev.size) return;
-      reloadAuth();
-      for (const listener of [...integrationListeners]) listener();
-    });
-  }
-  scheduleTokenRefresh();
-  return {
-    dispose: () => {
-      for (const path11 of watched) (0, import_node_fs.unwatchFile)(path11);
-      if (refreshTimer) clearTimeout(refreshTimer);
-      refreshTimer = void 0;
-      authListeners.clear();
-      integrationListeners.clear();
-    }
-  };
-}
-function onAuthChanged(listener) {
-  authListeners.add(listener);
-  return () => authListeners.delete(listener);
-}
-function onIntegrationFileChanged(listener) {
-  integrationListeners.add(listener);
-  return () => integrationListeners.delete(listener);
-}
-function getIntegrationSnapshot() {
-  return loadIntegrationFile();
-}
-function getWebOrigin() {
-  const value = loadIntegrationFile()?.webOrigin;
-  return typeof value === "string" && value ? value : void 0;
-}
-function notifyAuthChanged() {
-  announcedToken = getAuthToken();
-  for (const listener of [...authListeners]) {
-    try {
-      listener();
-    } catch (err) {
-      console.warn("[liberide] auth listener failed:", err);
-    }
-  }
-}
-function reloadAuth() {
-  const before = announcedToken ?? getAuthToken();
-  cachedIntegration = void 0;
-  const next = loadIntegrationFile();
-  if (refreshedAuth && next?.authToken && next.authToken !== refreshedAuth.token) refreshedAuth = void 0;
-  const changed = getAuthToken() !== before;
-  scheduleTokenRefresh();
-  if (changed) notifyAuthChanged();
-  return changed;
-}
-function loadIntegrationFile() {
-  if (cachedIntegration !== void 0 && cachedSnapshotFresh()) return cachedIntegration;
-  for (const path11 of integrationCandidates()) {
-    try {
-      if ((0, import_node_fs.existsSync)(path11)) {
-        const mtimeMs = (0, import_node_fs.statSync)(path11).mtimeMs;
-        cachedIntegration = JSON.parse((0, import_node_fs.readFileSync)(path11, "utf8"));
-        cachedIntegrationSource = path11;
-        cachedIntegrationMtimeMs = mtimeMs;
-        return cachedIntegration;
-      }
-    } catch {
-    }
-  }
-  cachedIntegration = null;
-  cachedIntegrationSource = void 0;
-  cachedIntegrationMtimeMs = void 0;
-  return null;
-}
-function cachedSnapshotFresh() {
-  if (!cachedIntegrationSource) return true;
-  try {
-    return (0, import_node_fs.statSync)(cachedIntegrationSource).mtimeMs === cachedIntegrationMtimeMs;
-  } catch {
-    return false;
-  }
-}
-function clearIntegrationCache() {
-  cachedIntegration = void 0;
-  cachedIntegrationSource = void 0;
-  cachedIntegrationMtimeMs = void 0;
-}
-function getApiOrigin() {
-  const fromEnv = process.env.LIBERIDE_API_ORIGIN ?? process.env.CHATLLM_API_ORIGIN;
-  if (fromEnv) return fromEnv.replace(/\/$/, "");
-  return (loadIntegrationFile()?.apiOrigin || "").replace(/\/$/, "");
-}
-function getAuthToken() {
-  if (refreshedAuth?.token) return refreshedAuth.token;
-  const fromFile = loadIntegrationFile()?.authToken;
-  if (fromFile) return fromFile;
-  return launchEnvToken;
-}
-var AUTH_ENV_KEYS = ["LIBERIDE_AUTH_TOKEN", "CHATLLM_AUTH_TOKEN"];
-var launchEnvToken = AUTH_ENV_KEYS.map((key) => process.env[key]).find(Boolean) ?? "";
-for (const key of AUTH_ENV_KEYS) delete process.env[key];
-var AUTH_ENV_NAME = /^(LIBERIDE|CHATLLM)_.*(TOKEN|SECRET|PASSWORD|AUTH|KEY|COOKIE)/i;
-function childProcessEnv(env4 = process.env) {
-  const out = {};
-  for (const [key, value] of Object.entries(env4)) if (!AUTH_ENV_NAME.test(key)) out[key] = value;
-  return out;
-}
-var IDE_RPC_SUBPROTOCOL = "liberide.v1";
-function base64url(value) {
-  return Buffer.from(value, "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-function bearerSubprotocols(token = getAuthToken()) {
-  return token ? [IDE_RPC_SUBPROTOCOL, `bearer.${base64url(token)}`] : void 0;
-}
-function wsOrigin(httpOrigin) {
-  if (httpOrigin.startsWith("https://")) return `wss://${httpOrigin.slice("https://".length)}`;
-  if (httpOrigin.startsWith("http://")) return `ws://${httpOrigin.slice("http://".length)}`;
-  return httpOrigin;
-}
-function currentExpiresAt() {
-  const raw = refreshedAuth ? refreshedAuth.expiresAt : loadIntegrationFile()?.expiresAt;
-  if (typeof raw !== "string") return void 0;
-  const ts = Date.parse(raw);
-  return Number.isFinite(ts) ? ts : void 0;
-}
-function scheduleTokenRefresh() {
-  if (refreshTimer) clearTimeout(refreshTimer);
-  refreshTimer = void 0;
-  const expiresAt = currentExpiresAt();
-  if (!expiresAt || !getAuthToken()) return;
-  const delay = Math.max(expiresAt - Date.now() - REFRESH_LEAD_MS, MIN_REFRESH_DELAY_MS);
-  refreshTimer = setTimeout(() => {
-    refreshTimer = void 0;
-    void refreshAuthToken();
-  }, delay);
-  refreshTimer.unref?.();
-}
-function refreshAuthToken() {
-  if (refreshInFlight) return refreshInFlight;
-  refreshInFlight = (async () => {
-    const origin = getApiOrigin();
-    const token = getAuthToken();
-    if (!origin || !token) return false;
-    try {
-      const res = await fetch(`${origin}/api/auth/integrations/vscode`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }
-      });
-      if (!res.ok) return false;
-      const body = await res.json();
-      if (!body.token) return false;
-      refreshedAuth = { token: body.token, expiresAt: body.expiresAt };
-      const snapshot = loadIntegrationFile();
-      if (snapshot && cachedIntegrationSource) {
-        try {
-          writeIntegrationFile(cachedIntegrationSource, { ...snapshot, authToken: body.token, expiresAt: body.expiresAt });
-        } catch {
-        }
-      }
-      scheduleTokenRefresh();
-      notifyAuthChanged();
-      return true;
-    } catch {
-      return false;
-    } finally {
-      refreshInFlight = void 0;
-    }
-  })();
-  return refreshInFlight;
-}
-function writeIntegrationFile(path11, snapshot) {
-  const next = { ...snapshot, updatedAt: (/* @__PURE__ */ new Date()).toISOString() };
-  (0, import_node_fs.mkdirSync)((0, import_node_path.dirname)(path11), { recursive: true });
-  (0, import_node_fs.writeFileSync)(path11, JSON.stringify(next), { mode: 384 });
-  (0, import_node_fs.chmodSync)(path11, 384);
-  cachedIntegration = next;
-  cachedIntegrationSource = path11;
-  cachedIntegrationMtimeMs = (0, import_node_fs.statSync)(path11).mtimeMs;
-}
-var UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-function getIntegrationMachineId() {
-  const value = loadIntegrationFile()?.machineId;
-  return typeof value === "string" && UUID_PATTERN.test(value) ? value.toLowerCase() : void 0;
-}
-function normalizeServerUrl(input) {
-  try {
-    const url2 = new URL(input.trim());
-    if (url2.protocol !== "http:" && url2.protocol !== "https:") return void 0;
-    return `${url2.origin}${url2.pathname}`.replace(/\/+$/, "");
-  } catch {
-    return void 0;
-  }
-}
-async function pairWithServer(input) {
-  const apiOrigin = normalizeServerUrl(input.serverUrl);
-  if (!apiOrigin) throw new Error("Enter the server's http(s) URL.");
-  const res = await fetch(`${apiOrigin}/api/machines/pair`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ code: input.code, machineId: input.machineId, hostname: input.hostname, platform: input.platform })
-  });
-  if (!res.ok) {
-    const body2 = await res.json().catch(() => ({}));
-    throw new Error(`Pairing failed: ${body2.error ?? `${res.status} ${res.statusText}`}`);
-  }
-  const body = await res.json();
-  if (!body.authToken) throw new Error("Pairing failed: the server returned no token.");
-  const target = cachedIntegrationSource ?? integrationCandidates()[0];
-  if (!target) throw new Error("Pairing failed: no location for the LiberIDE integration file.");
-  writeIntegrationFile(target, {
-    ...loadIntegrationFile() ?? {},
-    apiOrigin: body.apiOrigin ?? apiOrigin,
-    webOrigin: body.webOrigin,
-    authToken: body.authToken,
-    expiresAt: body.expiresAt,
-    machineId: body.machineId ?? input.machineId
-  });
-  refreshedAuth = void 0;
-  scheduleTokenRefresh();
-  notifyAuthChanged();
-  return { apiOrigin: body.apiOrigin ?? apiOrigin, machineId: body.machineId ?? input.machineId };
-}
-async function recoverFromUnauthorized() {
-  if (reloadAuth()) return true;
-  return refreshAuthToken();
-}
-function getIntegrationIdentity() {
-  const snapshot = loadIntegrationFile();
-  if (!snapshot?.userId) return void 0;
-  return {
-    id: snapshot.userId,
-    email: snapshot.userEmail,
-    name: snapshot.userName
-  };
-}
-function authHeaders(extra) {
-  const headers = { "Content-Type": "application/json", ...extra ?? {} };
-  const token = getAuthToken();
-  if (token) headers.Authorization = `Bearer ${token}`;
-  return headers;
-}
-async function apiFetch(path11, init) {
-  const origin = getApiOrigin();
-  if (!origin) throw new Error("LIBERIDE_API_ORIGIN is not set.");
-  const url2 = path11.startsWith("http") ? path11 : `${origin}${path11}`;
-  const isForm = typeof FormData !== "undefined" && init?.body instanceof FormData;
-  const send = () => {
-    const headers = { ...authHeaders(), ...init?.headers };
-    if (isForm) delete headers["Content-Type"];
-    return fetch(url2, { ...init, headers });
-  };
-  const response = await send();
-  const replayable = init?.body === void 0 || init.body === null || typeof init.body === "string" || isForm;
-  if (response.status !== 401 || init?.signal?.aborted || !replayable) return response;
-  if (!await recoverFromUnauthorized()) return response;
-  response.body?.cancel().catch(() => void 0);
-  return send();
-}
-async function probeBackend() {
-  if (!getApiOrigin()) return "unconfigured";
-  try {
-    const res = await apiFetch("/api/config");
-    if (res.ok) return "ok";
-    if (res.status === 401 || res.status === 403) return "unauthorized";
-    return "unreachable";
-  } catch {
-    return "unreachable";
-  }
-}
-async function readJson(res) {
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`${res.status} ${res.statusText}${body ? ` \u2014 ${body.slice(0, 300)}` : ""}`);
-  }
-  return await res.json();
-}
-async function readNothing(res) {
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`${res.status} ${res.statusText}${body ? ` \u2014 ${body.slice(0, 300)}` : ""}`);
-  }
-}
-async function fetchConfig() {
-  return readJson(await apiFetch("/api/config"));
-}
-async function createAuthHandoff(next) {
-  return readJson(
-    await apiFetch("/api/auth/handoff", { method: "POST", body: JSON.stringify({ next }), signal: AbortSignal.timeout(5e3) })
-  );
-}
-async function fetchAuthenticatedUser() {
-  const payload = await readJson(await apiFetch("/api/auth/me"));
-  if (!payload.user?.id) throw new Error("Authenticated user response did not include an id.");
-  return payload.user;
-}
-async function listConversations() {
-  return readJson(await apiFetch("/api/conversations"));
-}
-async function createConversation(title) {
-  return readJson(
-    await apiFetch("/api/conversations", { method: "POST", body: JSON.stringify({ title }) })
-  );
-}
-async function patchConversation(id, partial2) {
-  return readJson(
-    await apiFetch(`/api/conversations/${encodeURIComponent(id)}`, {
-      method: "PATCH",
-      body: JSON.stringify(partial2)
-    })
-  );
-}
-async function deleteConversation(id) {
-  await readNothing(
-    await apiFetch(`/api/conversations/${encodeURIComponent(id)}`, { method: "DELETE" })
-  );
-}
-async function listConversationMessages(id) {
-  return readJson(
-    await apiFetch(`/api/conversations/${encodeURIComponent(id)}/messages`)
-  );
-}
-async function listFolders(filter = "mine") {
-  return readJson(
-    await apiFetch(`/api/folders?filter=${encodeURIComponent(filter)}`)
-  );
-}
-async function createFolder(input) {
-  return readJson(
-    await apiFetch("/api/folders", { method: "POST", body: JSON.stringify(input) })
-  );
-}
-async function addConversationToFolder(folderId, conversationId) {
-  await readNothing(
-    await apiFetch(
-      `/api/folders/${encodeURIComponent(folderId)}/conversations/${encodeURIComponent(conversationId)}`,
-      { method: "POST" }
-    )
-  );
-}
-async function listDocuments() {
-  return readJson(await apiFetch("/api/documents"));
-}
-async function uploadDocument(file2) {
-  const form = new FormData();
-  const bytes = file2.bytes.slice();
-  const blob = new Blob([bytes], { type: file2.mimeType ?? "application/octet-stream" });
-  form.append("file", blob, file2.name);
-  const response = await apiFetch("/api/documents", { method: "POST", body: form });
-  const payload = await readJson(response);
-  return payload.document;
-}
-function subscribeConversationListSync(onChange) {
-  let closed = false;
-  let pollTimer = null;
-  let retryTimer = null;
-  let abort = null;
-  let attempt = 0;
-  let generation = 0;
-  const startPoll = () => {
-    if (pollTimer || closed) return;
-    pollTimer = setInterval(() => onChange({ type: "resync" }), 3e4);
-  };
-  const stopPoll = () => {
-    if (pollTimer) clearInterval(pollTimer);
-    pollTimer = null;
-  };
-  const scheduleReconnect = () => {
-    if (closed || retryTimer) return;
-    startPoll();
-    retryTimer = setTimeout(() => {
-      retryTimer = null;
-      void connect();
-    }, backoffDelay(attempt++, 2e3, 6e4));
-  };
-  const connect = async () => {
-    if (closed) return;
-    const gen = ++generation;
-    const origin = getApiOrigin();
-    if (!origin) {
-      scheduleReconnect();
-      return;
-    }
-    abort = new AbortController();
-    try {
-      const response = await fetch(`${origin}/api/conversations/stream`, {
-        headers: authHeaders({ Accept: "text/event-stream" }),
-        signal: abort.signal
-      });
-      if (response.status === 401) {
-        response.body?.cancel().catch(() => void 0);
-        if (!await recoverFromUnauthorized() && gen === generation) scheduleReconnect();
-        return;
-      }
-      if (!response.ok || !response.body) {
-        response.body?.cancel().catch(() => void 0);
-        scheduleReconnect();
-        return;
-      }
-      const wasReconnect = attempt > 0;
-      attempt = 0;
-      stopPoll();
-      if (wasReconnect) onChange({ type: "resync" });
-      await readSseStream(response.body, ({ data }) => {
-        const event = data;
-        if (!event || typeof event !== "object") return;
-        if (event.type === "conversations_changed" || event.type === "folders_changed" || event.type === "message_updated") {
-          onChange({ type: event.type, conversationId: event.conversationId, messageId: event.messageId });
-        }
-      }, { idleTimeoutMs: 6e4 });
-    } catch {
-    }
-    if (!closed && gen === generation) {
-      attempt = Math.max(attempt, 1);
-      scheduleReconnect();
-    }
-  };
-  const offAuth = onAuthChanged(() => {
-    if (closed) return;
-    abort?.abort();
-    if (retryTimer) clearTimeout(retryTimer);
-    retryTimer = null;
-    attempt = 1;
-    void connect();
-  });
-  void connect();
-  return () => {
-    closed = true;
-    offAuth();
-    abort?.abort();
-    stopPoll();
-    if (retryTimer) clearTimeout(retryTimer);
-  };
-}
-async function listApprovalGrants(options) {
-  const params = new URLSearchParams();
-  if (options?.conversationId) params.set("conversationId", options.conversationId);
-  if (options?.scope) params.set("scope", options.scope);
-  if (options?.activeOnly) params.set("activeOnly", "true");
-  const qs = params.toString();
-  return readJson(await apiFetch(`/api/approval-grants${qs ? `?${qs}` : ""}`));
-}
-async function revokeApprovalGrant(id) {
-  await readNothing(
-    await apiFetch(`/api/approval-grants/${encodeURIComponent(id)}`, { method: "DELETE" })
-  );
-}
-async function listPermissionPolicies() {
-  const res = await apiFetch("/api/permission-policies");
-  if (res.status === 401 || res.status === 403) return { forbidden: true };
-  return { policies: await readJson(res) };
-}
-async function listMcpServers() {
-  return readJson(await apiFetch("/api/mcp/servers"));
-}
-async function setMcpServerEnabledForUser(id, enabled) {
-  await readNothing(
-    await apiFetch(`/api/mcp/servers/${encodeURIComponent(id)}/user`, {
-      method: "PATCH",
-      body: JSON.stringify({ enabled })
-    })
-  );
-}
-async function listExecutionGraphs(options) {
-  const params = new URLSearchParams();
-  if (options?.status) params.set("status", options.status);
-  if (options?.limit) params.set("limit", String(options.limit));
-  const qs = params.toString();
-  return readJson(await apiFetch(`/api/execution-graphs${qs ? `?${qs}` : ""}`));
-}
-
-// src/chat/continuation.ts
-var import_node_path2 = require("node:path");
-var STARTUP_REQUEST_MAX_AGE_MS = 5 * 6e4;
-var listeners = /* @__PURE__ */ new Set();
-var pending;
-var lastStartupRequest;
-function onConversationOpenRequest(listener) {
-  listeners.add(listener);
-  if (pending) {
-    const id = pending;
-    pending = void 0;
-    listener(id);
-  }
-  return () => listeners.delete(listener);
-}
-function requestConversationOpen(conversationId) {
-  if (!listeners.size) {
-    pending = conversationId;
-    return;
-  }
-  for (const listener of [...listeners]) listener(conversationId);
-}
-function parseConversationOpenParams(params) {
-  const id = params && typeof params === "object" ? params.conversationId : void 0;
-  return typeof id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(id) ? id : void 0;
-}
-function continueInBrowserUrl(webOrigin, conversationId) {
-  if (typeof webOrigin !== "string" || !conversationId || conversationId.startsWith("draft:")) return void 0;
-  let base;
-  try {
-    const url2 = new URL(webOrigin.trim());
-    if (url2.protocol !== "http:" && url2.protocol !== "https:") return void 0;
-    base = `${url2.origin}${url2.pathname}`.replace(/\/+$/, "");
-  } catch {
-    return void 0;
-  }
-  return `${base}/c/${encodeURIComponent(conversationId)}`;
-}
-function acceptHandoffUrl(value, plainUrl) {
-  if (typeof value !== "string") return void 0;
-  try {
-    const url2 = new URL(value);
-    if (url2.origin !== new URL(plainUrl).origin || url2.pathname !== "/auth/handoff" || url2.search) return void 0;
-    return new URLSearchParams(url2.hash.slice(1)).get("code") ? url2.toString() : void 0;
-  } catch {
-    return void 0;
-  }
-}
-async function resolveContinueInBrowserUrl(plainUrl, conversationId, mint) {
-  try {
-    const minted = await mint(`/c/${encodeURIComponent(conversationId)}`);
-    return acceptHandoffUrl(minted?.url, plainUrl) ?? plainUrl;
-  } catch {
-    return plainUrl;
-  }
-}
-function samePath(a, b) {
-  const norm = (p) => (0, import_node_path2.resolve)(p).replace(/[\\/]+$/, "");
-  return process.platform === "win32" || process.platform === "darwin" ? norm(a).toLowerCase() === norm(b).toLowerCase() : norm(a) === norm(b);
-}
-function takeStartupConversationRequest(snapshot, folders, now = Date.now()) {
-  const conversationId = parseConversationOpenParams(snapshot);
-  if (!snapshot || !conversationId || typeof snapshot.conversationRequestedAt !== "string") return void 0;
-  const requestedAt = Date.parse(snapshot.conversationRequestedAt);
-  if (!Number.isFinite(requestedAt) || now - requestedAt > STARTUP_REQUEST_MAX_AGE_MS) return void 0;
-  const projectPath = typeof snapshot.projectPath === "string" ? snapshot.projectPath : "";
-  if (projectPath ? !folders.some((folder) => samePath(folder, projectPath)) : folders.length > 0) return void 0;
-  const key = `${conversationId}@${snapshot.conversationRequestedAt}`;
-  if (key === lastStartupRequest) return void 0;
-  lastStartupRequest = key;
-  return conversationId;
-}
-
-// src/panel/panel.ts
-var import_node_crypto2 = require("node:crypto");
-var vscode5 = __toESM(require("vscode"));
-
-// src/spec/dag.ts
-function validateDag(tasks3) {
-  const ids = new Set(tasks3.map((task) => task.id));
-  const indegree = new Map(tasks3.map((task) => [task.id, 0]));
-  const adjacency = new Map(tasks3.map((task) => [task.id, []]));
-  for (const task of tasks3) {
-    for (const dep of task.dependsOn) {
-      if (!ids.has(dep)) return { ok: false, order: [], error: `Task ${task.id} depends on unknown task ${dep}` };
-      if (dep === task.id) return { ok: false, order: [], error: `Task ${task.id} cannot depend on itself` };
-      adjacency.get(dep)?.push(task.id);
-      indegree.set(task.id, (indegree.get(task.id) ?? 0) + 1);
-    }
-  }
-  const queue = [...indegree.entries()].filter(([, degree]) => degree === 0).map(([id]) => id);
-  const order = [];
-  while (queue.length) {
-    const id = queue.shift();
-    order.push(id);
-    for (const next of adjacency.get(id) ?? []) {
-      const degree = (indegree.get(next) ?? 0) - 1;
-      indegree.set(next, degree);
-      if (degree === 0) queue.push(next);
-    }
-  }
-  return order.length === tasks3.length ? { ok: true, order } : { ok: false, order: [], error: "Task dependencies contain a cycle" };
-}
-function computeTaskReadiness(tasks3) {
-  const status = new Map(tasks3.map((task) => [task.id, task.status]));
-  return new Map(tasks3.map((task) => {
-    const blockedBy = task.dependsOn.filter((dep) => status.get(dep) !== "completed");
-    return [task.id, { ready: blockedBy.length === 0 && task.status !== "completed", blockedBy }];
-  }));
-}
-function effectiveStatus(task, readiness) {
-  if (["running", "completed", "failed"].includes(task.status)) return task.status;
-  const info = readiness.get(task.id);
-  if (info?.blockedBy.length) return "blocked";
-  return info?.ready ? "ready" : task.status;
-}
-function groupTasksByStatus(tasks3) {
-  const readiness = computeTaskReadiness(tasks3);
-  const groups = { pending: [], ready: [], running: [], completed: [], blocked: [], failed: [] };
-  for (const task of tasks3) groups[effectiveStatus(task, readiness)].push(task);
-  return groups;
-}
-
-// src/dispatch/client.ts
-function taskInput(feature, task) {
-  return [
-    `# Task ${task.id}: ${task.title}`,
-    `Feature: ${feature.name}`,
-    `Requirements: ${task.requirementRefs.join(", ") || "(none)"}`,
-    `Design: ${task.designRefs.join(", ") || "(none)"}`,
-    "",
-    "## Architecture hints",
-    task.architectureHints || "(none)",
-    "",
-    "## Instructions",
-    task.body
-  ].join("\n").slice(0, 2e3);
-}
-async function dispatchFeature(feature, options = {}) {
-  const tasks3 = options.taskIds?.length ? feature.tasks.filter((task) => options.taskIds.includes(task.id)) : feature.tasks;
-  const validation = validateDag(tasks3);
-  if (!validation.ok) throw new Error(validation.error);
-  const response = await apiFetch("/api/specs/dispatch", {
-    method: "POST",
-    body: JSON.stringify({
-      feature: feature.id,
-      goal: `Spec dispatch: ${feature.name}`,
-      conversationId: options.conversationId,
-      ideContext: options.ideContext,
-      priority: "FOREGROUND",
-      ...options.swarm ? { swarm: true, isolation: options.isolation ?? "shared" } : {},
-      ...feature.documentation?.length ? { documentation: feature.documentation } : {},
-      ...feature.blockers?.length ? { blockers: feature.blockers } : {},
-      nodes: tasks3.map((task) => ({
-        id: task.id,
-        type: "IMPLEMENT",
-        title: task.title,
-        inputSummary: taskInput(feature, task),
-        dependsOn: task.dependsOn,
-        metadata: { taskId: task.id, produces_context: task.producesContext, requirement_refs: task.requirementRefs, design_refs: task.designRefs },
-        agent: task.agent,
-        expectedFiles: task.expectedFiles,
-        acceptance: task.acceptance,
-        requirementRefs: task.requirementRefs,
-        designRefs: task.designRefs,
-        producesContext: task.producesContext
-      }))
-    })
-  });
-  if (!response.ok) {
-    const err = await response.json().catch(() => ({ error: response.statusText }));
-    throw new Error(err.error ?? response.statusText);
-  }
-  return response.json();
-}
-var TERMINAL_GRAPH_STATUSES = /* @__PURE__ */ new Set(["completed", "failed", "cancelled"]);
-function isTerminalGraphStatus(status) {
-  return Boolean(status && TERMINAL_GRAPH_STATUSES.has(status));
-}
-function taskIdFromNodeEvent(event, graphId) {
-  if (typeof event.templateNodeId === "string" && event.templateNodeId) return event.templateNodeId;
-  if (!event.nodeId) return void 0;
-  const prefix = `${graphId}_`;
-  return event.nodeId.startsWith(prefix) ? event.nodeId.slice(prefix.length) : event.nodeId;
-}
-function nodeEventError(event) {
-  return event.status === "failed" && typeof event.error === "string" && event.error.trim() ? event.error.trim() : void 0;
-}
-function taskStatusFromEvent(event, graphId) {
-  if (!event.status) return void 0;
-  if (event.type === "task_status") {
-    if (typeof event.taskId !== "string" || !event.taskId) return void 0;
-    return { taskId: event.taskId, status: event.status, ...nodeEventError(event) ? { error: nodeEventError(event) } : {} };
-  }
-  if (event.type !== "node_status" || typeof event.taskId === "string") return void 0;
-  const taskId = taskIdFromNodeEvent(event, graphId);
-  if (!taskId) return void 0;
-  return { taskId, status: event.status, ...nodeEventError(event) ? { error: nodeEventError(event) } : {} };
-}
-var GRAPH_POLL_MS = 1e4;
-var MAX_RECONNECT_ATTEMPTS = 8;
-function subscribeExecutionGraphEvents(graphId, onEvent, options = {}) {
-  let closed = false;
-  let finished = false;
-  let attempt = 0;
-  let abort = null;
-  let retryTimer = null;
-  let pollTimer = null;
-  const stop = () => {
-    closed = true;
-    abort?.abort();
-    if (retryTimer) clearTimeout(retryTimer);
-    if (pollTimer) clearInterval(pollTimer);
-    retryTimer = null;
-    pollTimer = null;
-  };
-  const finish = (status) => {
-    if (finished || closed) return;
-    finished = true;
-    stop();
-    onEvent({ type: "done", status });
-  };
-  const emit = (event) => {
-    if (closed) return;
-    if (event.type === "done") {
-      finish(event.status);
-      return;
-    }
-    onEvent(event);
-    if ((event.type === "graph_status" || event.type === "init") && isTerminalGraphStatus(event.status)) finish(event.status);
-  };
-  const fail = (message) => {
-    if (closed) return;
-    options.log?.(`graph ${graphId}: ${message}`);
-    options.onError?.(message, false);
-    options.onDisconnect?.();
-    stop();
-  };
-  const scheduleReconnect = (reason) => {
-    if (closed || retryTimer) return;
-    if (attempt >= MAX_RECONNECT_ATTEMPTS) {
-      fail(`Lost the graph event stream: ${reason}`);
-      return;
-    }
-    options.log?.(`graph ${graphId}: reconnecting (${reason})`);
-    options.onError?.(reason, true);
-    retryTimer = setTimeout(() => {
-      retryTimer = null;
-      void connect();
-    }, backoffDelay(attempt++, 1e3, 3e4));
-  };
-  const poll = async () => {
-    if (closed) return;
-    try {
-      const res = await apiFetch(`/api/execution-graphs/${encodeURIComponent(graphId)}`);
-      if (res.status === 404) {
-        fail("Execution graph not found.");
-        return;
-      }
-      if (!res.ok) return;
-      const graph = await res.json();
-      if (graph.status) emit({ type: "graph_status", status: graph.status });
-    } catch {
-    }
-  };
-  const connect = async () => {
-    if (closed) return;
-    const origin = getApiOrigin();
-    if (!origin) {
-      fail("LIBERIDE_API_ORIGIN is not set.");
-      return;
-    }
-    abort = new AbortController();
-    try {
-      const response = await apiFetch(`/api/execution-graphs/${encodeURIComponent(graphId)}/events/stream`, {
-        headers: { Accept: "text/event-stream" },
-        signal: abort.signal
-      });
-      if (response.status === 404) {
-        response.body?.cancel().catch(() => void 0);
-        fail("Execution graph not found.");
-        return;
-      }
-      if (response.status === 401 || response.status === 403) {
-        response.body?.cancel().catch(() => void 0);
-        fail(response.status === 401 ? "Not signed in (401) \u2014 cannot follow the graph." : "Not allowed to view this graph.");
-        return;
-      }
-      if (!response.ok || !response.body) {
-        response.body?.cancel().catch(() => void 0);
-        scheduleReconnect(`HTTP ${response.status}`);
-        return;
-      }
-      attempt = 0;
-      options.onConnected?.();
-      await readSseStream(response.body, ({ event, data }) => {
-        const payload = data && typeof data === "object" ? data : {};
-        if (event === "init") {
-          emit({ ...payload, type: "init", status: typeof payload.graphStatus === "string" ? payload.graphStatus : void 0 });
-          return;
-        }
-        if (event === "connected" || event === "stream_closed") return;
-        emit({ ...payload, type: event });
-      }, { idleTimeoutMs: 9e4 });
-      if (!closed) scheduleReconnect("stream ended before the graph finished");
-    } catch (err) {
-      if (closed) return;
-      scheduleReconnect(err instanceof Error ? err.message : String(err));
-    }
-  };
-  pollTimer = setInterval(() => void poll(), GRAPH_POLL_MS);
-  void connect();
-  return stop;
-}
-async function cancelExecutionGraph(graphId) {
-  const response = await apiFetch(`/api/execution-graphs/${encodeURIComponent(graphId)}/cancel`, { method: "POST" });
-  if (!response.ok && response.status !== 404) {
-    const err = await response.json().catch(() => ({ error: response.statusText }));
-    throw new Error(err.error ?? response.statusText);
-  }
-}
-async function fetchGraphDetail(graphId) {
-  const res = await apiFetch(`/api/execution-graphs/${graphId}/detail`);
-  if (!res.ok) throw new Error(`Failed to load graph detail: ${res.status} ${res.statusText}`);
-  const detail = await res.json();
-  return { nodes: detail.nodes ?? [], approvals: detail.approvals ?? [] };
-}
-async function resolveNodeApproval(graphId, nodeId, decision, note) {
-  const res = await apiFetch(`/api/execution-graphs/${graphId}/nodes/${encodeURIComponent(nodeId)}/approval`, {
-    method: "POST",
-    body: JSON.stringify({ decision, note })
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(body.error ?? `Approval failed: ${res.status}`);
-  }
-}
-async function getWorkingMemory(graphId) {
-  const res = await apiFetch(`/api/execution-graphs/${graphId}/working-memory`);
-  if (res.status === 404) return null;
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(body.error ?? `Failed to load working memory: ${res.status}`);
-  }
-  return await res.json();
-}
-async function patchWorkingMemory(graphId, patch) {
-  const res = await apiFetch(`/api/execution-graphs/${graphId}/working-memory`, {
-    method: "PATCH",
-    body: JSON.stringify(patch)
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(body.error ?? `Failed to update working memory: ${res.status}`);
-  }
-}
-async function addFollowUp(graphId, additionalGoal) {
-  const res = await apiFetch(`/api/execution-graphs/${graphId}/follow-up`, {
-    method: "POST",
-    body: JSON.stringify({ additionalGoal })
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(body.error ?? `Follow-up failed: ${res.status}`);
-  }
-}
-async function getGraphMetrics(graphId) {
-  const res = await apiFetch(`/api/execution-graphs/${graphId}/metrics`);
-  if (res.status === 404) return null;
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(body.error ?? `Failed to load metrics: ${res.status}`);
-  }
-  return await res.json();
-}
-async function listGraphArtifacts(graphId) {
-  const res = await apiFetch(`/api/execution-graphs/${graphId}/artifacts`);
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(body.error ?? `Failed to list artifacts: ${res.status}`);
-  }
-  return await res.json();
-}
-async function retryGraph(graphId) {
-  const res = await apiFetch(`/api/execution-graphs/${graphId}/retry`, { method: "POST" });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(body.error ?? `Retry failed: ${res.status}`);
-  }
-}
-async function replayFromNode(graphId, nodeId, reason) {
-  const res = await apiFetch(`/api/execution-graphs/${graphId}/replay-from/${encodeURIComponent(nodeId)}`, {
-    method: "POST",
-    body: JSON.stringify({ reason: reason ?? "manual_replay" })
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(body.error ?? `Replay failed: ${res.status}`);
-  }
-  const out = await res.json();
-  return out.replayed ?? 0;
-}
-async function resolveGraphApproval(graphId, approvalId, status, response) {
-  const res = await apiFetch(`/api/execution-graphs/${graphId}/approvals/${encodeURIComponent(approvalId)}`, {
-    method: "PATCH",
-    body: JSON.stringify({ status, response })
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(body.error ?? `Approval failed: ${res.status}`);
-  }
-}
-
-// src/ide-delegate/context.ts
-var vscode2 = __toESM(require("vscode"));
-
-// src/ide-delegate/machine.ts
-var import_node_crypto = require("node:crypto");
-var MACHINE_ID_STATE_KEY = "liberide.machineId";
-var storedMachineId;
-var extensionVersion;
-var workspaceIds = /* @__PURE__ */ new Map();
-function initMachineIdentity(context) {
-  const existing = context.globalState.get(MACHINE_ID_STATE_KEY);
-  if (typeof existing === "string" && UUID_PATTERN.test(existing)) {
-    storedMachineId = existing.toLowerCase();
-  } else {
-    storedMachineId = (0, import_node_crypto.randomUUID)();
-    void context.globalState.update(MACHINE_ID_STATE_KEY, storedMachineId);
-  }
-  const version2 = context.extension?.packageJSON?.version;
-  extensionVersion = typeof version2 === "string" ? version2 : void 0;
-  return currentMachineId();
-}
-function currentMachineId() {
-  const fromFile = getIntegrationMachineId();
-  if (fromFile) return fromFile;
-  storedMachineId ??= (0, import_node_crypto.randomUUID)();
-  return storedMachineId;
-}
-function currentExtensionVersion() {
-  return extensionVersion;
-}
-function setWorkspaceId(rootPath, workspaceId) {
-  workspaceIds.set(rootPath, workspaceId);
-}
-function workspaceIdFor(rootPath) {
-  return workspaceIds.get(rootPath);
-}
-
-// src/ide-delegate/identity.ts
-var FALLBACK_USER_ID = "default";
-var cachedIdentity = getIntegrationIdentity();
-var warnedFallback = false;
-function currentIdeIdentity() {
-  return cachedIdentity ?? { id: FALLBACK_USER_ID };
-}
-function currentIdeUserId() {
-  return currentIdeIdentity().id || FALLBACK_USER_ID;
-}
-async function refreshIdeIdentity(log) {
-  const integrationIdentity = getIntegrationIdentity();
-  if (integrationIdentity?.id) cachedIdentity = integrationIdentity;
-  try {
-    const user = await fetchAuthenticatedUser();
-    cachedIdentity = user;
-    warnedFallback = false;
-    return user;
-  } catch (err) {
-    if (!cachedIdentity) {
-      cachedIdentity = { id: FALLBACK_USER_ID };
-      if (!warnedFallback) {
-        warnedFallback = true;
-        log?.(`Using fallback IDE identity "${FALLBACK_USER_ID}": ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-    return cachedIdentity;
-  }
-}
-
-// src/workspace/intelligence.ts
-var vscode = __toESM(require("vscode"));
-var import_node_fs2 = require("node:fs");
-var import_node_path3 = require("node:path");
-var cache = /* @__PURE__ */ new Map();
-var watcherRegistered = false;
-function detectPackageManager(root) {
-  if ((0, import_node_fs2.existsSync)((0, import_node_path3.join)(root, "bun.lock"))) return "bun";
-  if ((0, import_node_fs2.existsSync)((0, import_node_path3.join)(root, "pnpm-lock.yaml"))) return "pnpm";
-  if ((0, import_node_fs2.existsSync)((0, import_node_path3.join)(root, "yarn.lock"))) return "yarn";
-  if ((0, import_node_fs2.existsSync)((0, import_node_path3.join)(root, "package-lock.json"))) return "npm";
-  if ((0, import_node_fs2.existsSync)((0, import_node_path3.join)(root, "Cargo.toml"))) return "cargo";
-  if ((0, import_node_fs2.existsSync)((0, import_node_path3.join)(root, "pyproject.toml"))) return "python";
-  return void 0;
-}
-function detectPackageScripts(root) {
-  const packageJson = (0, import_node_path3.join)(root, "package.json");
-  if (!(0, import_node_fs2.existsSync)(packageJson)) return {};
-  try {
-    const pkg = JSON.parse((0, import_node_fs2.readFileSync)(packageJson, "utf8"));
-    const scripts = pkg.scripts ?? {};
-    return {
-      test: scripts.test ? "npm test" : void 0,
-      build: scripts.build ? "npm run build" : void 0,
-      typecheck: scripts.typecheck ? "npm run typecheck" : scripts.check ? "npm run check" : void 0,
-      lint: scripts.lint ? "npm run lint" : void 0
-    };
-  } catch {
-    return {};
-  }
-}
-function detectRootMarkers(root) {
-  return [
-    "package.json",
-    "tsconfig.json",
-    "pyproject.toml",
-    "Cargo.toml",
-    "go.mod",
-    ".git",
-    ".vscode/tasks.json",
-    ".chatllm/diagnostics.json"
-  ].filter((marker) => (0, import_node_fs2.existsSync)((0, import_node_path3.join)(root, marker)));
-}
-function detectInstructionFiles(root) {
-  return ["AGENTS.md", "README.md", "CONTRIBUTING.md", ".github/copilot-instructions.md"].filter(
-    (file2) => (0, import_node_fs2.existsSync)((0, import_node_path3.join)(root, file2))
-  );
-}
-async function detectGit(root) {
-  const ext = vscode.extensions.getExtension("vscode.git");
-  if (!ext) return void 0;
-  if (!ext.isActive) await ext.activate();
-  const api = ext.exports?.getAPI?.(1);
-  const repo = api?.repositories?.find((r) => r.rootUri?.fsPath === root);
-  if (!repo) return void 0;
-  return {
-    branch: repo.state?.HEAD?.name,
-    remoteUrl: repo.state?.remotes?.[0]?.fetchUrl ?? repo.state?.remotes?.[0]?.pushUrl
-  };
-}
-async function detectTasks() {
-  try {
-    const tasks3 = await vscode.tasks.fetchTasks();
-    return tasks3.slice(0, 25).map((task) => ({
-      name: task.name,
-      source: String(task.source),
-      group: task.group?.id
-    }));
-  } catch {
-    return [];
-  }
-}
-function detectLanguages() {
-  const languages3 = /* @__PURE__ */ new Set();
-  for (const editor of vscode.window.visibleTextEditors) {
-    if (editor.document.languageId) languages3.add(editor.document.languageId);
-  }
-  return [...languages3].slice(0, 20);
-}
-async function refreshWorkspaceIntelligence(output) {
-  if (!watcherRegistered) {
-    watcherRegistered = true;
-    vscode.workspace.onDidChangeWorkspaceFolders(() => {
-      void refreshWorkspaceIntelligence(output);
-    });
-    vscode.window.onDidChangeVisibleTextEditors(() => {
-      void refreshWorkspaceIntelligence(output);
-    });
-  }
-  for (const folder of vscode.workspace.workspaceFolders ?? []) {
-    const root = folder.uri.fsPath;
-    try {
-      cache.set(root, {
-        rootPath: root,
-        packageManager: detectPackageManager(root),
-        languages: detectLanguages(),
-        rootMarkers: detectRootMarkers(root),
-        git: await detectGit(root),
-        tasks: await detectTasks(),
-        commands: detectPackageScripts(root),
-        instructionFiles: detectInstructionFiles(root),
-        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
-      });
-    } catch (err) {
-      output?.appendLine(`[workspace] failed to refresh ${root}: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-}
-function getWorkspaceIntelligence(rootPath) {
-  return cache.get(rootPath);
-}
-
-// src/ide-delegate/context.ts
-function activeWorkspaceFolder() {
-  const active = vscode2.window.activeTextEditor?.document.uri;
-  return (active && vscode2.workspace.getWorkspaceFolder(active)) ?? vscode2.workspace.workspaceFolders?.[0];
-}
-function buildIdeContextPayload(conversationId) {
-  const folder = activeWorkspaceFolder();
-  if (!folder) return void 0;
-  return {
-    sessionId: `vscode-${folder.name}`,
-    // The server authorizes with the authenticated user; these are informational.
-    userId: currentIdeUserId(),
-    ideUserId: currentIdeUserId(),
-    ideSessionId: `vscode-${folder.name}`,
-    projectPath: folder.uri.fsPath,
-    mode: "desktop",
-    terminalExecutor: "client",
-    conversationId,
-    // Lets the server pin tool calls to this machine's window for the folder.
-    machineId: currentMachineId(),
-    workspaceId: workspaceIdFor(folder.uri.fsPath),
-    workspaceIntelligence: getWorkspaceIntelligence(folder.uri.fsPath)
-  };
-}
-
-// src/settings.ts
-var vscode3 = __toESM(require("vscode"));
-var SECTION = "liberide";
-function readSettings() {
-  const cfg = vscode3.workspace.getConfiguration(SECTION);
-  return {
-    modelSelection: cfg.get("modelSelection") ?? "auto",
-    chatMode: "agent",
-    useRag: cfg.get("useRag") ?? false,
-    toolsEnabled: true,
-    systemPrompt: cfg.get("systemPrompt") ?? "",
-    copilotUiEnabled: cfg.get("copilot.enabled") ?? false,
-    copilotModelsEnabled: cfg.get("copilot.modelsEnabled") ?? true,
-    defaultAllowedAgentIds: cfg.get("defaultAllowedAgentIds") ?? [],
-    swarm: cfg.get("swarm") ?? false,
-    isolation: cfg.get("isolation") ?? "shared",
-    confirmEdits: cfg.get("confirmEdits") ?? "off",
-    dispatchSkipPreview: cfg.get("dispatch.skipPreview") ?? false
-  };
-}
-var FLAT_TO_DOTTED = {
-  copilotUiEnabled: "copilot.enabled",
-  copilotModelsEnabled: "copilot.modelsEnabled"
-};
-async function writeSetting(key, value) {
-  const dotted = FLAT_TO_DOTTED[key] ?? key;
-  await vscode3.workspace.getConfiguration(SECTION).update(dotted, value, vscode3.ConfigurationTarget.Global);
-}
-function onSettingsChange(listener) {
-  return vscode3.workspace.onDidChangeConfiguration((event) => {
-    if (event.affectsConfiguration(SECTION)) listener(readSettings());
-  });
-}
-
-// src/spec/writer.ts
-var vscode4 = __toESM(require("vscode"));
-
-// src/spec/schema.ts
-var TASK_STATUSES = /* @__PURE__ */ new Set(["pending", "ready", "running", "completed", "blocked", "failed"]);
-var FEATURE_STATUSES = /* @__PURE__ */ new Set(["draft", "design", "tasks", "dispatching", "done"]);
-function asStringArray(value) {
-  return Array.isArray(value) ? value.filter((v) => typeof v === "string") : [];
-}
-function unquoteScalar(value) {
-  const trimmed = value.trim();
-  if (trimmed.length >= 2) {
-    const first = trimmed[0];
-    const last = trimmed[trimmed.length - 1];
-    if (first === '"' && last === '"' || first === "'" && last === "'") {
-      return trimmed.slice(1, -1);
-    }
-  }
-  return trimmed;
-}
-function parseInlineArray(value) {
-  const trimmed = value.trim();
-  if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) return [];
-  const inner = trimmed.slice(1, -1).trim();
-  if (!inner) return [];
-  return inner.split(",").map((v) => unquoteScalar(v)).filter((v) => v.length > 0);
-}
-function parseFrontmatter(raw) {
-  const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
-  if (!match) return { data: {}, body: raw };
-  const data = {};
-  const lines = match[1].split(/\r?\n/);
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line.trim()) continue;
-    if (/^\s/.test(line)) continue;
-    const colon = line.indexOf(":");
-    if (colon < 0) continue;
-    const key = line.slice(0, colon).trim();
-    const rawValue = line.slice(colon + 1).trim();
-    if (rawValue === "|") {
-      const block = [];
-      while (lines[i + 1]?.startsWith("  ")) block.push(lines[++i].slice(2));
-      data[key] = block.join("\n");
-    } else if (rawValue.startsWith("[")) {
-      data[key] = parseInlineArray(rawValue);
-    } else if (rawValue === "") {
-      const items = [];
-      while (i + 1 < lines.length) {
-        const next = lines[i + 1];
-        const dashMatch = next.match(/^\s+-\s+(.*)$/);
-        if (!dashMatch) break;
-        items.push(unquoteScalar(dashMatch[1]));
-        i += 1;
-      }
-      data[key] = items.length > 0 ? items : "";
-    } else {
-      data[key] = unquoteScalar(rawValue);
-    }
-  }
-  return { data, body: match[2] };
-}
-function parseTaskContract(featureId, filePath, raw) {
-  const { data, body } = parseFrontmatter(raw);
-  const id = String(data.id ?? "").trim();
-  const title = String(data.title ?? "").trim();
-  if (!id || !title) return void 0;
-  const statusRaw = String(data.status ?? "pending").trim();
-  return {
-    id,
-    title,
-    status: TASK_STATUSES.has(statusRaw) ? statusRaw : "pending",
-    requirementRefs: asStringArray(data.requirement_refs),
-    designRefs: asStringArray(data.design_refs),
-    dependsOn: asStringArray(data.depends_on),
-    producesContext: [],
-    expectedFiles: asStringArray(data.expected_files),
-    architectureHints: String(data.architecture_hints ?? ""),
-    acceptance: asStringArray(data.acceptance),
-    agent: String(data.agent ?? "coding"),
-    body: body.trim(),
-    filePath,
-    featureId
-  };
-}
-function parseFeatureStatus(raw) {
-  const status = raw.match(/status:\s*(\w+)/i)?.[1] ?? "draft";
-  return FEATURE_STATUSES.has(status) ? status : "draft";
-}
-function extractSectionIds(markdown, prefix) {
-  const ids = [];
-  const re = new RegExp(`^##\\s+(${prefix}-[\\w.-]+)`, "gim");
-  let match;
-  while ((match = re.exec(markdown)) !== null) ids.push(match[1]);
-  return ids;
-}
-function splitSections(markdown) {
-  const sections = [];
-  const lines = markdown.split(/\r?\n/);
-  let current;
-  for (const line of lines) {
-    const h = line.match(/^##\s+(.*)$/);
-    if (h) {
-      if (current) sections.push({ heading: current.heading, body: current.body.join("\n").trim() });
-      current = { heading: h[1].trim(), body: [] };
-    } else if (current) {
-      current.body.push(line);
-    }
-  }
-  if (current) sections.push({ heading: current.heading, body: current.body.join("\n").trim() });
-  return sections;
-}
-function parseDocumentationItems(markdown) {
-  return splitSections(markdown).map((s) => {
-    const [id, ...rest] = s.heading.split(/\s+/);
-    const target = s.body.match(/^target:\s*(.+)$/im)?.[1]?.trim();
-    return { id, title: rest.join(" ") || id, ...target ? { target } : {} };
-  }).filter((d) => d.id);
-}
-function parseBlockerItems(markdown) {
-  return splitSections(markdown).map((s) => {
-    const m = s.heading.match(/^(\S+)\s*(?:\[(hard|soft)\])?\s*(.*)$/);
-    const id = m?.[1] ?? "";
-    const severity = m?.[2] === "soft" ? "soft" : "hard";
-    const title = (m?.[3] || id).trim();
-    return { id, title, severity, ...s.body ? { detail: s.body } : {} };
-  }).filter((b) => b.id);
-}
-
-// src/spec/writer.ts
-async function readTextFile(uri) {
-  return Buffer.from(await vscode4.workspace.fs.readFile(uri)).toString("utf8");
-}
-async function writeTextFile(uri, content) {
-  await vscode4.workspace.fs.writeFile(uri, Buffer.from(content, "utf8"));
-}
-var BLOCK_KEYS = /* @__PURE__ */ new Set(["architecture_hints"]);
-function serializeFrontmatter(data) {
-  const lines = [];
-  for (const [key, value] of Object.entries(data)) {
-    if (Array.isArray(value)) {
-      if (value.length === 0) lines.push(`${key}: []`);
-      else lines.push(`${key}:`, ...value.map((item) => `  - ${String(item).replace(/\s*\n\s*/g, " ")}`));
-    } else if (typeof value === "string" && (value.includes("\n") || BLOCK_KEYS.has(key))) {
-      lines.push(`${key}: |`, ...value.split("\n").map((line) => `  ${line}`));
-    } else {
-      lines.push(`${key}: ${value ?? ""}`);
-    }
-  }
-  return lines.join("\n");
-}
-async function updateTaskStatus(uri, status, error51) {
-  const raw = await readTextFile(uri);
-  const { data, body } = parseFrontmatter(raw);
-  data.status = status;
-  if (status === "failed" && error51) data.error = error51.replace(/\s*\n\s*/g, " ");
-  else delete data.error;
-  await writeTextFile(uri, `---
-${serializeFrontmatter(data)}
----
-${body}`);
-}
-async function writeTaskContract(task) {
-  const frontmatter = serializeFrontmatter({
-    id: task.id,
-    title: task.title,
-    status: task.status,
-    requirement_refs: task.requirementRefs,
-    design_refs: task.designRefs,
-    depends_on: task.dependsOn,
-    expected_files: task.expectedFiles,
-    architecture_hints: task.architectureHints,
-    acceptance: task.acceptance,
-    agent: task.agent
-  });
-  await writeTextFile(task.filePath, `---
-${frontmatter}
----
-${task.body}
-`);
-}
-async function scaffoldFeature(folder, featureName) {
-  const slug = featureName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "new-feature";
-  const root = vscode4.Uri.joinPath(folder.uri, ".liberide", "specs", slug);
-  const tasks3 = vscode4.Uri.joinPath(root, "tasks");
-  await vscode4.workspace.fs.createDirectory(tasks3);
-  await vscode4.workspace.fs.createDirectory(vscode4.Uri.joinPath(root, "runs"));
-  await writeTextFile(vscode4.Uri.joinPath(root, "runs", ".gitignore"), "*\n!.gitignore\n");
-  await writeTextFile(vscode4.Uri.joinPath(root, "feature.md"), `# ${featureName}
-
-status: draft
-`);
-  await writeTextFile(vscode4.Uri.joinPath(root, "requirements.md"), "# Requirements\n\n## R-1 Overview\n\n");
-  await writeTextFile(vscode4.Uri.joinPath(root, "design.md"), "# Design\n\n## D-1 Architecture\n\n");
-  await writeTextFile(vscode4.Uri.joinPath(tasks3, "index.md"), regenerateTasksIndex([]));
-  return root;
-}
-function regenerateTasksIndex(tasks3) {
-  const header = "# Tasks\n\n| ID | Title | Status | Depends on | Requirements | Design |\n|----|-------|--------|------------|--------------|--------|\n";
-  return header + tasks3.map(
-    (t) => `| ${t.id} | ${t.title} | ${t.status} | ${t.dependsOn.join(", ") || "-"} | ${t.requirementRefs.join(", ") || "-"} | ${t.designRefs.join(", ") || "-"} |`
-  ).join("\n") + "\n";
-}
-
-// src/panel/panel.ts
-init_path_containment();
-var LiberidePipelineController = class _LiberidePipelineController {
-  constructor(context, store2, output, runsTree) {
-    this.context = context;
-    this.store = store2;
-    this.output = output;
-    this.runsTree = runsTree;
-    this.disposables.push(
-      onSettingsChange((settings) => this.broadcast({ type: "settings", settings })),
-      this.store.onDidChange(() => this.broadcastFeatures())
-    );
-  }
-  static viewType = "liberide.pipeline";
-  view;
-  disposables = [];
-  graphs = /* @__PURE__ */ new Map();
-  /** Dedup approval prompts per `${graphId}:${nodeId}` (SSE replays node_status on reconnect). */
-  promptedApprovals = /* @__PURE__ */ new Set();
-  disposed = false;
-  resolveWebviewView(view) {
-    this.view = view;
-    this.bindWebview(view.webview);
-    view.onDidDispose(() => {
-      if (this.view === view) this.view = void 0;
-      for (const g of this.graphs.values()) g.dispose();
-      this.graphs.clear();
-    });
-  }
-  show() {
-    void vscode5.commands.executeCommand(`${_LiberidePipelineController.viewType}.focus`);
-  }
-  dispose() {
-    this.disposed = true;
-    for (const d of this.disposables) d.dispose();
-    for (const g of this.graphs.values()) g.dispose();
-    this.graphs.clear();
-  }
-  webviewOptions() {
-    return {
-      enableScripts: true,
-      retainContextWhenHidden: true,
-      localResourceRoots: [
-        vscode5.Uri.joinPath(this.context.extensionUri, "media"),
-        vscode5.Uri.joinPath(this.context.extensionUri, "resources")
-      ]
-    };
-  }
-  bindWebview(webview) {
-    webview.options = this.webviewOptions();
-    webview.html = this.renderHtml(webview);
-    const sub = webview.onDidReceiveMessage((message) => {
-      void this.handleMessage(webview, message);
-    });
-    this.disposables.push(sub);
-  }
-  broadcast(message) {
-    if (this.disposed) return;
-    this.view?.webview.postMessage(message);
-  }
-  broadcastFeatures() {
-    const features = this.featureSummaries();
-    const active = this.store.getActiveFeature();
-    const readiness = active ? computeTaskReadiness(active.tasks) : void 0;
-    this.broadcast({
-      type: "features",
-      features,
-      activeFeature: active ? { id: active.id, tasks: active.tasks.map((t) => this.taskSummary(t, readiness?.get(t.id)?.blockedBy ?? [])) } : void 0
-    });
-  }
-  featureSummaries() {
-    const active = this.store.getActiveFeature();
-    return this.store.getFeatures().map((feature) => ({
-      id: feature.id,
-      name: feature.name,
-      status: feature.status,
-      requirementCount: feature.requirementIds.length,
-      designCount: feature.designIds.length,
-      taskCount: feature.tasks.length,
-      active: feature.id === active?.id
-    }));
-  }
-  taskSummary(task, blockedBy) {
-    const status = blockedBy.length > 0 && task.status === "pending" ? "blocked" : task.status;
-    return { id: task.id, title: task.title, status, dependsOn: task.dependsOn, agent: task.agent, blockedBy };
-  }
-  async handleMessage(webview, message) {
-    try {
-      switch (message.type) {
-        case "ready":
-          webview.postMessage({
-            type: "init",
-            settings: readSettings(),
-            features: this.featureSummaries(),
-            apiOrigin: getApiOrigin()
-          });
-          this.broadcastFeatures();
-          break;
-        case "setActiveFeature":
-          this.store.setActiveFeature(message.featureId);
-          await this.context.workspaceState.update("liberide.activeFeatureId", message.featureId);
-          this.broadcastFeatures();
-          break;
-        case "scaffoldFeature":
-          await this.scaffold(message.name);
-          break;
-        case "dispatchFeature":
-          await this.dispatch(message.featureId, message.taskIds);
-          break;
-        case "cancelGraph": {
-          const choice = await vscode5.window.showWarningMessage(`Cancel ${message.label ?? message.graphId}?`, { modal: true }, "Cancel Run");
-          if (choice === "Cancel Run") await this.cancel(message.graphId);
-          break;
-        }
-        case "inspectRun":
-        case "refreshInspector":
-          await this.inspectGraph(message.graphId, message.nodeId);
-          break;
-        case "resolveApproval":
-          await resolveGraphApproval(message.graphId, message.approvalId, message.status, message.response);
-          await this.inspectGraph(message.graphId);
-          break;
-        case "openArtifact":
-          await this.openArtifactById(message.graphId, message.artifactId);
-          break;
-        case "openDiff":
-          await this.openWorkspaceFile(message.path);
-          break;
-        case "revertEditedFile":
-          await this.revertFile(message.path);
-          break;
-        case "openTask": {
-          const task = this.store.getTask(message.featureId, message.taskId);
-          if (task) await vscode5.window.showTextDocument(task.filePath);
-          break;
-        }
-        case "openChat":
-          await vscode5.commands.executeCommand("liberide.openChat");
-          break;
-      }
-    } catch (error51) {
-      const msg = error51 instanceof Error ? error51.message : String(error51);
-      this.output.appendLine(`[pipeline] ${msg}`);
-      this.broadcast({ type: "operation", action: message.type === "scaffoldFeature" ? "scaffold" : message.type === "cancelGraph" ? "cancel" : "dispatch", status: "error", message: msg });
-      this.broadcast({ type: "log", message: msg, severity: "error" });
-    }
-  }
-  async scaffold(name) {
-    this.broadcast({ type: "operation", action: "scaffold", status: "running" });
-    const folder = vscode5.workspace.workspaceFolders?.[0];
-    if (!folder) {
-      const message = "Open a workspace folder to scaffold a feature.";
-      this.broadcast({ type: "operation", action: "scaffold", status: "error", message });
-      this.broadcast({ type: "log", message, severity: "warning" });
-      return;
-    }
-    const root = await scaffoldFeature(folder, name);
-    const id = root.path.split("/").pop() ?? name;
-    this.store.setActiveFeature(id);
-    await this.context.workspaceState.update("liberide.activeFeatureId", id);
-    await this.store.refresh();
-    this.broadcast({ type: "operation", action: "scaffold", status: "success", message: `Created ${name}.` });
-  }
-  async dispatch(featureId, taskIds) {
-    this.broadcast({ type: "operation", action: "dispatch", status: "running" });
-    const feature = this.store.getFeature(featureId);
-    if (!feature) {
-      const message = `Unknown feature ${featureId}`;
-      this.broadcast({ type: "operation", action: "dispatch", status: "error", message });
-      this.broadcast({ type: "log", message, severity: "error" });
-      return;
-    }
-    const candidateTasks = taskIds?.length ? feature.tasks.filter((t) => taskIds.includes(t.id)) : feature.tasks;
-    const settings = readSettings();
-    let selectedIds = candidateTasks.map((t) => t.id);
-    if (!settings.dispatchSkipPreview) {
-      const confirmed = await this.previewDispatchPlan(feature, candidateTasks);
-      if (!confirmed) {
-        this.broadcast({ type: "operation", action: "dispatch", status: "success", message: "Dispatch cancelled." });
-        this.broadcast({ type: "log", message: "Dispatch cancelled.", severity: "info" });
-        return;
-      }
-      selectedIds = confirmed;
-    }
-    const tasks3 = feature.tasks.filter((t) => selectedIds.includes(t.id));
-    if (tasks3.length === 0) {
-      const message = "No tasks selected to dispatch.";
-      this.broadcast({ type: "operation", action: "dispatch", status: "error", message });
-      this.broadcast({ type: "log", message, severity: "warning" });
-      return;
-    }
-    const validation = validateDag(tasks3);
-    if (!validation.ok) {
-      const message = `Cannot dispatch: ${validation.error}`;
-      this.broadcast({ type: "operation", action: "dispatch", status: "error", message });
-      this.broadcast({ type: "log", message, severity: "warning" });
-      return;
-    }
-    const readiness = computeTaskReadiness(feature.tasks);
-    const ideContext = buildIdeContextPayload();
-    const result = await dispatchFeature(feature, {
-      taskIds: selectedIds,
-      ideContext: ideContext ? { ...ideContext } : void 0,
-      swarm: settings.swarm,
-      isolation: settings.isolation
-    });
-    const startEvent = {
-      graphId: result.graphId,
-      featureId: feature.id,
-      label: taskIds?.length ? `${feature.name} / ${taskIds.join(", ")}` : feature.name,
-      nodes: tasks3.map((task) => ({
-        id: task.id,
-        label: `${task.id} \xB7 ${task.title}`,
-        dependsOn: task.dependsOn,
-        parallelKey: task.agent
-      }))
-    };
-    this.broadcast({ type: "graphStart", payload: startEvent });
-    this.runsTree.trackRun(result.graphId, feature.id, startEvent.label, tasks3.map((task) => task.id));
-    for (const task of tasks3) {
-      const ready = readiness.get(task.id);
-      this.broadcast({
-        type: "graphNode",
-        payload: { graphId: result.graphId, nodeId: task.id, status: ready?.blockedBy.length ? "blocked" : "queued" }
-      });
-    }
-    this.subscribeToGraph(result.graphId);
-    this.broadcast({ type: "operation", action: "dispatch", status: "success", message: `Dispatched ${startEvent.label}.` });
-  }
-  /**
-   * Show a plan preview before queuing a dispatch: a multi-select QuickPick of
-   * the tasks (all pre-selected) so the user can deselect tasks, confirm, or
-   * cancel. Returns the selected task ids, or undefined when cancelled.
-   * Bypassed when `liberide.dispatch.skipPreview` is enabled.
-   */
-  async previewDispatchPlan(feature, candidateTasks) {
-    const items = candidateTasks.map((task) => ({
-      taskId: task.id,
-      label: `${task.id} \xB7 ${task.title}`,
-      description: task.agent ? `agent: ${task.agent}` : void 0,
-      detail: task.dependsOn.length ? `depends on: ${task.dependsOn.join(", ")}` : "no dependencies",
-      picked: true
-    }));
-    const picked = await vscode5.window.showQuickPick(items, {
-      title: `Dispatch plan \u2014 ${feature.name} (${candidateTasks.length} task${candidateTasks.length === 1 ? "" : "s"})`,
-      placeHolder: "Review the plan. Deselect tasks to exclude, confirm to dispatch, or press Esc to cancel.",
-      canPickMany: true,
-      ignoreFocusOut: true
-    });
-    if (!picked) return void 0;
-    return picked.map((item) => item.taskId);
-  }
-  /**
-   * Subscribe to an execution graph's event stream and bridge it to the webview,
-   * approval prompts, and disconnect surfacing (task files are written back by
-   * the runs tree). Reused by
-   * dispatch, retry, and replay. Replaces any prior subscription for the graph.
-   */
-  subscribeToGraph(graphId) {
-    this.graphs.get(graphId)?.dispose();
-    const dispose = subscribeExecutionGraphEvents(graphId, (event) => {
-      if (this.disposed) return;
-      if (event.type === "node_status" && event.nodeId && event.status === "waiting_approval") {
-        void this.promptApproval(graphId, event.nodeId);
-      }
-      const update = taskStatusFromEvent(event, graphId);
-      if (update) {
-        const { taskId, status, error: error51 } = update;
-        this.broadcast({ type: "graphNode", payload: { graphId, nodeId: taskId, status, ...error51 ? { error: error51 } : {} } });
-        if (error51) this.broadcast({ type: "log", message: `${taskId} failed: ${error51}`, severity: "error" });
-      }
-      if (event.type === "done" && event.status) {
-        this.broadcast({ type: "graphDone", payload: { graphId, status: event.status } });
-        this.graphs.get(graphId)?.dispose();
-        this.graphs.delete(graphId);
-      }
-    }, {
-      log: (message) => this.output.appendLine(`[pipeline.sse] ${message}`),
-      onDisconnect: () => {
-        if (this.disposed) return;
-        this.broadcast({ type: "graphDone", payload: { graphId, status: "disconnected" } });
-        this.broadcast({ type: "log", message: `Lost connection to run ${graphId}; it may still be running on the server.`, severity: "warning" });
-      }
-    });
-    this.graphs.set(graphId, { graphId, dispose });
-  }
-  /** Retry a failed/cancelled run: re-queues failed nodes and re-attaches the event stream. */
-  async retryRun(graphId) {
-    const meta3 = this.runsTree.getRunMeta(graphId);
-    try {
-      await retryGraph(graphId);
-      if (meta3) this.runsTree.trackRun(graphId, meta3.featureId, meta3.label, meta3.nodeIds);
-      this.subscribeToGraph(graphId);
-      this.broadcast({ type: "log", message: `Retrying run ${graphId}.`, severity: "info" });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.output.appendLine(`[pipeline.retry] ${msg}`);
-      void vscode5.window.showErrorMessage(`Retry failed: ${msg}`);
-    }
-  }
-  /** Replay a node and its downstream dependents, re-attaching the event stream. */
-  async replayFromNode(graphId, nodeId) {
-    const meta3 = this.runsTree.getRunMeta(graphId);
-    try {
-      const count = await replayFromNode(graphId, nodeId);
-      if (meta3) this.runsTree.trackRun(graphId, meta3.featureId, meta3.label, meta3.nodeIds);
-      this.subscribeToGraph(graphId);
-      this.broadcast({ type: "log", message: `Replaying ${count} node(s) from ${nodeId}.`, severity: "info" });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.output.appendLine(`[pipeline.replay] ${msg}`);
-      void vscode5.window.showErrorMessage(`Replay failed: ${msg}`);
-    }
-  }
-  /** Show a run's aggregated token/cost usage (totals + per-node breakdown). */
-  async viewRunCost(graphId) {
-    let metrics;
-    try {
-      metrics = await getGraphMetrics(graphId);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.output.appendLine(`[pipeline.cost] ${msg}`);
-      void vscode5.window.showErrorMessage(`Failed to load run cost: ${msg}`);
-      return;
-    }
-    if (!metrics || metrics.callCount === 0) {
-      void vscode5.window.showInformationMessage("No usage recorded for this run yet.");
-      return;
-    }
-    const cost = metrics.estimatedCostUsd ? `$${metrics.estimatedCostUsd.toFixed(4)}` : "n/a";
-    void vscode5.window.showInformationMessage(
-      `Run cost: ${cost} \xB7 ${metrics.inputTokens} in / ${metrics.outputTokens} out tokens \xB7 ${metrics.callCount} calls`
-    );
-    this.output.appendLine(`
-\u2500\u2500 Cost for run ${graphId} \u2500\u2500`);
-    this.output.appendLine(`Total: ${cost} \xB7 ${metrics.inputTokens} in / ${metrics.outputTokens} out \xB7 ${metrics.callCount} calls`);
-    for (const n of metrics.perNode) {
-      const c = n.estimatedCostUsd ? `$${n.estimatedCostUsd.toFixed(4)}` : "n/a";
-      this.output.appendLine(`  ${n.nodeId} (${n.title}): ${c} \xB7 ${n.inputTokens}/${n.outputTokens} tok`);
-    }
-    this.output.show(true);
-  }
-  /** List a run's artifacts in a QuickPick and open the chosen one in an editor tab. */
-  async viewArtifacts(graphId) {
-    let artifacts;
-    try {
-      artifacts = await listGraphArtifacts(graphId);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.output.appendLine(`[pipeline.artifacts] ${msg}`);
-      void vscode5.window.showErrorMessage(`Failed to load artifacts: ${msg}`);
-      return;
-    }
-    if (artifacts.length === 0) {
-      void vscode5.window.showInformationMessage("This run has not produced any artifacts yet.");
-      return;
-    }
-    const pick2 = await vscode5.window.showQuickPick(
-      artifacts.map((a) => ({ label: a.title || a.path || a.id, description: `${a.kind}${a.path ? ` \xB7 ${a.path}` : ""}`, artifact: a })),
-      { placeHolder: "Open an artifact produced by this run" }
-    );
-    if (!pick2) return;
-    const doc = await vscode5.workspace.openTextDocument({
-      content: pick2.artifact.content ?? "",
-      language: languageForArtifact(pick2.artifact.path, pick2.artifact.kind)
-    });
-    await vscode5.window.showTextDocument(doc, { preview: true });
-  }
-  async inspectGraph(graphId, nodeId) {
-    try {
-      const [detail, artifacts, metrics, workingMemory] = await Promise.all([
-        fetchGraphDetail(graphId),
-        listGraphArtifacts(graphId).catch(() => []),
-        getGraphMetrics(graphId).catch(() => null),
-        getWorkingMemory(graphId).catch(() => null)
-      ]);
-      this.broadcast({
-        type: "graphInspector",
-        payload: {
-          graphId,
-          nodeId,
-          detail,
-          artifacts,
-          metrics,
-          workingMemory,
-          verification: workingMemory?.verificationHistory ?? []
-        }
-      });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.output.appendLine(`[pipeline.inspect] ${msg}`);
-      this.broadcast({ type: "log", message: `Failed to inspect run: ${msg}`, severity: "error" });
-    }
-  }
-  async openArtifactById(graphId, artifactId) {
-    const artifact = (await listGraphArtifacts(graphId)).find((a) => a.id === artifactId);
-    if (!artifact) {
-      void vscode5.window.showInformationMessage(`Artifact not found: ${artifactId}`);
-      return;
-    }
-    await this.openArtifactDocument(artifact);
-  }
-  async openArtifactDocument(artifact) {
-    const doc = await vscode5.workspace.openTextDocument({
-      content: artifact.content ?? "",
-      language: languageForArtifact(artifact.path, artifact.kind)
-    });
-    await vscode5.window.showTextDocument(doc, { preview: true });
-  }
-  async revertFile(filePath) {
-    const root = vscode5.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    if (!root) return;
-    const clean = filePath.replace(/^\/+/, "");
-    const absolute = resolveContainedRelativePath(root, clean);
-    const { execFile: execFile3 } = await import("node:child_process");
-    const run = (args) => new Promise((resolve9) => {
-      execFile3("git", args, { cwd: root, timeout: 15e3, windowsHide: true }, (err, _stdout, stderr) => {
-        const code = err && typeof err.code === "number" ? err.code : err ? 1 : 0;
-        resolve9({ code, stderr: stderr || (err instanceof Error ? err.message : "") });
-      });
-    });
-    const tracked = (await run(["ls-files", "--error-unmatch", "--", clean])).code === 0;
-    if (tracked) {
-      const result = await run(["checkout", "--", clean]);
-      if (result.code !== 0) throw new Error(result.stderr || `git checkout failed for ${clean}`);
-      this.broadcast({ type: "log", message: `Reverted ${clean}.`, severity: "info" });
-      return;
-    }
-    const choice = await vscode5.window.showWarningMessage(
-      `${clean} is not tracked by git. Reverting will delete this agent-created file.`,
-      { modal: true },
-      "Delete"
-    );
-    if (choice !== "Delete") {
-      this.broadcast({ type: "log", message: `Revert cancelled for ${clean}.`, severity: "info" });
-      return;
-    }
-    try {
-      await vscode5.workspace.fs.delete(vscode5.Uri.file(absolute), { useTrash: true });
-      this.broadcast({ type: "log", message: `Reverted (deleted untracked) ${clean}.`, severity: "info" });
-    } catch (err) {
-      throw new Error(`Failed to delete ${clean}: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-  async openWorkspaceFile(filePath) {
-    const root = vscode5.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    if (!root) return;
-    const clean = filePath.replace(/^\/+/, "");
-    await vscode5.commands.executeCommand("vscode.open", vscode5.Uri.file(resolveContainedRelativePath(root, clean)));
-  }
-  /** Open a run's working memory (accumulated agent context) as a rendered markdown tab. */
-  async viewWorkingMemory(graphId) {
-    let memory;
-    try {
-      memory = await getWorkingMemory(graphId);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.output.appendLine(`[pipeline.memory] ${msg}`);
-      void vscode5.window.showErrorMessage(`Failed to load working memory: ${msg}`);
-      return;
-    }
-    if (!memory) {
-      void vscode5.window.showInformationMessage("This run has no working memory yet.");
-      return;
-    }
-    const doc = await vscode5.workspace.openTextDocument({
-      content: renderWorkingMemory(memory),
-      language: "markdown"
-    });
-    await vscode5.window.showTextDocument(doc, { preview: true });
-  }
-  /** Append a user-supplied assumption/context note to a run's working memory. */
-  async addWorkingMemoryNote(graphId) {
-    const note = await vscode5.window.showInputBox({ prompt: "Add an assumption / context note for the agents" });
-    if (!note?.trim()) return;
-    try {
-      const memory = await getWorkingMemory(graphId);
-      const assumptions = [...memory?.assumptions ?? [], note.trim()];
-      await patchWorkingMemory(graphId, { assumptions });
-      this.broadcast({ type: "log", message: "Added context to working memory.", severity: "info" });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.output.appendLine(`[pipeline.memory] ${msg}`);
-      void vscode5.window.showErrorMessage(`Failed to update working memory: ${msg}`);
-    }
-  }
-  /** Add a follow-up goal to a run. */
-  async addFollowUp(graphId) {
-    const goal = await vscode5.window.showInputBox({ prompt: "Follow-up instruction for this run" });
-    if (!goal?.trim()) return;
-    try {
-      await addFollowUp(graphId, goal.trim());
-      this.broadcast({ type: "log", message: "Follow-up queued.", severity: "info" });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.output.appendLine(`[pipeline.followup] ${msg}`);
-      void vscode5.window.showErrorMessage(`Follow-up failed: ${msg}`);
-    }
-  }
-  /** Show a node's status, summary, and error in the output channel (trace inspection). */
-  async showNodeDetail(graphId, nodeId) {
-    try {
-      const { nodes } = await fetchGraphDetail(graphId);
-      const node = nodes.find((n) => n.id === nodeId);
-      if (!node) {
-        void vscode5.window.showInformationMessage(`No detail for node ${nodeId}.`);
-        return;
-      }
-      this.output.appendLine("");
-      this.output.appendLine(`\u2500\u2500 Node ${node.id} (${node.type}) \u2014 ${node.status} \u2500\u2500`);
-      this.output.appendLine(node.title);
-      if (node.inputSummary) this.output.appendLine(`Input: ${node.inputSummary}`);
-      if (node.error) this.output.appendLine(`Error: ${node.error}`);
-      try {
-        const metrics = await getGraphMetrics(graphId);
-        const nodeCost = metrics?.perNode.find((n) => n.nodeId === nodeId);
-        if (nodeCost) {
-          const c = nodeCost.estimatedCostUsd ? `$${nodeCost.estimatedCostUsd.toFixed(4)}` : "n/a";
-          this.output.appendLine(`Cost: ${c} \xB7 ${nodeCost.inputTokens}/${nodeCost.outputTokens} tokens`);
-        }
-      } catch {
-      }
-      this.output.show(true);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.output.appendLine(`[pipeline.nodeDetail] ${msg}`);
-      void vscode5.window.showErrorMessage(`Failed to load node detail: ${msg}`);
-    }
-  }
-  /** Re-open the approval prompt on demand (Runs-tree "Resolve Approval" action). */
-  async resolveApprovalForRun(graphId, nodeId) {
-    this.promptedApprovals.delete(`${graphId}:${nodeId}`);
-    await this.promptApproval(graphId, nodeId);
-  }
-  /**
-   * Prompt the user to approve/reject a graph-native APPROVAL node (the swarm
-   * blocker gate). Deduped per node since the SSE stream replays node_status on
-   * reconnect. Resolves via the node-approval endpoint and advances the run.
-   */
-  async promptApproval(graphId, nodeId) {
-    if (this.disposed) return;
-    const key = `${graphId}:${nodeId}`;
-    if (this.promptedApprovals.has(key)) return;
-    this.promptedApprovals.add(key);
-    let title = "Approval required";
-    let detail = "";
-    try {
-      const { nodes } = await fetchGraphDetail(graphId);
-      const node = nodes.find((n) => n.id === nodeId);
-      if (node && node.status !== "waiting_approval") {
-        this.promptedApprovals.delete(key);
-        return;
-      }
-      if (node) {
-        title = node.title || title;
-        detail = node.inputSummary ?? "";
-      }
-    } catch (err) {
-      this.output.appendLine(`[pipeline.approval] detail fetch failed: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    if (this.disposed) return;
-    const message = `LiberIDE run needs approval \u2014 ${title}${detail ? `: ${detail}` : ""}`;
-    const choice = await vscode5.window.showWarningMessage(message, { modal: false }, "Approve", "Reject");
-    if (!choice) {
-      this.promptedApprovals.delete(key);
-      return;
-    }
-    const decision = choice === "Approve" ? "approved" : "rejected";
-    let note;
-    if (decision === "rejected") {
-      note = await vscode5.window.showInputBox({ prompt: "Reason for rejection (optional)" }) || void 0;
-    }
-    if (this.disposed) return;
-    try {
-      await resolveNodeApproval(graphId, nodeId, decision, note);
-      this.broadcast({ type: "log", message: `Approval ${decision} for ${nodeId}.`, severity: "info" });
-    } catch (err) {
-      this.promptedApprovals.delete(key);
-      const msg = err instanceof Error ? err.message : String(err);
-      this.output.appendLine(`[pipeline.approval] ${msg}`);
-      void vscode5.window.showErrorMessage(`Failed to submit approval: ${msg}`);
-    }
-  }
-  async cancel(graphId) {
-    this.broadcast({ type: "operation", action: "cancel", status: "running" });
-    await cancelExecutionGraph(graphId);
-    this.graphs.get(graphId)?.dispose();
-    this.graphs.delete(graphId);
-    this.runsTree.cancelRun(graphId);
-    this.broadcast({ type: "graphDone", payload: { graphId, status: "cancelled" } });
-    this.broadcast({ type: "operation", action: "cancel", status: "success", message: `Cancelled ${graphId}.` });
-  }
-  renderHtml(webview) {
-    const scriptUri = webview.asWebviewUri(vscode5.Uri.joinPath(this.context.extensionUri, "media", "pipeline.js"));
-    const styleUri = webview.asWebviewUri(vscode5.Uri.joinPath(this.context.extensionUri, "media", "webview.css"));
-    const nonce = randomNonce();
-    const csp = [
-      `default-src 'none'`,
-      // No remote images: model output could embed a URL that exfiltrates context.
-      `img-src ${webview.cspSource} data: blob:`,
-      `style-src ${webview.cspSource} 'unsafe-inline'`,
-      `font-src ${webview.cspSource}`,
-      `script-src 'nonce-${nonce}'`,
-      `connect-src ${webview.cspSource}`
-    ].join("; ");
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta http-equiv="Content-Security-Policy" content="${csp}" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>LiberIDE Pipeline</title>
-  <link rel="stylesheet" href="${styleUri}" />
-</head>
-<body>
-  <div id="root"></div>
-  <script nonce="${nonce}" src="${scriptUri}"></script>
-</body>
-</html>`;
-  }
-};
-var ARTIFACT_LANG_BY_EXT = {
-  ts: "typescript",
-  tsx: "typescriptreact",
-  js: "javascript",
-  jsx: "javascriptreact",
-  py: "python",
-  json: "json",
-  md: "markdown",
-  diff: "diff",
-  patch: "diff",
-  yaml: "yaml",
-  yml: "yaml",
-  sh: "shellscript",
-  sql: "sql",
-  go: "go",
-  rs: "rust",
-  java: "java",
-  html: "html",
-  css: "css",
-  toml: "toml",
-  xml: "xml"
-};
-function renderWorkingMemory(m) {
-  const list = (items) => items.length ? items.map((i) => `- ${i}`).join("\n") : "_(none)_";
-  const lines = [
-    `# Working Memory`,
-    ``,
-    `**Goal:** ${m.activeGoal || "_(none)_"}`,
-    `**Updated:** ${m.updatedAt}`,
-    ``,
-    `## Active files`,
-    list(m.activeFiles),
-    ``,
-    `## Active tasks`,
-    list(m.activeTasks),
-    ``,
-    `## Blockers`,
-    list(m.blockers),
-    ``,
-    `## Assumptions`,
-    list(m.assumptions),
-    ``,
-    `## Next actions`,
-    list(m.nextActions)
-  ];
-  if (m.recentFailures.length) {
-    lines.push(``, `## Recent failures`, ...m.recentFailures.map((f) => `- ${f.nodeTitle ?? "node"}: ${f.error ?? ""}`));
-  }
-  if (m.verificationHistory.length) {
-    lines.push(``, `## Verification history`, ...m.verificationHistory.map((v) => `- ${v.nodeTitle ?? "node"}: ${v.passed ? "passed" : "failed"}`));
-  }
-  if (m.currentPlan) {
-    lines.push(``, `## Current plan`, ``, m.currentPlan);
-  }
-  return `${lines.join("\n")}
-`;
-}
-function languageForArtifact(path11, kind) {
-  const ext = path11?.split(".").pop()?.toLowerCase();
-  if (ext && ARTIFACT_LANG_BY_EXT[ext]) return ARTIFACT_LANG_BY_EXT[ext];
-  const k = (kind ?? "").toLowerCase();
-  if (k.includes("patch") || k.includes("diff")) return "diff";
-  return "markdown";
-}
-function randomNonce() {
-  return (0, import_node_crypto2.randomBytes)(16).toString("hex");
-}
-
-// src/chat/chat-panel.ts
-var vscode11 = __toESM(require("vscode"));
-
-// src/ide-delegate/handlers/fs.ts
-var vscode7 = __toESM(require("vscode"));
-var path4 = __toESM(require("node:path"));
-var import_node_fs4 = require("node:fs");
-var import_promises = require("node:fs/promises");
-var import_node_child_process = require("node:child_process");
-init_helpers();
-init_redaction();
-var EXCLUDED_DIRS = /* @__PURE__ */ new Set(["node_modules", ".git", "dist", "build", ".next", "__pycache__"]);
-var BINARY_EXTS = /* @__PURE__ */ new Set([
-  ".png",
-  ".jpg",
-  ".jpeg",
-  ".gif",
-  ".bmp",
-  ".ico",
-  ".webp",
-  ".svg",
-  ".woff",
-  ".woff2",
-  ".ttf",
-  ".eot",
-  ".otf",
-  ".zip",
-  ".tar",
-  ".gz",
-  ".bz2",
-  ".7z",
-  ".rar",
-  ".pdf",
-  ".doc",
-  ".docx",
-  ".xls",
-  ".xlsx",
-  ".exe",
-  ".dll",
-  ".so",
-  ".dylib",
-  ".o",
-  ".a",
-  ".mp3",
-  ".mp4",
-  ".avi",
-  ".mov",
-  ".wav",
-  ".flac",
-  ".sqlite",
-  ".db",
-  ".wasm"
-]);
-var MAX_SEARCH_FILE_BYTES = 2e6;
-var preEditSnapshots = /* @__PURE__ */ new Map();
-var MAX_SNAPSHOTS = 200;
-var MAX_SNAPSHOT_BYTES = 5e6;
-var MAX_SNAPSHOT_SCOPES = 20;
-var DEFAULT_SCOPE = "";
-function snapshotScope(scope) {
-  let map2 = preEditSnapshots.get(scope);
-  if (!map2) {
-    map2 = /* @__PURE__ */ new Map();
-    preEditSnapshots.set(scope, map2);
-    while (preEditSnapshots.size > MAX_SNAPSHOT_SCOPES) preEditSnapshots.delete(preEditSnapshots.keys().next().value);
-  }
-  return map2;
-}
-async function snapshotBeforeChange(fullPath, scope = requestConversationId() ?? DEFAULT_SCOPE) {
-  const snapshots = snapshotScope(scope);
-  if (snapshots.has(fullPath)) return;
-  const info = await (0, import_promises.lstat)(fullPath).catch(() => void 0);
-  if (info && (!info.isFile() || info.size > MAX_SNAPSHOT_BYTES)) return;
-  snapshots.set(fullPath, info ? await (0, import_promises.readFile)(fullPath, "utf8").catch(() => null) : null);
-  while (snapshots.size > MAX_SNAPSHOTS) snapshots.delete(snapshots.keys().next().value);
-}
-function resetPreEditSnapshots(scope) {
-  if (scope === void 0) preEditSnapshots.clear();
-  else preEditSnapshots.delete(scope);
-}
-async function restorePreEditSnapshot(fullPath, scope = DEFAULT_SCOPE) {
-  const snapshots = preEditSnapshots.get(scope);
-  if (!snapshots?.has(fullPath)) return false;
-  const before = snapshots.get(fullPath);
-  if (before === null) await (0, import_promises.rm)(fullPath, { force: true });
-  else {
-    await (0, import_promises.mkdir)(path4.dirname(fullPath), { recursive: true });
-    await writeFileNoFollow(fullPath, before);
-  }
-  snapshots.delete(fullPath);
-  return true;
-}
-async function writeFileNoFollow(fullPath, content, mode) {
-  const flags = import_node_fs4.constants.O_WRONLY | import_node_fs4.constants.O_CREAT | import_node_fs4.constants.O_TRUNC | (import_node_fs4.constants.O_NOFOLLOW ?? 0);
-  const handle = await (0, import_promises.open)(fullPath, flags, 438);
-  try {
-    await handle.writeFile(content, "utf8");
-    if (mode !== void 0) await handle.chmod(mode);
-  } finally {
-    await handle.close();
-  }
-}
-var MAX_READ_BYTES = 2e7;
-function relPath(payload, key = "path") {
-  const value = payload[key];
-  if (typeof value !== "string") throw new Error(`${key} is required`);
-  return value;
-}
-async function handleFsStat(root, payload) {
-  const full = await resolveInsideRoot(root, relPath(payload));
-  try {
-    const info = await (0, import_promises.stat)(full);
-    return {
-      exists: true,
-      type: info.isDirectory() ? "directory" : info.isFile() ? "file" : "other",
-      size: info.size,
-      mode: info.mode,
-      mtime: info.mtime.toISOString()
-    };
-  } catch {
-    return { exists: false };
-  }
-}
-async function handleFsRead(root, payload) {
-  const full = await resolveInsideRoot(root, relPath(payload));
-  const info = await (0, import_promises.stat)(full);
-  if (!info.isFile()) throw new Error(`Not a file: ${String(payload.path)}`);
-  const ranged = payload.offset !== void 0 || payload.length !== void 0;
-  if (!ranged) {
-    if (info.size > MAX_READ_BYTES) {
-      throw new Error(`File is too large to read whole (${info.size} bytes, limit ${MAX_READ_BYTES}); pass offset/length to read a range`);
-    }
-    return { content: await (0, import_promises.readFile)(full, "utf8") };
-  }
-  const offset = Math.max(0, Math.floor(Number(payload.offset ?? 0)) || 0);
-  const length = Math.max(0, Math.min(Math.floor(Number(payload.length ?? MAX_READ_BYTES)) || 0, MAX_READ_BYTES, Math.max(0, info.size - offset)));
-  const handle = await (0, import_promises.open)(full, "r");
-  try {
-    const buffer = Buffer.alloc(length);
-    const { bytesRead } = await handle.read(buffer, 0, length, offset);
-    return { content: buffer.subarray(0, bytesRead).toString("utf8"), offset, length: bytesRead, size: info.size, hasMore: offset + bytesRead < info.size };
-  } finally {
-    await handle.close();
-  }
-}
-async function handleFsWrite(root, payload) {
-  const full = await resolveInsideRoot(root, relPath(payload), { forWrite: true });
-  const content = typeof payload.content === "string" ? payload.content : "";
-  await snapshotBeforeChange(full);
-  await (0, import_promises.mkdir)(path4.dirname(full), { recursive: true });
-  if (!isPathInside(await (0, import_promises.realpath)(root), await (0, import_promises.realpath)(path4.dirname(full)))) {
-    throw new Error("Path escapes the workspace folder");
-  }
-  await writeFileNoFollow(full, content, typeof payload.mode === "number" ? payload.mode : void 0);
-  return { bytes: Buffer.byteLength(content) };
-}
-async function handleFsDelete(root, payload) {
-  const full = await resolveInsideRoot(root, relPath(payload));
-  if (full === path4.resolve(root)) throw new Error("Refusing to delete the workspace root");
-  await snapshotBeforeChange(full);
-  await (0, import_promises.rm)(full, { force: true, recursive: payload.recursive === true });
-  return { deleted: true };
-}
-async function handleFsRename(root, payload) {
-  const from = await resolveInsideRoot(root, relPath(payload, "from"));
-  const to = await resolveInsideRoot(root, relPath(payload, "to"));
-  if (payload.overwrite !== true && (0, import_node_fs4.existsSync)(to)) throw new Error(`Target already exists: ${String(payload.to)}`);
-  await snapshotBeforeChange(from);
-  await snapshotBeforeChange(to);
-  await (0, import_promises.mkdir)(path4.dirname(to), { recursive: true });
-  await (0, import_promises.rename)(from, to);
-  return { renamed: true };
-}
-async function listRecursive(dir, root, depth) {
-  if (depth <= 0) return [];
-  const entries = [];
-  for (const item of await (0, import_promises.readdir)(dir, { withFileTypes: true })) {
-    const full = path4.join(dir, item.name);
-    const info = await (0, import_promises.lstat)(full).catch(() => void 0);
-    if (!info || info.isSymbolicLink()) continue;
-    const entry = {
-      name: item.name,
-      path: path4.relative(root, full).replace(/\\/g, "/"),
-      type: info.isDirectory() ? "directory" : "file",
-      size: Number(info.size),
-      modifiedAt: info.mtime.toISOString()
-    };
-    if (entry.type === "directory" && depth > 1) entry.children = await listRecursive(full, root, depth - 1);
-    entries.push(entry);
-  }
-  entries.sort((a, b) => a.type !== b.type ? a.type === "directory" ? -1 : 1 : a.name.localeCompare(b.name));
-  return entries;
-}
-async function handleFsList(root, payload) {
-  const full = await resolveInsideRoot(root, typeof payload.path === "string" ? payload.path : ".");
-  const depth = Math.max(1, Math.min(Number(payload.depth ?? 1), 5));
-  const info = await (0, import_promises.stat)(full).catch(() => void 0);
-  if (!info) throw new Error(`Directory not found: ${String(payload.path ?? ".")}`);
-  if (!info.isDirectory()) throw new Error(`Not a directory: ${String(payload.path ?? ".")}`);
-  return { entries: await listRecursive(full, await (0, import_promises.realpath)(root), depth) };
-}
-function bundledRipgrep() {
-  const candidates = [
-    path4.join(vscode7.env.appRoot, "node_modules", "@vscode", "ripgrep", "bin", "rg"),
-    path4.join(vscode7.env.appRoot, "node_modules.asar.unpacked", "@vscode", "ripgrep", "bin", "rg")
-  ];
-  const suffix = process.platform === "win32" ? ".exe" : "";
-  return candidates.map((candidate) => candidate + suffix).find((candidate) => (0, import_node_fs4.existsSync)(candidate));
-}
-function searchWithRipgrep(rg, root, query, isRegex, include, maxResults) {
-  const args = ["--json"];
-  if (!isRegex) args.push("--fixed-strings");
-  for (const dir of EXCLUDED_DIRS) args.push("--glob", `!${dir}`);
-  for (const ext of BINARY_EXTS) args.push("--glob", `!*${ext}`);
-  if (include) args.push("--glob", include);
-  args.push("--", query, ".");
-  return new Promise((resolve9, reject) => {
-    const proc = (0, import_node_child_process.spawn)(rg, args, { cwd: root, windowsHide: true });
-    const results = [];
-    let buffer = "";
-    const consume = (line) => {
-      if (!line || results.length >= maxResults) return;
-      try {
-        const parsed = JSON.parse(line);
-        if (parsed.type === "match") {
-          results.push({ file: String(parsed.data.path.text).replace(/\\/g, "/"), line: parsed.data.line_number, text: String(parsed.data.lines.text ?? "").trimEnd() });
-        }
-      } catch {
-      }
-    };
-    proc.stdout.on("data", (chunk) => {
-      buffer += chunk.toString("utf8");
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-      lines.forEach(consume);
-      if (results.length >= maxResults) proc.kill();
-    });
-    proc.on("error", reject);
-    proc.on("close", (code) => {
-      consume(buffer);
-      if (code === 2 && results.length === 0) reject(new Error("ripgrep error"));
-      else resolve9(results);
-    });
-  });
-}
-function globToRegExp(pattern) {
-  const source = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*/g, "\0").replace(/\*/g, "[^/]*").replace(/\u0000/g, ".*").replace(/\?/g, ".");
-  return new RegExp(`^${source}$`);
-}
-function parseGitignore(text) {
-  const rules = [];
-  for (const raw of text.split(/\r?\n/)) {
-    let line = raw.replace(/\s+$/, "");
-    if (!line || line.startsWith("#")) continue;
-    const negate = line.startsWith("!");
-    if (negate) line = line.slice(1);
-    const dirOnly = line.endsWith("/");
-    if (dirOnly) line = line.replace(/\/+$/, "");
-    const anchored = line.includes("/");
-    line = line.replace(/^\//, "").replace(/^\*\*\//, "");
-    if (!line) continue;
-    rules.push({ re: globToRegExp(line), dirOnly, negate, anchored: anchored && !raw.trimStart().startsWith("**/") });
-  }
-  return rules;
-}
-function isIgnored(rules, rel2, isDir) {
-  let ignored = false;
-  const name = rel2.split("/").pop() ?? rel2;
-  for (const rule of rules) {
-    if (rule.dirOnly && !isDir) continue;
-    if (rule.anchored ? rule.re.test(rel2) : rule.re.test(name) || rule.re.test(rel2)) ignored = !rule.negate;
-  }
-  return ignored;
-}
-async function searchWithScan(root, query, isRegex, include, maxResults) {
-  const results = [];
-  const pattern = isRegex ? new RegExp(query) : void 0;
-  const includeRe = include ? globToRegExp(include) : void 0;
-  const ignoredBy = (scopes, full, isDir) => scopes.some((scope) => isIgnored(scope.rules, path4.relative(scope.dir, full).replace(/\\/g, "/"), isDir));
-  const walk = async (dir, parents) => {
-    const ignoreText = await (0, import_promises.readFile)(path4.join(dir, ".gitignore"), "utf8").catch(() => "");
-    const scopes = ignoreText ? [...parents, { dir, rules: parseGitignore(ignoreText) }] : parents;
-    for (const entry of await (0, import_promises.readdir)(dir, { withFileTypes: true }).catch(() => [])) {
-      if (results.length >= maxResults) return;
-      const full = path4.join(dir, entry.name);
-      const rel2 = path4.relative(root, full).replace(/\\/g, "/");
-      const explicitlyIncluded = includeRe !== void 0 && (includeRe.test(entry.name) || includeRe.test(rel2));
-      if (entry.isDirectory()) {
-        if (EXCLUDED_DIRS.has(entry.name) || entry.name.startsWith(".") || ignoredBy(scopes, full, true)) continue;
-        await walk(full, scopes);
-        continue;
-      }
-      if (!entry.isFile() || BINARY_EXTS.has(path4.extname(entry.name).toLowerCase())) continue;
-      if (includeRe && !explicitlyIncluded) continue;
-      if (!explicitlyIncluded && (entry.name.startsWith(".") || ignoredBy(scopes, full, false))) continue;
-      const info = await (0, import_promises.stat)(full).catch(() => void 0);
-      if (!info || info.size > MAX_SEARCH_FILE_BYTES) continue;
-      const lines = (await (0, import_promises.readFile)(full, "utf8").catch(() => "")).split("\n");
-      for (let i = 0; i < lines.length && results.length < maxResults; i++) {
-        const text = lines[i];
-        if (pattern ? pattern.test(text) : text.includes(query)) results.push({ file: rel2, line: i + 1, text: text.trimEnd() });
-      }
-    }
-  };
-  await walk(root, []);
-  return results;
-}
-function redactSearchMatches(results) {
-  return results.map((match) => {
-    const { text, redacted } = redactIfSecret(match.file, match.text);
-    return redacted ? { ...match, text, redacted: true } : match;
-  });
-}
-async function handleFsSearch(root, payload) {
-  const query = String(payload.query ?? "");
-  if (!query) throw new Error("query is required");
-  const isRegex = payload.isRegex === true;
-  const include = typeof payload.includePattern === "string" && payload.includePattern ? payload.includePattern : void 0;
-  const maxResults = Math.max(1, Math.min(Number(payload.maxResults ?? 50), 200));
-  const realRoot = await (0, import_promises.realpath)(root);
-  const rg = bundledRipgrep();
-  let results;
-  if (rg) results = await searchWithRipgrep(rg, realRoot, query, isRegex, include, maxResults).catch(() => void 0);
-  results ??= await searchWithScan(realRoot, query, isRegex, include, maxResults);
-  results = redactSearchMatches(results);
-  return { results, totalMatches: results.length };
-}
-
-// src/chat/chat-panel.ts
-init_helpers();
-var import_node_crypto4 = require("node:crypto");
-var nodePath = __toESM(require("node:path"));
-
-// src/project/identity.ts
-var vscode8 = __toESM(require("vscode"));
-var import_node_child_process2 = require("node:child_process");
-var import_node_crypto3 = require("node:crypto");
-function gitExec(args, cwd) {
-  return new Promise((resolve9) => {
-    (0, import_node_child_process2.execFile)("git", args, { cwd, timeout: 5e3, windowsHide: true }, (err, stdout) => {
-      if (err) return resolve9(null);
-      resolve9(stdout.toString().trim());
-    });
-  });
-}
-function normaliseRemote(remote) {
-  let out = remote.trim();
-  if (out.endsWith(".git")) out = out.slice(0, -4);
-  const sshMatch = out.match(/^[a-zA-Z0-9_-]+@([^:]+):(.+)$/);
-  if (sshMatch) out = `${sshMatch[1]}/${sshMatch[2]}`;
-  return out.replace(/^https?:\/\//, "").toLowerCase();
-}
-function shortHash(input) {
-  return (0, import_node_crypto3.createHash)("sha1").update(input).digest("hex").slice(0, 24);
-}
-var activeProjectFolderPath;
-function getActiveProjectFolder() {
-  const folders = vscode8.workspace.workspaceFolders ?? [];
-  if (activeProjectFolderPath) {
-    const match = folders.find((f) => f.uri.fsPath === activeProjectFolderPath);
-    if (match) return match;
-  }
-  return folders[0];
-}
-function setActiveProjectFolder(folder) {
-  activeProjectFolderPath = folder.uri.fsPath;
-}
-async function detectProjectIdentity(folder) {
-  const target = folder ?? getActiveProjectFolder();
-  if (!target || target.uri.scheme !== "file") {
-    return { id: "none", source: "none", name: "No workspace" };
-  }
-  const cwd = target.uri.fsPath;
-  const [remoteRaw, firstCommit, branch] = await Promise.all([
-    gitExec(["config", "--get", "remote.origin.url"], cwd),
-    gitExec(["rev-list", "--max-parents=0", "HEAD"], cwd),
-    gitExec(["rev-parse", "--abbrev-ref", "HEAD"], cwd)
-  ]);
-  if (remoteRaw || firstCommit) {
-    const remote = remoteRaw ? normaliseRemote(remoteRaw) : void 0;
-    const composite = `${remote ?? ""}|${firstCommit ?? ""}`;
-    return {
-      id: `git:${shortHash(composite)}`,
-      source: "git",
-      name: target.name,
-      remoteUrl: remote,
-      firstCommit: firstCommit ?? void 0,
-      branch: branch ?? void 0,
-      rootPath: cwd
-    };
-  }
-  return {
-    id: `folder:${shortHash(cwd)}`,
-    source: "folder",
-    name: target.name,
-    rootPath: cwd
-  };
-}
-function projectFolderName(identity) {
-  if (identity.source === "git" && identity.remoteUrl) {
-    return `repo:${identity.remoteUrl}`;
-  }
-  if (identity.source === "git") {
-    return `repo:${identity.id}`;
-  }
-  if (identity.source === "folder") {
-    return `local:${identity.name}`;
-  }
-  return "workspace";
-}
-function projectConversationTag(identity) {
-  return `ide-project:${identity.id}`;
-}
-function conversationHasProjectTag(identity, tags) {
-  if (!tags?.length || identity.source === "none") return false;
-  return tags.includes(projectConversationTag(identity));
-}
-
 // ../../../packages/shared/src/json-rpc.ts
 function isJsonRpcNotification(value) {
   if (!value || typeof value !== "object") return false;
-  const record2 = value;
-  return record2["jsonrpc"] === "2.0" && typeof record2["method"] === "string" && !("id" in record2);
+  const record3 = value;
+  return record3["jsonrpc"] === "2.0" && typeof record3["method"] === "string" && !("id" in record3);
 }
 function isJsonRpcRequest(value) {
   if (!value || typeof value !== "object") return false;
-  const record2 = value;
-  return record2["jsonrpc"] === "2.0" && typeof record2["id"] === "string" && typeof record2["method"] === "string";
+  const record3 = value;
+  return record3["jsonrpc"] === "2.0" && typeof record3["id"] === "string" && typeof record3["method"] === "string";
+}
+
+// ../../../packages/shared/src/agent-stream.ts
+var AGENT_RUN_CARD_KIND = "agent_run";
+var TERMINAL_AGENT_RUN_STATUSES = ["completed", "failed", "cancelled"];
+function isTerminalAgentRunStatus(status) {
+  return TERMINAL_AGENT_RUN_STATUSES.includes(String(status));
+}
+function conversationAgentsStreamPath(conversationId) {
+  return `/api/conversations/${encodeURIComponent(conversationId)}/agents/stream`;
 }
 
 // ../../../packages/shared/src/chat-commands.ts
@@ -3004,7 +475,7 @@ __export(external_exports, {
   any: () => any,
   array: () => array,
   base64: () => base642,
-  base64url: () => base64url3,
+  base64url: () => base64url2,
   bigint: () => bigint2,
   boolean: () => boolean2,
   catch: () => _catch2,
@@ -3697,14 +1168,14 @@ function promiseAllObject(promisesObj) {
 }
 function randomString(length = 10) {
   const chars = "abcdefghijklmnopqrstuvwxyz";
-  let str = "";
+  let str2 = "";
   for (let i = 0; i < length; i++) {
-    str += chars[Math.floor(Math.random() * chars.length)];
+    str2 += chars[Math.floor(Math.random() * chars.length)];
   }
-  return str;
+  return str2;
 }
-function esc(str) {
-  return JSON.stringify(str);
+function esc(str2) {
+  return JSON.stringify(str2);
 }
 function slugify(input) {
   return input.toLowerCase().trim().replace(/[^\w\s-]/g, "").replace(/[\s_-]+/g, "-").replace(/^-+|-+$/g, "");
@@ -3818,8 +1289,8 @@ var primitiveTypes = /* @__PURE__ */ new Set([
   "symbol",
   "undefined"
 ]);
-function escapeRegex(str) {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function escapeRegex(str2) {
+  return str2.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 function clone(inst, def, params) {
   const cl = new inst._zod.constr(def ?? inst._zod.def);
@@ -4439,7 +1910,7 @@ var safeDecodeAsync = /* @__PURE__ */ _safeDecodeAsync($ZodRealError);
 var regexes_exports = {};
 __export(regexes_exports, {
   base64: () => base64,
-  base64url: () => base64url2,
+  base64url: () => base64url,
   bigint: () => bigint,
   boolean: () => boolean,
   browserEmail: () => browserEmail,
@@ -4534,7 +2005,7 @@ var mac = (delimiter) => {
 var cidrv4 = /^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\/([0-9]|[1-2][0-9]|3[0-2])$/;
 var cidrv6 = /^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|::|([0-9a-fA-F]{1,4})?::([0-9a-fA-F]{1,4}:?){0,6})\/(12[0-8]|1[01][0-9]|[1-9]?[0-9])$/;
 var base64 = /^$|^(?:[0-9a-zA-Z+/]{4})*(?:(?:[0-9a-zA-Z+/]{2}==)|(?:[0-9a-zA-Z+/]{3}=))?$/;
-var base64url2 = /^[A-Za-z0-9_-]*$/;
+var base64url = /^[A-Za-z0-9_-]*$/;
 var hostname = /^(?=.{1,253}\.?$)[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[-0-9a-zA-Z]{0,61}[0-9a-zA-Z])?)*\.?$/;
 var domain = /^([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$/;
 var httpProtocol = /^https?$/;
@@ -5548,14 +3019,14 @@ var $ZodBase64 = /* @__PURE__ */ $constructor("$ZodBase64", (inst, def) => {
   };
 });
 function isValidBase64URL(data) {
-  if (!base64url2.test(data))
+  if (!base64url.test(data))
     return false;
   const base643 = data.replace(/[-_]/g, (c) => c === "-" ? "+" : "/");
   const padded = base643.padEnd(Math.ceil(base643.length / 4) * 4, "=");
   return isValidBase64(padded);
 }
 var $ZodBase64URL = /* @__PURE__ */ $constructor("$ZodBase64URL", (inst, def) => {
-  def.pattern ?? (def.pattern = base64url2);
+  def.pattern ?? (def.pattern = base64url);
   $ZodStringFormat.init(inst, def);
   inst._zod.bag.contentEncoding = "base64url";
   inst._zod.check = (payload) => {
@@ -15381,7 +12852,7 @@ __export(schemas_exports2, {
   any: () => any,
   array: () => array,
   base64: () => base642,
-  base64url: () => base64url3,
+  base64url: () => base64url2,
   bigint: () => bigint2,
   boolean: () => boolean2,
   catch: () => _catch2,
@@ -16003,7 +13474,7 @@ var ZodBase64URL = /* @__PURE__ */ $constructor("ZodBase64URL", (inst, def) => {
   $ZodBase64URL.init(inst, def);
   ZodStringFormat.init(inst, def);
 });
-function base64url3(params) {
+function base64url2(params) {
   return _base64url(ZodBase64URL, params);
 }
 var ZodE164 = /* @__PURE__ */ $constructor("ZodE164", (inst, def) => {
@@ -17544,6 +15015,2854 @@ var handoffPayloadSchema = external_exports.discriminatedUnion("kind", [
   researchFindingHandoffSchema
 ]);
 
+// src/api.ts
+var import_node_fs = require("node:fs");
+var import_node_path = require("node:path");
+
+// src/sse.ts
+var SseIdleTimeoutError = class extends Error {
+  constructor(ms) {
+    super(`Stream idle for ${Math.round(ms / 1e3)}s \u2014 the server may be stuck.`);
+    this.name = "SseIdleTimeoutError";
+  }
+};
+var MAX_BUFFER_CHARS = 4e6;
+function parseFrame(raw) {
+  let event;
+  const dataLines = [];
+  for (const line of raw.split(/\r?\n/)) {
+    if (!line || line.startsWith(":")) continue;
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
+  }
+  if (!dataLines.length) return null;
+  const text = dataLines.join("\n");
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    console.warn("[liberide.sse] could not parse SSE data:", text.slice(0, 200));
+    return null;
+  }
+  if (!event) {
+    const type = data && typeof data === "object" ? data.type : void 0;
+    event = typeof type === "string" ? type : "message";
+  }
+  return { event, data };
+}
+async function readSseStream(body, onEvent, options = {}) {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let skippingOversized = false;
+  const idleMs = options.idleTimeoutMs;
+  try {
+    while (true) {
+      let timer;
+      const chunk = idleMs ? await Promise.race([
+        reader.read(),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new SseIdleTimeoutError(idleMs)), idleMs);
+        })
+      ]).finally(() => {
+        if (timer) clearTimeout(timer);
+      }) : await reader.read();
+      buffer += decoder.decode(chunk.value, { stream: !chunk.done });
+      const parts = buffer.split(/\r?\n\r?\n/);
+      buffer = parts.pop() ?? "";
+      for (const [index, part] of parts.entries()) {
+        if (index === 0 && skippingOversized) {
+          skippingOversized = false;
+          continue;
+        }
+        const frame = parseFrame(part);
+        if (frame) onEvent(frame);
+      }
+      if (buffer.length > MAX_BUFFER_CHARS) {
+        buffer = "";
+        skippingOversized = true;
+        options.onOversizedFrame?.();
+      }
+      if (chunk.done) break;
+    }
+    if (buffer.trim() && !skippingOversized) {
+      const frame = parseFrame(buffer);
+      if (frame) onEvent(frame);
+    }
+  } finally {
+    reader.cancel().catch(() => void 0);
+  }
+}
+function backoffDelay(attempt, baseMs = 1e3, maxMs = 3e4) {
+  const exp = Math.min(baseMs * 2 ** attempt, maxMs);
+  return Math.round(exp / 2 + Math.random() * (exp / 2));
+}
+
+// src/chat/agent-runs.ts
+function isActiveAgentRunStatus(status) {
+  return Boolean(status) && !isTerminalAgentRunStatus(status);
+}
+function str(value) {
+  return typeof value === "string" && value ? value : void 0;
+}
+function record2(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : void 0;
+}
+function toolSummary(name, args) {
+  for (const key of ["path", "command", "query", "url", "pattern"]) {
+    const value = str(args[key]);
+    if (value) return value.length > 80 ? `${value.slice(0, 79)}\u2026` : value;
+  }
+  return name === "agent" ? str(args.agentId) ?? str(args.agent) : void 0;
+}
+function looksLikeError(result) {
+  const trimmed = result.trim();
+  if (trimmed.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed.error === true || typeof parsed.error === "string" || parsed.success === false) return true;
+    } catch {
+    }
+  }
+  return /^(error|failed|denied)\b/i.test(trimmed);
+}
+function toolCallFrom(raw) {
+  const value = record2(raw);
+  if (!value) return void 0;
+  const id = str(value.id) ?? str(value.callId) ?? str(value.toolCallId);
+  const name = str(value.name) ?? str(value.toolName) ?? str(value.tool);
+  if (!id || !name) return void 0;
+  const args = record2(value.arguments) ?? record2(value.args) ?? record2(value.input) ?? {};
+  const result = typeof value.result === "string" ? value.result : value.result !== void 0 && value.result !== null ? JSON.stringify(value.result) : typeof value.output === "string" ? value.output : void 0;
+  const error51 = str(value.error);
+  const declared = str(value.status);
+  const status = error51 || declared === "error" || declared === "failed" ? "error" : declared === "running" || declared === "pending" || declared === "started" ? "running" : result !== void 0 ? looksLikeError(result) ? "error" : "complete" : declared === "completed" || declared === "complete" ? "complete" : "running";
+  return {
+    id,
+    name,
+    status,
+    summary: toolSummary(name, args),
+    ...error51 ? { result: error51 } : result !== void 0 ? { result: result.slice(0, 2e3) } : {}
+  };
+}
+function agentRunFrom(raw) {
+  const value = record2(raw);
+  if (!value) return void 0;
+  const runId = str(value.runId) ?? str(value.id) ?? str(value.agentRunId);
+  if (!runId) return void 0;
+  const toolCalls = Array.isArray(value.toolCalls) ? value.toolCalls.map(toolCallFrom).filter((c) => Boolean(c)) : [];
+  return {
+    runId,
+    status: str(value.status) ?? "running",
+    text: typeof value.text === "string" ? value.text : typeof value.output === "string" ? value.output : typeof value.excerpt === "string" ? value.excerpt : "",
+    toolCalls,
+    ...str(value.graphId) ?? str(value.executionGraphId) ? { graphId: str(value.graphId) ?? str(value.executionGraphId) } : {},
+    ...str(value.nodeId) ? { nodeId: str(value.nodeId) } : {},
+    ...str(value.parentRunId) ? { parentRunId: str(value.parentRunId) } : {},
+    ...str(value.messageId) ? { messageId: str(value.messageId) } : {},
+    ...str(value.agentName) ? { agentName: str(value.agentName) } : {},
+    ...str(value.error) ? { error: str(value.error) } : {}
+  };
+}
+function parseAgentStreamEvent(event, data) {
+  const value = record2(data);
+  if (!value) return void 0;
+  const type = event === "message" ? str(value.type) ?? event : event;
+  switch (type) {
+    case "snapshot": {
+      const runs2 = Array.isArray(value.runs) ? value.runs.map(agentRunFrom).filter((r) => Boolean(r)) : [];
+      return { type: "snapshot", runs: runs2 };
+    }
+    case "delta": {
+      const runId = str(value.runId);
+      if (!runId || typeof value.text !== "string") return void 0;
+      return { type: "delta", runId, text: value.text };
+    }
+    case "tool": {
+      const runId = str(value.runId);
+      const call = toolCallFrom(value.event ?? value.call);
+      if (!runId || !call) return void 0;
+      return { type: "tool", runId, call };
+    }
+    case "status": {
+      const runId = str(value.runId);
+      const status = str(value.status);
+      if (!runId || !status) return void 0;
+      return {
+        type: "status",
+        runId,
+        status,
+        ...str(value.error) ? { error: str(value.error) } : {},
+        ...str(value.graphId) ? { graphId: str(value.graphId) } : {},
+        ...str(value.nodeId) ? { nodeId: str(value.nodeId) } : {},
+        ...str(value.parentRunId) ? { parentRunId: str(value.parentRunId) } : {}
+      };
+    }
+    default:
+      return void 0;
+  }
+}
+function mergeAgentRun(existing, next) {
+  if (!existing) return { ...next, toolCalls: [...next.toolCalls] };
+  const toolCalls = [...existing.toolCalls];
+  for (const call of next.toolCalls) upsertToolCall(toolCalls, call);
+  return {
+    runId: existing.runId,
+    status: next.status || existing.status,
+    // Anchor excerpts are shorter than the streamed text: keep the longer one.
+    text: next.text && next.text.length >= existing.text.length ? next.text : existing.text || next.text,
+    toolCalls,
+    graphId: next.graphId ?? existing.graphId,
+    nodeId: next.nodeId ?? existing.nodeId,
+    parentRunId: next.parentRunId ?? existing.parentRunId,
+    messageId: existing.messageId ?? next.messageId,
+    agentName: next.agentName ?? existing.agentName,
+    error: next.error ?? (isActiveAgentRunStatus(next.status) ? void 0 : existing.error)
+  };
+}
+function upsertToolCall(list, call) {
+  const index = list.findIndex((c) => c.id === call.id);
+  if (index >= 0) list[index] = { ...list[index], ...call, summary: call.summary ?? list[index].summary };
+  else list.push(call);
+}
+function applyAgentStreamEvent(runs2, event) {
+  const ensure = (runId) => {
+    let run = runs2.get(runId);
+    if (!run) {
+      run = { runId, status: "running", text: "", toolCalls: [] };
+      runs2.set(runId, run);
+    }
+    return run;
+  };
+  switch (event.type) {
+    case "snapshot": {
+      for (const run of event.runs) {
+        const existing = runs2.get(run.runId);
+        const merged = mergeAgentRun(existing, run);
+        merged.text = run.text || existing?.text || "";
+        runs2.set(run.runId, merged);
+      }
+      return event.runs.map((run) => run.runId);
+    }
+    case "delta": {
+      const run = ensure(event.runId);
+      run.text += event.text;
+      if (!isActiveAgentRunStatus(run.status)) run.status = "running";
+      return [event.runId];
+    }
+    case "tool": {
+      const run = ensure(event.runId);
+      upsertToolCall(run.toolCalls, event.call);
+      return [event.runId];
+    }
+    case "status": {
+      const run = ensure(event.runId);
+      run.status = event.status;
+      if (event.graphId) run.graphId = event.graphId;
+      if (event.nodeId) run.nodeId = event.nodeId;
+      if (event.parentRunId) run.parentRunId = event.parentRunId;
+      if (event.error) run.error = event.error;
+      else if (isActiveAgentRunStatus(event.status)) run.error = void 0;
+      return [event.runId];
+    }
+  }
+}
+function agentRunFromAnchor(message) {
+  const card = message.agentRun ?? record2(message.metadata);
+  if (!card || card.kind !== AGENT_RUN_CARD_KIND || !card.agentRunId) return void 0;
+  return {
+    runId: card.agentRunId,
+    status: card.status || "running",
+    text: card.outputExcerpt ?? message.content ?? "",
+    toolCalls: [],
+    messageId: message.id,
+    ...card.graphId ? { graphId: card.graphId } : {},
+    ...card.nodeId ? { nodeId: card.nodeId } : {},
+    ...card.parentRunId ? { parentRunId: card.parentRunId } : {},
+    ...card.agentName ? { agentName: card.agentName } : {},
+    ...card.error ? { error: card.error } : {}
+  };
+}
+
+// src/api.ts
+var integrationPath;
+var cachedIntegration;
+var cachedIntegrationSource;
+var cachedIntegrationMtimeMs;
+var announcedToken;
+var refreshedAuth;
+var refreshTimer;
+var refreshInFlight;
+var authListeners = /* @__PURE__ */ new Set();
+var integrationListeners = /* @__PURE__ */ new Set();
+var REFRESH_LEAD_MS = 5 * 6e4;
+var MIN_REFRESH_DELAY_MS = 3e4;
+var WATCH_INTERVAL_MS = 2e3;
+function integrationCandidates() {
+  return [
+    process.env.LIBERVOX_INTEGRATION_FILE,
+    process.env.CHATLLM_INTEGRATION_FILE,
+    integrationPath
+  ].filter((p) => Boolean(p));
+}
+function initApiFromContext(context) {
+  integrationPath = (0, import_node_path.join)(context.globalStorageUri.fsPath, "../../../libervox-integration.json");
+  clearIntegrationCache();
+  announcedToken = getAuthToken();
+  const watched = [...new Set(integrationCandidates())];
+  for (const path11 of watched) {
+    (0, import_node_fs.watchFile)(path11, { interval: WATCH_INTERVAL_MS, persistent: false }, (curr, prev) => {
+      if (curr.mtimeMs === prev.mtimeMs && curr.size === prev.size) return;
+      reloadAuth();
+      for (const listener of [...integrationListeners]) listener();
+    });
+  }
+  scheduleTokenRefresh();
+  return {
+    dispose: () => {
+      for (const path11 of watched) (0, import_node_fs.unwatchFile)(path11);
+      if (refreshTimer) clearTimeout(refreshTimer);
+      refreshTimer = void 0;
+      authListeners.clear();
+      integrationListeners.clear();
+    }
+  };
+}
+function onAuthChanged(listener) {
+  authListeners.add(listener);
+  return () => authListeners.delete(listener);
+}
+function onIntegrationFileChanged(listener) {
+  integrationListeners.add(listener);
+  return () => integrationListeners.delete(listener);
+}
+function getIntegrationSnapshot() {
+  return loadIntegrationFile();
+}
+function getWebOrigin() {
+  const value = loadIntegrationFile()?.webOrigin;
+  return typeof value === "string" && value ? value : void 0;
+}
+function notifyAuthChanged() {
+  announcedToken = getAuthToken();
+  for (const listener of [...authListeners]) {
+    try {
+      listener();
+    } catch (err) {
+      console.warn("[liberide] auth listener failed:", err);
+    }
+  }
+}
+function reloadAuth() {
+  const before = announcedToken ?? getAuthToken();
+  cachedIntegration = void 0;
+  const next = loadIntegrationFile();
+  if (refreshedAuth && next?.authToken && next.authToken !== refreshedAuth.token) refreshedAuth = void 0;
+  const changed = getAuthToken() !== before;
+  scheduleTokenRefresh();
+  if (changed) notifyAuthChanged();
+  return changed;
+}
+function loadIntegrationFile() {
+  if (cachedIntegration !== void 0 && cachedSnapshotFresh()) return cachedIntegration;
+  for (const path11 of integrationCandidates()) {
+    try {
+      if ((0, import_node_fs.existsSync)(path11)) {
+        const mtimeMs = (0, import_node_fs.statSync)(path11).mtimeMs;
+        cachedIntegration = JSON.parse((0, import_node_fs.readFileSync)(path11, "utf8"));
+        cachedIntegrationSource = path11;
+        cachedIntegrationMtimeMs = mtimeMs;
+        return cachedIntegration;
+      }
+    } catch {
+    }
+  }
+  cachedIntegration = null;
+  cachedIntegrationSource = void 0;
+  cachedIntegrationMtimeMs = void 0;
+  return null;
+}
+function cachedSnapshotFresh() {
+  if (!cachedIntegrationSource) return true;
+  try {
+    return (0, import_node_fs.statSync)(cachedIntegrationSource).mtimeMs === cachedIntegrationMtimeMs;
+  } catch {
+    return false;
+  }
+}
+function clearIntegrationCache() {
+  cachedIntegration = void 0;
+  cachedIntegrationSource = void 0;
+  cachedIntegrationMtimeMs = void 0;
+}
+function getApiOrigin() {
+  const fromEnv = process.env.LIBERIDE_API_ORIGIN ?? process.env.CHATLLM_API_ORIGIN;
+  if (fromEnv) return fromEnv.replace(/\/$/, "");
+  return (loadIntegrationFile()?.apiOrigin || "").replace(/\/$/, "");
+}
+function getAuthToken() {
+  if (refreshedAuth?.token) return refreshedAuth.token;
+  const fromFile = loadIntegrationFile()?.authToken;
+  if (fromFile) return fromFile;
+  return launchEnvToken;
+}
+var AUTH_ENV_KEYS = ["LIBERIDE_AUTH_TOKEN", "CHATLLM_AUTH_TOKEN"];
+var launchEnvToken = AUTH_ENV_KEYS.map((key) => process.env[key]).find(Boolean) ?? "";
+for (const key of AUTH_ENV_KEYS) delete process.env[key];
+var AUTH_ENV_NAME = /^(LIBERIDE|CHATLLM)_.*(TOKEN|SECRET|PASSWORD|AUTH|KEY|COOKIE)/i;
+function childProcessEnv(env4 = process.env) {
+  const out = {};
+  for (const [key, value] of Object.entries(env4)) if (!AUTH_ENV_NAME.test(key)) out[key] = value;
+  return out;
+}
+var IDE_RPC_SUBPROTOCOL = "liberide.v1";
+function base64url3(value) {
+  return Buffer.from(value, "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function bearerSubprotocols(token = getAuthToken()) {
+  return token ? [IDE_RPC_SUBPROTOCOL, `bearer.${base64url3(token)}`] : void 0;
+}
+function wsOrigin(httpOrigin) {
+  if (httpOrigin.startsWith("https://")) return `wss://${httpOrigin.slice("https://".length)}`;
+  if (httpOrigin.startsWith("http://")) return `ws://${httpOrigin.slice("http://".length)}`;
+  return httpOrigin;
+}
+function currentExpiresAt() {
+  const raw = refreshedAuth ? refreshedAuth.expiresAt : loadIntegrationFile()?.expiresAt;
+  if (typeof raw !== "string") return void 0;
+  const ts = Date.parse(raw);
+  return Number.isFinite(ts) ? ts : void 0;
+}
+function scheduleTokenRefresh() {
+  if (refreshTimer) clearTimeout(refreshTimer);
+  refreshTimer = void 0;
+  const expiresAt = currentExpiresAt();
+  if (!expiresAt || !getAuthToken()) return;
+  const delay = Math.max(expiresAt - Date.now() - REFRESH_LEAD_MS, MIN_REFRESH_DELAY_MS);
+  refreshTimer = setTimeout(() => {
+    refreshTimer = void 0;
+    void refreshAuthToken();
+  }, delay);
+  refreshTimer.unref?.();
+}
+function refreshAuthToken() {
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = (async () => {
+    const origin = getApiOrigin();
+    const token = getAuthToken();
+    if (!origin || !token) return false;
+    try {
+      const res = await fetch(`${origin}/api/auth/integrations/vscode`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }
+      });
+      if (!res.ok) return false;
+      const body = await res.json();
+      if (!body.token) return false;
+      refreshedAuth = { token: body.token, expiresAt: body.expiresAt };
+      const snapshot = loadIntegrationFile();
+      if (snapshot && cachedIntegrationSource) {
+        try {
+          writeIntegrationFile(cachedIntegrationSource, { ...snapshot, authToken: body.token, expiresAt: body.expiresAt });
+        } catch {
+        }
+      }
+      scheduleTokenRefresh();
+      notifyAuthChanged();
+      return true;
+    } catch {
+      return false;
+    } finally {
+      refreshInFlight = void 0;
+    }
+  })();
+  return refreshInFlight;
+}
+function writeIntegrationFile(path11, snapshot) {
+  const next = { ...snapshot, updatedAt: (/* @__PURE__ */ new Date()).toISOString() };
+  (0, import_node_fs.mkdirSync)((0, import_node_path.dirname)(path11), { recursive: true });
+  (0, import_node_fs.writeFileSync)(path11, JSON.stringify(next), { mode: 384 });
+  (0, import_node_fs.chmodSync)(path11, 384);
+  cachedIntegration = next;
+  cachedIntegrationSource = path11;
+  cachedIntegrationMtimeMs = (0, import_node_fs.statSync)(path11).mtimeMs;
+}
+var UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function getIntegrationMachineId() {
+  const value = loadIntegrationFile()?.machineId;
+  return typeof value === "string" && UUID_PATTERN.test(value) ? value.toLowerCase() : void 0;
+}
+function normalizeServerUrl(input) {
+  try {
+    const url2 = new URL(input.trim());
+    if (url2.protocol !== "http:" && url2.protocol !== "https:") return void 0;
+    return `${url2.origin}${url2.pathname}`.replace(/\/+$/, "");
+  } catch {
+    return void 0;
+  }
+}
+async function pairWithServer(input) {
+  const apiOrigin = normalizeServerUrl(input.serverUrl);
+  if (!apiOrigin) throw new Error("Enter the server's http(s) URL.");
+  const res = await fetch(`${apiOrigin}/api/machines/pair`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code: input.code, machineId: input.machineId, hostname: input.hostname, platform: input.platform })
+  });
+  if (!res.ok) {
+    const body2 = await res.json().catch(() => ({}));
+    throw new Error(`Pairing failed: ${body2.error ?? `${res.status} ${res.statusText}`}`);
+  }
+  const body = await res.json();
+  if (!body.authToken) throw new Error("Pairing failed: the server returned no token.");
+  const target = cachedIntegrationSource ?? integrationCandidates()[0];
+  if (!target) throw new Error("Pairing failed: no location for the LiberIDE integration file.");
+  writeIntegrationFile(target, {
+    ...loadIntegrationFile() ?? {},
+    apiOrigin: body.apiOrigin ?? apiOrigin,
+    webOrigin: body.webOrigin,
+    authToken: body.authToken,
+    expiresAt: body.expiresAt,
+    machineId: body.machineId ?? input.machineId
+  });
+  refreshedAuth = void 0;
+  scheduleTokenRefresh();
+  notifyAuthChanged();
+  return { apiOrigin: body.apiOrigin ?? apiOrigin, machineId: body.machineId ?? input.machineId };
+}
+async function recoverFromUnauthorized() {
+  if (reloadAuth()) return true;
+  return refreshAuthToken();
+}
+function getIntegrationIdentity() {
+  const snapshot = loadIntegrationFile();
+  if (!snapshot?.userId) return void 0;
+  return {
+    id: snapshot.userId,
+    email: snapshot.userEmail,
+    name: snapshot.userName
+  };
+}
+function authHeaders(extra) {
+  const headers = { "Content-Type": "application/json", ...extra ?? {} };
+  const token = getAuthToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
+}
+async function apiFetch(path11, init) {
+  const origin = getApiOrigin();
+  if (!origin) throw new Error("LIBERIDE_API_ORIGIN is not set.");
+  const url2 = path11.startsWith("http") ? path11 : `${origin}${path11}`;
+  const isForm = typeof FormData !== "undefined" && init?.body instanceof FormData;
+  const send = () => {
+    const headers = { ...authHeaders(), ...init?.headers };
+    if (isForm) delete headers["Content-Type"];
+    return fetch(url2, { ...init, headers });
+  };
+  const response = await send();
+  const replayable = init?.body === void 0 || init.body === null || typeof init.body === "string" || isForm;
+  if (response.status !== 401 || init?.signal?.aborted || !replayable) return response;
+  if (!await recoverFromUnauthorized()) return response;
+  response.body?.cancel().catch(() => void 0);
+  return send();
+}
+async function probeBackend() {
+  if (!getApiOrigin()) return "unconfigured";
+  try {
+    const res = await apiFetch("/api/config");
+    if (res.ok) return "ok";
+    if (res.status === 401 || res.status === 403) return "unauthorized";
+    return "unreachable";
+  } catch {
+    return "unreachable";
+  }
+}
+async function readJson(res) {
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`${res.status} ${res.statusText}${body ? ` \u2014 ${body.slice(0, 300)}` : ""}`);
+  }
+  return await res.json();
+}
+async function readNothing(res) {
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`${res.status} ${res.statusText}${body ? ` \u2014 ${body.slice(0, 300)}` : ""}`);
+  }
+}
+async function fetchConfig() {
+  return readJson(await apiFetch("/api/config"));
+}
+async function createAuthHandoff(next) {
+  return readJson(
+    await apiFetch("/api/auth/handoff", { method: "POST", body: JSON.stringify({ next }), signal: AbortSignal.timeout(5e3) })
+  );
+}
+async function fetchAuthenticatedUser() {
+  const payload = await readJson(await apiFetch("/api/auth/me"));
+  if (!payload.user?.id) throw new Error("Authenticated user response did not include an id.");
+  return payload.user;
+}
+async function listConversations() {
+  return readJson(await apiFetch("/api/conversations"));
+}
+async function createConversation(title) {
+  return readJson(
+    await apiFetch("/api/conversations", { method: "POST", body: JSON.stringify({ title }) })
+  );
+}
+async function patchConversation(id, partial2) {
+  return readJson(
+    await apiFetch(`/api/conversations/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(partial2)
+    })
+  );
+}
+async function deleteConversation(id) {
+  await readNothing(
+    await apiFetch(`/api/conversations/${encodeURIComponent(id)}`, { method: "DELETE" })
+  );
+}
+async function listConversationMessages(id) {
+  return readJson(
+    await apiFetch(`/api/conversations/${encodeURIComponent(id)}/messages`)
+  );
+}
+async function listFolders(filter = "mine") {
+  return readJson(
+    await apiFetch(`/api/folders?filter=${encodeURIComponent(filter)}`)
+  );
+}
+async function createFolder(input) {
+  return readJson(
+    await apiFetch("/api/folders", { method: "POST", body: JSON.stringify(input) })
+  );
+}
+async function addConversationToFolder(folderId, conversationId) {
+  await readNothing(
+    await apiFetch(
+      `/api/folders/${encodeURIComponent(folderId)}/conversations/${encodeURIComponent(conversationId)}`,
+      { method: "POST" }
+    )
+  );
+}
+async function listDocuments() {
+  return readJson(await apiFetch("/api/documents"));
+}
+async function uploadDocument(file2) {
+  const form = new FormData();
+  const bytes = file2.bytes.slice();
+  const blob = new Blob([bytes], { type: file2.mimeType ?? "application/octet-stream" });
+  form.append("file", blob, file2.name);
+  const response = await apiFetch("/api/documents", { method: "POST", body: form });
+  const payload = await readJson(response);
+  return payload.document;
+}
+var CONVERSATION_EVENT_TYPES = /* @__PURE__ */ new Set([
+  "conversations_changed",
+  "folders_changed",
+  "message_updated",
+  "agent_run_updated",
+  "approvals_changed",
+  "models_changed"
+]);
+function parseConversationListEvent(data) {
+  if (!data || typeof data !== "object") return void 0;
+  const raw = data;
+  if (typeof raw.type !== "string" || !CONVERSATION_EVENT_TYPES.has(raw.type)) return void 0;
+  const event = { type: raw.type };
+  for (const key of ["conversationId", "messageId", "runId", "graphId", "nodeId", "parentRunId", "status", "nodeStatus", "code"]) {
+    const value = raw[key];
+    if (typeof value === "string" && value) event[key] = value;
+  }
+  return event;
+}
+function subscribeConversationListSync(onChange) {
+  let closed = false;
+  let pollTimer = null;
+  let retryTimer = null;
+  let abort = null;
+  let attempt = 0;
+  let generation = 0;
+  const startPoll = () => {
+    if (pollTimer || closed) return;
+    pollTimer = setInterval(() => onChange({ type: "resync" }), 3e4);
+  };
+  const stopPoll = () => {
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = null;
+  };
+  const scheduleReconnect = () => {
+    if (closed || retryTimer) return;
+    startPoll();
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      void connect();
+    }, backoffDelay(attempt++, 2e3, 6e4));
+  };
+  const connect = async () => {
+    if (closed) return;
+    const gen = ++generation;
+    const origin = getApiOrigin();
+    if (!origin) {
+      scheduleReconnect();
+      return;
+    }
+    abort = new AbortController();
+    try {
+      const response = await fetch(`${origin}/api/conversations/stream`, {
+        headers: authHeaders({ Accept: "text/event-stream" }),
+        signal: abort.signal
+      });
+      if (response.status === 401) {
+        response.body?.cancel().catch(() => void 0);
+        if (!await recoverFromUnauthorized() && gen === generation) scheduleReconnect();
+        return;
+      }
+      if (!response.ok || !response.body) {
+        response.body?.cancel().catch(() => void 0);
+        scheduleReconnect();
+        return;
+      }
+      const wasReconnect = attempt > 0;
+      attempt = 0;
+      stopPoll();
+      if (wasReconnect) onChange({ type: "resync" });
+      await readSseStream(response.body, ({ data }) => {
+        const event = parseConversationListEvent(data);
+        if (event) onChange(event);
+      }, { idleTimeoutMs: 6e4 });
+    } catch {
+    }
+    if (!closed && gen === generation) {
+      attempt = Math.max(attempt, 1);
+      scheduleReconnect();
+    }
+  };
+  const offAuth = onAuthChanged(() => {
+    if (closed) return;
+    abort?.abort();
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = null;
+    attempt = 1;
+    void connect();
+  });
+  void connect();
+  return () => {
+    closed = true;
+    offAuth();
+    abort?.abort();
+    stopPoll();
+    if (retryTimer) clearTimeout(retryTimer);
+  };
+}
+async function listConversationAgentRuns(conversationId) {
+  const payload = await readJson(await apiFetch(`/api/conversations/${encodeURIComponent(conversationId)}/agent-runs`));
+  const list = Array.isArray(payload) ? payload : Array.isArray(payload?.runs) ? payload.runs : [];
+  return list.map(agentRunFrom).filter((run) => Boolean(run));
+}
+async function listAgentRunToolCalls(runId) {
+  const payload = await readJson(await apiFetch(`/api/agent-runs/${encodeURIComponent(runId)}/tool-calls`));
+  const list = Array.isArray(payload) ? payload : Array.isArray(payload?.toolCalls) ? payload.toolCalls : [];
+  return list.map(toolCallFrom).filter((call) => Boolean(call));
+}
+function subscribeConversationAgents(conversationId, onEvent, options = {}) {
+  let closed = false;
+  let attempt = 0;
+  let abort = null;
+  let retryTimer = null;
+  const scheduleReconnect = (reason) => {
+    if (closed || retryTimer) return;
+    options.onConnectionChange?.(false);
+    options.log?.(`agents ${conversationId}: reconnecting (${reason})`);
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      void connect();
+    }, backoffDelay(attempt++, 1e3, 3e4));
+  };
+  const connect = async () => {
+    if (closed) return;
+    abort = new AbortController();
+    try {
+      const response = await apiFetch(conversationAgentsStreamPath(conversationId), {
+        headers: { Accept: "text/event-stream" },
+        signal: abort.signal
+      });
+      if (response.status === 404 || response.status === 403) {
+        response.body?.cancel().catch(() => void 0);
+        options.log?.(`agents ${conversationId}: stream unavailable (${response.status})`);
+        return;
+      }
+      if (!response.ok || !response.body) {
+        response.body?.cancel().catch(() => void 0);
+        scheduleReconnect(`HTTP ${response.status}`);
+        return;
+      }
+      attempt = 0;
+      options.onConnectionChange?.(true);
+      await readSseStream(response.body, ({ event, data }) => {
+        const parsed = parseAgentStreamEvent(event, data);
+        if (parsed && !closed) onEvent(parsed);
+      }, { idleTimeoutMs: 9e4 });
+      if (!closed) scheduleReconnect("stream ended");
+    } catch (err) {
+      if (closed) return;
+      scheduleReconnect(err instanceof Error ? err.message : String(err));
+    }
+  };
+  void connect();
+  return () => {
+    closed = true;
+    abort?.abort();
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = null;
+  };
+}
+async function listApprovalGrants(options) {
+  const params = new URLSearchParams();
+  if (options?.conversationId) params.set("conversationId", options.conversationId);
+  if (options?.scope) params.set("scope", options.scope);
+  if (options?.activeOnly) params.set("activeOnly", "true");
+  const qs = params.toString();
+  return readJson(await apiFetch(`/api/approval-grants${qs ? `?${qs}` : ""}`));
+}
+async function revokeApprovalGrant(id) {
+  await readNothing(
+    await apiFetch(`/api/approval-grants/${encodeURIComponent(id)}`, { method: "DELETE" })
+  );
+}
+async function listPermissionPolicies() {
+  const res = await apiFetch("/api/permission-policies");
+  if (res.status === 401 || res.status === 403) return { forbidden: true };
+  return { policies: await readJson(res) };
+}
+async function listMcpServers() {
+  return readJson(await apiFetch("/api/mcp/servers"));
+}
+async function setMcpServerEnabledForUser(id, enabled) {
+  await readNothing(
+    await apiFetch(`/api/mcp/servers/${encodeURIComponent(id)}/user`, {
+      method: "PATCH",
+      body: JSON.stringify({ enabled })
+    })
+  );
+}
+async function listExecutionGraphs(options) {
+  const params = new URLSearchParams();
+  if (options?.status) params.set("status", options.status);
+  if (options?.limit) params.set("limit", String(options.limit));
+  const qs = params.toString();
+  return readJson(await apiFetch(`/api/execution-graphs${qs ? `?${qs}` : ""}`));
+}
+
+// src/chat/continuation.ts
+var import_node_path2 = require("node:path");
+var STARTUP_REQUEST_MAX_AGE_MS = 5 * 6e4;
+var listeners = /* @__PURE__ */ new Set();
+var pending;
+var lastStartupRequest;
+function onConversationOpenRequest(listener) {
+  listeners.add(listener);
+  if (pending) {
+    const id = pending;
+    pending = void 0;
+    listener(id);
+  }
+  return () => listeners.delete(listener);
+}
+function requestConversationOpen(conversationId) {
+  if (!listeners.size) {
+    pending = conversationId;
+    return;
+  }
+  for (const listener of [...listeners]) listener(conversationId);
+}
+function parseConversationOpenParams(params) {
+  const id = params && typeof params === "object" ? params.conversationId : void 0;
+  return typeof id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(id) ? id : void 0;
+}
+function continueInBrowserUrl(webOrigin, conversationId) {
+  if (typeof webOrigin !== "string" || !conversationId || conversationId.startsWith("draft:")) return void 0;
+  let base;
+  try {
+    const url2 = new URL(webOrigin.trim());
+    if (url2.protocol !== "http:" && url2.protocol !== "https:") return void 0;
+    base = `${url2.origin}${url2.pathname}`.replace(/\/+$/, "");
+  } catch {
+    return void 0;
+  }
+  return `${base}/c/${encodeURIComponent(conversationId)}`;
+}
+function acceptHandoffUrl(value, plainUrl) {
+  if (typeof value !== "string") return void 0;
+  try {
+    const url2 = new URL(value);
+    if (url2.origin !== new URL(plainUrl).origin || url2.pathname !== "/auth/handoff" || url2.search) return void 0;
+    return new URLSearchParams(url2.hash.slice(1)).get("code") ? url2.toString() : void 0;
+  } catch {
+    return void 0;
+  }
+}
+async function resolveContinueInBrowserUrl(plainUrl, conversationId, mint) {
+  try {
+    const minted = await mint(`/c/${encodeURIComponent(conversationId)}`);
+    return acceptHandoffUrl(minted?.url, plainUrl) ?? plainUrl;
+  } catch {
+    return plainUrl;
+  }
+}
+function samePath(a, b) {
+  const norm = (p) => (0, import_node_path2.resolve)(p).replace(/[\\/]+$/, "");
+  return process.platform === "win32" || process.platform === "darwin" ? norm(a).toLowerCase() === norm(b).toLowerCase() : norm(a) === norm(b);
+}
+function takeStartupConversationRequest(snapshot, folders, now = Date.now()) {
+  const conversationId = parseConversationOpenParams(snapshot);
+  if (!snapshot || !conversationId || typeof snapshot.conversationRequestedAt !== "string") return void 0;
+  const requestedAt = Date.parse(snapshot.conversationRequestedAt);
+  if (!Number.isFinite(requestedAt) || now - requestedAt > STARTUP_REQUEST_MAX_AGE_MS) return void 0;
+  const projectPath = typeof snapshot.projectPath === "string" ? snapshot.projectPath : "";
+  if (projectPath ? !folders.some((folder) => samePath(folder, projectPath)) : folders.length > 0) return void 0;
+  const key = `${conversationId}@${snapshot.conversationRequestedAt}`;
+  if (key === lastStartupRequest) return void 0;
+  lastStartupRequest = key;
+  return conversationId;
+}
+
+// src/panel/panel.ts
+var import_node_crypto2 = require("node:crypto");
+var vscode5 = __toESM(require("vscode"));
+
+// src/spec/dag.ts
+function validateDag(tasks3) {
+  const ids = new Set(tasks3.map((task) => task.id));
+  const indegree = new Map(tasks3.map((task) => [task.id, 0]));
+  const adjacency = new Map(tasks3.map((task) => [task.id, []]));
+  for (const task of tasks3) {
+    for (const dep of task.dependsOn) {
+      if (!ids.has(dep)) return { ok: false, order: [], error: `Task ${task.id} depends on unknown task ${dep}` };
+      if (dep === task.id) return { ok: false, order: [], error: `Task ${task.id} cannot depend on itself` };
+      adjacency.get(dep)?.push(task.id);
+      indegree.set(task.id, (indegree.get(task.id) ?? 0) + 1);
+    }
+  }
+  const queue = [...indegree.entries()].filter(([, degree]) => degree === 0).map(([id]) => id);
+  const order = [];
+  while (queue.length) {
+    const id = queue.shift();
+    order.push(id);
+    for (const next of adjacency.get(id) ?? []) {
+      const degree = (indegree.get(next) ?? 0) - 1;
+      indegree.set(next, degree);
+      if (degree === 0) queue.push(next);
+    }
+  }
+  return order.length === tasks3.length ? { ok: true, order } : { ok: false, order: [], error: "Task dependencies contain a cycle" };
+}
+function computeTaskReadiness(tasks3) {
+  const status = new Map(tasks3.map((task) => [task.id, task.status]));
+  return new Map(tasks3.map((task) => {
+    const blockedBy = task.dependsOn.filter((dep) => status.get(dep) !== "completed");
+    return [task.id, { ready: blockedBy.length === 0 && task.status !== "completed", blockedBy }];
+  }));
+}
+function effectiveStatus(task, readiness) {
+  if (["running", "completed", "failed"].includes(task.status)) return task.status;
+  const info = readiness.get(task.id);
+  if (info?.blockedBy.length) return "blocked";
+  return info?.ready ? "ready" : task.status;
+}
+function groupTasksByStatus(tasks3) {
+  const readiness = computeTaskReadiness(tasks3);
+  const groups = { pending: [], ready: [], running: [], completed: [], blocked: [], failed: [] };
+  for (const task of tasks3) groups[effectiveStatus(task, readiness)].push(task);
+  return groups;
+}
+
+// src/dispatch/client.ts
+function taskInput(feature, task) {
+  return [
+    `# Task ${task.id}: ${task.title}`,
+    `Feature: ${feature.name}`,
+    `Requirements: ${task.requirementRefs.join(", ") || "(none)"}`,
+    `Design: ${task.designRefs.join(", ") || "(none)"}`,
+    "",
+    "## Architecture hints",
+    task.architectureHints || "(none)",
+    "",
+    "## Instructions",
+    task.body
+  ].join("\n").slice(0, 2e3);
+}
+async function dispatchFeature(feature, options = {}) {
+  const tasks3 = options.taskIds?.length ? feature.tasks.filter((task) => options.taskIds.includes(task.id)) : feature.tasks;
+  const validation = validateDag(tasks3);
+  if (!validation.ok) throw new Error(validation.error);
+  const response = await apiFetch("/api/specs/dispatch", {
+    method: "POST",
+    body: JSON.stringify({
+      feature: feature.id,
+      goal: `Spec dispatch: ${feature.name}`,
+      conversationId: options.conversationId,
+      ideContext: options.ideContext,
+      priority: "FOREGROUND",
+      ...options.swarm ? { swarm: true, isolation: options.isolation ?? "shared" } : {},
+      ...feature.documentation?.length ? { documentation: feature.documentation } : {},
+      ...feature.blockers?.length ? { blockers: feature.blockers } : {},
+      nodes: tasks3.map((task) => ({
+        id: task.id,
+        type: "IMPLEMENT",
+        title: task.title,
+        inputSummary: taskInput(feature, task),
+        dependsOn: task.dependsOn,
+        metadata: { taskId: task.id, produces_context: task.producesContext, requirement_refs: task.requirementRefs, design_refs: task.designRefs },
+        agent: task.agent,
+        expectedFiles: task.expectedFiles,
+        acceptance: task.acceptance,
+        requirementRefs: task.requirementRefs,
+        designRefs: task.designRefs,
+        producesContext: task.producesContext
+      }))
+    })
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ error: response.statusText }));
+    throw new Error(err.error ?? response.statusText);
+  }
+  return response.json();
+}
+var TERMINAL_GRAPH_STATUSES = /* @__PURE__ */ new Set(["completed", "failed", "cancelled"]);
+function isTerminalGraphStatus(status) {
+  return Boolean(status && TERMINAL_GRAPH_STATUSES.has(status));
+}
+function taskIdFromNodeEvent(event, graphId) {
+  if (typeof event.templateNodeId === "string" && event.templateNodeId) return event.templateNodeId;
+  if (!event.nodeId) return void 0;
+  const prefix = `${graphId}_`;
+  return event.nodeId.startsWith(prefix) ? event.nodeId.slice(prefix.length) : event.nodeId;
+}
+function nodeEventError(event) {
+  return event.status === "failed" && typeof event.error === "string" && event.error.trim() ? event.error.trim() : void 0;
+}
+function taskStatusFromEvent(event, graphId) {
+  if (!event.status) return void 0;
+  if (event.type === "task_status") {
+    if (typeof event.taskId !== "string" || !event.taskId) return void 0;
+    return { taskId: event.taskId, status: event.status, ...nodeEventError(event) ? { error: nodeEventError(event) } : {} };
+  }
+  if (event.type !== "node_status" || typeof event.taskId === "string") return void 0;
+  const taskId = taskIdFromNodeEvent(event, graphId);
+  if (!taskId) return void 0;
+  return { taskId, status: event.status, ...nodeEventError(event) ? { error: nodeEventError(event) } : {} };
+}
+var GRAPH_POLL_MS = 1e4;
+var MAX_RECONNECT_ATTEMPTS = 8;
+function subscribeExecutionGraphEvents(graphId, onEvent, options = {}) {
+  let closed = false;
+  let finished = false;
+  let attempt = 0;
+  let abort = null;
+  let retryTimer = null;
+  let pollTimer = null;
+  const stop = () => {
+    closed = true;
+    abort?.abort();
+    if (retryTimer) clearTimeout(retryTimer);
+    if (pollTimer) clearInterval(pollTimer);
+    retryTimer = null;
+    pollTimer = null;
+  };
+  const finish = (status) => {
+    if (finished || closed) return;
+    finished = true;
+    stop();
+    onEvent({ type: "done", status });
+  };
+  const emit = (event) => {
+    if (closed) return;
+    if (event.type === "done") {
+      finish(event.status);
+      return;
+    }
+    onEvent(event);
+    if ((event.type === "graph_status" || event.type === "init") && isTerminalGraphStatus(event.status)) finish(event.status);
+  };
+  const fail = (message) => {
+    if (closed) return;
+    options.log?.(`graph ${graphId}: ${message}`);
+    options.onError?.(message, false);
+    options.onDisconnect?.();
+    stop();
+  };
+  const scheduleReconnect = (reason) => {
+    if (closed || retryTimer) return;
+    if (attempt >= MAX_RECONNECT_ATTEMPTS) {
+      fail(`Lost the graph event stream: ${reason}`);
+      return;
+    }
+    options.log?.(`graph ${graphId}: reconnecting (${reason})`);
+    options.onError?.(reason, true);
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      void connect();
+    }, backoffDelay(attempt++, 1e3, 3e4));
+  };
+  const poll = async () => {
+    if (closed) return;
+    try {
+      const res = await apiFetch(`/api/execution-graphs/${encodeURIComponent(graphId)}`);
+      if (res.status === 404) {
+        fail("Execution graph not found.");
+        return;
+      }
+      if (!res.ok) return;
+      const graph = await res.json();
+      if (graph.status) emit({ type: "graph_status", status: graph.status });
+    } catch {
+    }
+  };
+  const connect = async () => {
+    if (closed) return;
+    const origin = getApiOrigin();
+    if (!origin) {
+      fail("LIBERIDE_API_ORIGIN is not set.");
+      return;
+    }
+    abort = new AbortController();
+    try {
+      const response = await apiFetch(`/api/execution-graphs/${encodeURIComponent(graphId)}/events/stream`, {
+        headers: { Accept: "text/event-stream" },
+        signal: abort.signal
+      });
+      if (response.status === 404) {
+        response.body?.cancel().catch(() => void 0);
+        fail("Execution graph not found.");
+        return;
+      }
+      if (response.status === 401 || response.status === 403) {
+        response.body?.cancel().catch(() => void 0);
+        fail(response.status === 401 ? "Not signed in (401) \u2014 cannot follow the graph." : "Not allowed to view this graph.");
+        return;
+      }
+      if (!response.ok || !response.body) {
+        response.body?.cancel().catch(() => void 0);
+        scheduleReconnect(`HTTP ${response.status}`);
+        return;
+      }
+      attempt = 0;
+      options.onConnected?.();
+      await readSseStream(response.body, ({ event, data }) => {
+        const payload = data && typeof data === "object" ? data : {};
+        if (event === "init") {
+          emit({ ...payload, type: "init", status: typeof payload.graphStatus === "string" ? payload.graphStatus : void 0 });
+          return;
+        }
+        if (event === "connected" || event === "stream_closed") return;
+        emit({ ...payload, type: event });
+      }, { idleTimeoutMs: 9e4 });
+      if (!closed) scheduleReconnect("stream ended before the graph finished");
+    } catch (err) {
+      if (closed) return;
+      scheduleReconnect(err instanceof Error ? err.message : String(err));
+    }
+  };
+  pollTimer = setInterval(() => void poll(), GRAPH_POLL_MS);
+  void connect();
+  return stop;
+}
+async function cancelExecutionGraph(graphId) {
+  const response = await apiFetch(`/api/execution-graphs/${encodeURIComponent(graphId)}/cancel`, { method: "POST" });
+  if (!response.ok && response.status !== 404) {
+    const err = await response.json().catch(() => ({ error: response.statusText }));
+    throw new Error(err.error ?? response.statusText);
+  }
+}
+async function fetchGraphDetail(graphId) {
+  const res = await apiFetch(`/api/execution-graphs/${graphId}/detail`);
+  if (!res.ok) throw new Error(`Failed to load graph detail: ${res.status} ${res.statusText}`);
+  const detail = await res.json();
+  return { nodes: detail.nodes ?? [], approvals: detail.approvals ?? [] };
+}
+async function resolveNodeApproval(graphId, nodeId, decision, note) {
+  const res = await apiFetch(`/api/execution-graphs/${graphId}/nodes/${encodeURIComponent(nodeId)}/approval`, {
+    method: "POST",
+    body: JSON.stringify({ decision, note })
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(body.error ?? `Approval failed: ${res.status}`);
+  }
+}
+async function getWorkingMemory(graphId) {
+  const res = await apiFetch(`/api/execution-graphs/${graphId}/working-memory`);
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(body.error ?? `Failed to load working memory: ${res.status}`);
+  }
+  return await res.json();
+}
+async function patchWorkingMemory(graphId, patch) {
+  const res = await apiFetch(`/api/execution-graphs/${graphId}/working-memory`, {
+    method: "PATCH",
+    body: JSON.stringify(patch)
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(body.error ?? `Failed to update working memory: ${res.status}`);
+  }
+}
+async function addFollowUp(graphId, additionalGoal) {
+  const res = await apiFetch(`/api/execution-graphs/${graphId}/follow-up`, {
+    method: "POST",
+    body: JSON.stringify({ additionalGoal })
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(body.error ?? `Follow-up failed: ${res.status}`);
+  }
+}
+async function getGraphMetrics(graphId) {
+  const res = await apiFetch(`/api/execution-graphs/${graphId}/metrics`);
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(body.error ?? `Failed to load metrics: ${res.status}`);
+  }
+  return await res.json();
+}
+async function listGraphArtifacts(graphId) {
+  const res = await apiFetch(`/api/execution-graphs/${graphId}/artifacts`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(body.error ?? `Failed to list artifacts: ${res.status}`);
+  }
+  return await res.json();
+}
+async function retryGraph(graphId) {
+  const res = await apiFetch(`/api/execution-graphs/${graphId}/retry`, { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(body.error ?? `Retry failed: ${res.status}`);
+  }
+}
+async function replayFromNode(graphId, nodeId, reason) {
+  const res = await apiFetch(`/api/execution-graphs/${graphId}/replay-from/${encodeURIComponent(nodeId)}`, {
+    method: "POST",
+    body: JSON.stringify({ reason: reason ?? "manual_replay" })
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(body.error ?? `Replay failed: ${res.status}`);
+  }
+  const out = await res.json();
+  return out.replayed ?? 0;
+}
+async function resolveGraphApproval(graphId, approvalId, status, response) {
+  const res = await apiFetch(`/api/execution-graphs/${graphId}/approvals/${encodeURIComponent(approvalId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ status, response })
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(body.error ?? `Approval failed: ${res.status}`);
+  }
+}
+
+// src/ide-delegate/context.ts
+var vscode2 = __toESM(require("vscode"));
+
+// src/ide-delegate/machine.ts
+var import_node_crypto = require("node:crypto");
+var MACHINE_ID_STATE_KEY = "liberide.machineId";
+var storedMachineId;
+var extensionVersion;
+var workspaceIds = /* @__PURE__ */ new Map();
+function initMachineIdentity(context) {
+  const existing = context.globalState.get(MACHINE_ID_STATE_KEY);
+  if (typeof existing === "string" && UUID_PATTERN.test(existing)) {
+    storedMachineId = existing.toLowerCase();
+  } else {
+    storedMachineId = (0, import_node_crypto.randomUUID)();
+    void context.globalState.update(MACHINE_ID_STATE_KEY, storedMachineId);
+  }
+  const version2 = context.extension?.packageJSON?.version;
+  extensionVersion = typeof version2 === "string" ? version2 : void 0;
+  return currentMachineId();
+}
+function currentMachineId() {
+  const fromFile = getIntegrationMachineId();
+  if (fromFile) return fromFile;
+  storedMachineId ??= (0, import_node_crypto.randomUUID)();
+  return storedMachineId;
+}
+function currentExtensionVersion() {
+  return extensionVersion;
+}
+function setWorkspaceId(rootPath, workspaceId) {
+  workspaceIds.set(rootPath, workspaceId);
+}
+function workspaceIdFor(rootPath) {
+  return workspaceIds.get(rootPath);
+}
+
+// src/ide-delegate/identity.ts
+var FALLBACK_USER_ID = "default";
+var cachedIdentity = getIntegrationIdentity();
+var warnedFallback = false;
+function currentIdeIdentity() {
+  return cachedIdentity ?? { id: FALLBACK_USER_ID };
+}
+function currentIdeUserId() {
+  return currentIdeIdentity().id || FALLBACK_USER_ID;
+}
+async function refreshIdeIdentity(log) {
+  const integrationIdentity = getIntegrationIdentity();
+  if (integrationIdentity?.id) cachedIdentity = integrationIdentity;
+  try {
+    const user = await fetchAuthenticatedUser();
+    cachedIdentity = user;
+    warnedFallback = false;
+    return user;
+  } catch (err) {
+    if (!cachedIdentity) {
+      cachedIdentity = { id: FALLBACK_USER_ID };
+      if (!warnedFallback) {
+        warnedFallback = true;
+        log?.(`Using fallback IDE identity "${FALLBACK_USER_ID}": ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    return cachedIdentity;
+  }
+}
+
+// src/workspace/intelligence.ts
+var vscode = __toESM(require("vscode"));
+var import_node_fs2 = require("node:fs");
+var import_node_path3 = require("node:path");
+var cache = /* @__PURE__ */ new Map();
+var watcherRegistered = false;
+function detectPackageManager(root) {
+  if ((0, import_node_fs2.existsSync)((0, import_node_path3.join)(root, "bun.lock"))) return "bun";
+  if ((0, import_node_fs2.existsSync)((0, import_node_path3.join)(root, "pnpm-lock.yaml"))) return "pnpm";
+  if ((0, import_node_fs2.existsSync)((0, import_node_path3.join)(root, "yarn.lock"))) return "yarn";
+  if ((0, import_node_fs2.existsSync)((0, import_node_path3.join)(root, "package-lock.json"))) return "npm";
+  if ((0, import_node_fs2.existsSync)((0, import_node_path3.join)(root, "Cargo.toml"))) return "cargo";
+  if ((0, import_node_fs2.existsSync)((0, import_node_path3.join)(root, "pyproject.toml"))) return "python";
+  return void 0;
+}
+function detectPackageScripts(root) {
+  const packageJson = (0, import_node_path3.join)(root, "package.json");
+  if (!(0, import_node_fs2.existsSync)(packageJson)) return {};
+  try {
+    const pkg = JSON.parse((0, import_node_fs2.readFileSync)(packageJson, "utf8"));
+    const scripts = pkg.scripts ?? {};
+    return {
+      test: scripts.test ? "npm test" : void 0,
+      build: scripts.build ? "npm run build" : void 0,
+      typecheck: scripts.typecheck ? "npm run typecheck" : scripts.check ? "npm run check" : void 0,
+      lint: scripts.lint ? "npm run lint" : void 0
+    };
+  } catch {
+    return {};
+  }
+}
+function detectRootMarkers(root) {
+  return [
+    "package.json",
+    "tsconfig.json",
+    "pyproject.toml",
+    "Cargo.toml",
+    "go.mod",
+    ".git",
+    ".vscode/tasks.json",
+    ".chatllm/diagnostics.json"
+  ].filter((marker) => (0, import_node_fs2.existsSync)((0, import_node_path3.join)(root, marker)));
+}
+function detectInstructionFiles(root) {
+  return ["AGENTS.md", "README.md", "CONTRIBUTING.md", ".github/copilot-instructions.md"].filter(
+    (file2) => (0, import_node_fs2.existsSync)((0, import_node_path3.join)(root, file2))
+  );
+}
+async function detectGit(root) {
+  const ext = vscode.extensions.getExtension("vscode.git");
+  if (!ext) return void 0;
+  if (!ext.isActive) await ext.activate();
+  const api = ext.exports?.getAPI?.(1);
+  const repo = api?.repositories?.find((r) => r.rootUri?.fsPath === root);
+  if (!repo) return void 0;
+  return {
+    branch: repo.state?.HEAD?.name,
+    remoteUrl: repo.state?.remotes?.[0]?.fetchUrl ?? repo.state?.remotes?.[0]?.pushUrl
+  };
+}
+async function detectTasks() {
+  try {
+    const tasks3 = await vscode.tasks.fetchTasks();
+    return tasks3.slice(0, 25).map((task) => ({
+      name: task.name,
+      source: String(task.source),
+      group: task.group?.id
+    }));
+  } catch {
+    return [];
+  }
+}
+function detectLanguages() {
+  const languages3 = /* @__PURE__ */ new Set();
+  for (const editor of vscode.window.visibleTextEditors) {
+    if (editor.document.languageId) languages3.add(editor.document.languageId);
+  }
+  return [...languages3].slice(0, 20);
+}
+async function refreshWorkspaceIntelligence(output) {
+  if (!watcherRegistered) {
+    watcherRegistered = true;
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      void refreshWorkspaceIntelligence(output);
+    });
+    vscode.window.onDidChangeVisibleTextEditors(() => {
+      void refreshWorkspaceIntelligence(output);
+    });
+  }
+  for (const folder of vscode.workspace.workspaceFolders ?? []) {
+    const root = folder.uri.fsPath;
+    try {
+      cache.set(root, {
+        rootPath: root,
+        packageManager: detectPackageManager(root),
+        languages: detectLanguages(),
+        rootMarkers: detectRootMarkers(root),
+        git: await detectGit(root),
+        tasks: await detectTasks(),
+        commands: detectPackageScripts(root),
+        instructionFiles: detectInstructionFiles(root),
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      });
+    } catch (err) {
+      output?.appendLine(`[workspace] failed to refresh ${root}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+}
+function getWorkspaceIntelligence(rootPath) {
+  return cache.get(rootPath);
+}
+
+// src/ide-delegate/context.ts
+function activeWorkspaceFolder() {
+  const active = vscode2.window.activeTextEditor?.document.uri;
+  return (active && vscode2.workspace.getWorkspaceFolder(active)) ?? vscode2.workspace.workspaceFolders?.[0];
+}
+function buildIdeContextPayload(conversationId) {
+  const folder = activeWorkspaceFolder();
+  if (!folder) return void 0;
+  return {
+    sessionId: `vscode-${folder.name}`,
+    // The server authorizes with the authenticated user; these are informational.
+    userId: currentIdeUserId(),
+    ideUserId: currentIdeUserId(),
+    ideSessionId: `vscode-${folder.name}`,
+    projectPath: folder.uri.fsPath,
+    mode: "desktop",
+    terminalExecutor: "client",
+    conversationId,
+    // Lets the server pin tool calls to this machine's window for the folder.
+    machineId: currentMachineId(),
+    workspaceId: workspaceIdFor(folder.uri.fsPath),
+    workspaceIntelligence: getWorkspaceIntelligence(folder.uri.fsPath)
+  };
+}
+
+// src/settings.ts
+var vscode3 = __toESM(require("vscode"));
+var SECTION = "liberide";
+function readSettings() {
+  const cfg = vscode3.workspace.getConfiguration(SECTION);
+  return {
+    modelSelection: cfg.get("modelSelection") ?? "auto",
+    chatMode: "agent",
+    useRag: cfg.get("useRag") ?? false,
+    toolsEnabled: true,
+    systemPrompt: cfg.get("systemPrompt") ?? "",
+    copilotUiEnabled: cfg.get("copilot.enabled") ?? false,
+    copilotModelsEnabled: cfg.get("copilot.modelsEnabled") ?? true,
+    defaultAllowedAgentIds: cfg.get("defaultAllowedAgentIds") ?? [],
+    swarm: cfg.get("swarm") ?? false,
+    isolation: cfg.get("isolation") ?? "shared",
+    confirmEdits: cfg.get("confirmEdits") ?? "off",
+    dispatchSkipPreview: cfg.get("dispatch.skipPreview") ?? false
+  };
+}
+var FLAT_TO_DOTTED = {
+  copilotUiEnabled: "copilot.enabled",
+  copilotModelsEnabled: "copilot.modelsEnabled"
+};
+async function writeSetting(key, value) {
+  const dotted = FLAT_TO_DOTTED[key] ?? key;
+  await vscode3.workspace.getConfiguration(SECTION).update(dotted, value, vscode3.ConfigurationTarget.Global);
+}
+function onSettingsChange(listener) {
+  return vscode3.workspace.onDidChangeConfiguration((event) => {
+    if (event.affectsConfiguration(SECTION)) listener(readSettings());
+  });
+}
+
+// src/spec/writer.ts
+var vscode4 = __toESM(require("vscode"));
+
+// src/spec/schema.ts
+var TASK_STATUSES = /* @__PURE__ */ new Set(["pending", "ready", "running", "completed", "blocked", "failed"]);
+var FEATURE_STATUSES = /* @__PURE__ */ new Set(["draft", "design", "tasks", "dispatching", "done"]);
+function asStringArray(value) {
+  return Array.isArray(value) ? value.filter((v) => typeof v === "string") : [];
+}
+function unquoteScalar(value) {
+  const trimmed = value.trim();
+  if (trimmed.length >= 2) {
+    const first = trimmed[0];
+    const last = trimmed[trimmed.length - 1];
+    if (first === '"' && last === '"' || first === "'" && last === "'") {
+      return trimmed.slice(1, -1);
+    }
+  }
+  return trimmed;
+}
+function parseInlineArray(value) {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) return [];
+  const inner = trimmed.slice(1, -1).trim();
+  if (!inner) return [];
+  return inner.split(",").map((v) => unquoteScalar(v)).filter((v) => v.length > 0);
+}
+function parseFrontmatter(raw) {
+  const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+  if (!match) return { data: {}, body: raw };
+  const data = {};
+  const lines = match[1].split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim()) continue;
+    if (/^\s/.test(line)) continue;
+    const colon = line.indexOf(":");
+    if (colon < 0) continue;
+    const key = line.slice(0, colon).trim();
+    const rawValue = line.slice(colon + 1).trim();
+    if (rawValue === "|") {
+      const block = [];
+      while (lines[i + 1]?.startsWith("  ")) block.push(lines[++i].slice(2));
+      data[key] = block.join("\n");
+    } else if (rawValue.startsWith("[")) {
+      data[key] = parseInlineArray(rawValue);
+    } else if (rawValue === "") {
+      const items = [];
+      while (i + 1 < lines.length) {
+        const next = lines[i + 1];
+        const dashMatch = next.match(/^\s+-\s+(.*)$/);
+        if (!dashMatch) break;
+        items.push(unquoteScalar(dashMatch[1]));
+        i += 1;
+      }
+      data[key] = items.length > 0 ? items : "";
+    } else {
+      data[key] = unquoteScalar(rawValue);
+    }
+  }
+  return { data, body: match[2] };
+}
+function parseTaskContract(featureId, filePath, raw) {
+  const { data, body } = parseFrontmatter(raw);
+  const id = String(data.id ?? "").trim();
+  const title = String(data.title ?? "").trim();
+  if (!id || !title) return void 0;
+  const statusRaw = String(data.status ?? "pending").trim();
+  return {
+    id,
+    title,
+    status: TASK_STATUSES.has(statusRaw) ? statusRaw : "pending",
+    requirementRefs: asStringArray(data.requirement_refs),
+    designRefs: asStringArray(data.design_refs),
+    dependsOn: asStringArray(data.depends_on),
+    producesContext: [],
+    expectedFiles: asStringArray(data.expected_files),
+    architectureHints: String(data.architecture_hints ?? ""),
+    acceptance: asStringArray(data.acceptance),
+    agent: String(data.agent ?? "coding"),
+    body: body.trim(),
+    filePath,
+    featureId
+  };
+}
+function parseFeatureStatus(raw) {
+  const status = raw.match(/status:\s*(\w+)/i)?.[1] ?? "draft";
+  return FEATURE_STATUSES.has(status) ? status : "draft";
+}
+function extractSectionIds(markdown, prefix) {
+  const ids = [];
+  const re = new RegExp(`^##\\s+(${prefix}-[\\w.-]+)`, "gim");
+  let match;
+  while ((match = re.exec(markdown)) !== null) ids.push(match[1]);
+  return ids;
+}
+function splitSections(markdown) {
+  const sections = [];
+  const lines = markdown.split(/\r?\n/);
+  let current;
+  for (const line of lines) {
+    const h = line.match(/^##\s+(.*)$/);
+    if (h) {
+      if (current) sections.push({ heading: current.heading, body: current.body.join("\n").trim() });
+      current = { heading: h[1].trim(), body: [] };
+    } else if (current) {
+      current.body.push(line);
+    }
+  }
+  if (current) sections.push({ heading: current.heading, body: current.body.join("\n").trim() });
+  return sections;
+}
+function parseDocumentationItems(markdown) {
+  return splitSections(markdown).map((s) => {
+    const [id, ...rest] = s.heading.split(/\s+/);
+    const target = s.body.match(/^target:\s*(.+)$/im)?.[1]?.trim();
+    return { id, title: rest.join(" ") || id, ...target ? { target } : {} };
+  }).filter((d) => d.id);
+}
+function parseBlockerItems(markdown) {
+  return splitSections(markdown).map((s) => {
+    const m = s.heading.match(/^(\S+)\s*(?:\[(hard|soft)\])?\s*(.*)$/);
+    const id = m?.[1] ?? "";
+    const severity = m?.[2] === "soft" ? "soft" : "hard";
+    const title = (m?.[3] || id).trim();
+    return { id, title, severity, ...s.body ? { detail: s.body } : {} };
+  }).filter((b) => b.id);
+}
+
+// src/spec/writer.ts
+async function readTextFile(uri) {
+  return Buffer.from(await vscode4.workspace.fs.readFile(uri)).toString("utf8");
+}
+async function writeTextFile(uri, content) {
+  await vscode4.workspace.fs.writeFile(uri, Buffer.from(content, "utf8"));
+}
+var BLOCK_KEYS = /* @__PURE__ */ new Set(["architecture_hints"]);
+function serializeFrontmatter(data) {
+  const lines = [];
+  for (const [key, value] of Object.entries(data)) {
+    if (Array.isArray(value)) {
+      if (value.length === 0) lines.push(`${key}: []`);
+      else lines.push(`${key}:`, ...value.map((item) => `  - ${String(item).replace(/\s*\n\s*/g, " ")}`));
+    } else if (typeof value === "string" && (value.includes("\n") || BLOCK_KEYS.has(key))) {
+      lines.push(`${key}: |`, ...value.split("\n").map((line) => `  ${line}`));
+    } else {
+      lines.push(`${key}: ${value ?? ""}`);
+    }
+  }
+  return lines.join("\n");
+}
+async function updateTaskStatus(uri, status, error51) {
+  const raw = await readTextFile(uri);
+  const { data, body } = parseFrontmatter(raw);
+  data.status = status;
+  if (status === "failed" && error51) data.error = error51.replace(/\s*\n\s*/g, " ");
+  else delete data.error;
+  await writeTextFile(uri, `---
+${serializeFrontmatter(data)}
+---
+${body}`);
+}
+async function writeTaskContract(task) {
+  const frontmatter = serializeFrontmatter({
+    id: task.id,
+    title: task.title,
+    status: task.status,
+    requirement_refs: task.requirementRefs,
+    design_refs: task.designRefs,
+    depends_on: task.dependsOn,
+    expected_files: task.expectedFiles,
+    architecture_hints: task.architectureHints,
+    acceptance: task.acceptance,
+    agent: task.agent
+  });
+  await writeTextFile(task.filePath, `---
+${frontmatter}
+---
+${task.body}
+`);
+}
+async function scaffoldFeature(folder, featureName) {
+  const slug = featureName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "new-feature";
+  const root = vscode4.Uri.joinPath(folder.uri, ".liberide", "specs", slug);
+  const tasks3 = vscode4.Uri.joinPath(root, "tasks");
+  await vscode4.workspace.fs.createDirectory(tasks3);
+  await vscode4.workspace.fs.createDirectory(vscode4.Uri.joinPath(root, "runs"));
+  await writeTextFile(vscode4.Uri.joinPath(root, "runs", ".gitignore"), "*\n!.gitignore\n");
+  await writeTextFile(vscode4.Uri.joinPath(root, "feature.md"), `# ${featureName}
+
+status: draft
+`);
+  await writeTextFile(vscode4.Uri.joinPath(root, "requirements.md"), "# Requirements\n\n## R-1 Overview\n\n");
+  await writeTextFile(vscode4.Uri.joinPath(root, "design.md"), "# Design\n\n## D-1 Architecture\n\n");
+  await writeTextFile(vscode4.Uri.joinPath(tasks3, "index.md"), regenerateTasksIndex([]));
+  return root;
+}
+function regenerateTasksIndex(tasks3) {
+  const header = "# Tasks\n\n| ID | Title | Status | Depends on | Requirements | Design |\n|----|-------|--------|------------|--------------|--------|\n";
+  return header + tasks3.map(
+    (t) => `| ${t.id} | ${t.title} | ${t.status} | ${t.dependsOn.join(", ") || "-"} | ${t.requirementRefs.join(", ") || "-"} | ${t.designRefs.join(", ") || "-"} |`
+  ).join("\n") + "\n";
+}
+
+// src/panel/panel.ts
+init_path_containment();
+
+// src/dispatch/conversation-link.ts
+var FEATURE_KEY = "liberide.featureConversations";
+var GRAPH_KEY = "liberide.graphConversations";
+var MAX_GRAPH_LINKS = 200;
+function featureConversation(store2, featureId) {
+  return store2.get(FEATURE_KEY, {})[featureId];
+}
+async function linkFeatureConversation(store2, featureId, conversationId) {
+  const links = { ...store2.get(FEATURE_KEY, {}), [featureId]: conversationId };
+  await store2.update(FEATURE_KEY, links);
+}
+function graphConversation(store2, graphId) {
+  return store2.get(GRAPH_KEY, {})[graphId];
+}
+async function linkGraphConversation(store2, graphId, conversationId) {
+  const links = { ...store2.get(GRAPH_KEY, {}) };
+  delete links[graphId];
+  links[graphId] = conversationId;
+  const ids = Object.keys(links);
+  for (const id of ids.slice(0, Math.max(0, ids.length - MAX_GRAPH_LINKS))) delete links[id];
+  await store2.update(GRAPH_KEY, links);
+}
+function resolveDispatchConversation(candidates) {
+  return candidates.explicit || candidates.feature || candidates.active || void 0;
+}
+
+// src/panel/panel.ts
+var LiberidePipelineController = class _LiberidePipelineController {
+  constructor(context, store2, output, runsTree, chat2) {
+    this.context = context;
+    this.store = store2;
+    this.output = output;
+    this.runsTree = runsTree;
+    this.chat = chat2;
+    this.disposables.push(
+      onSettingsChange((settings) => this.broadcast({ type: "settings", settings })),
+      this.store.onDidChange(() => this.broadcastFeatures())
+    );
+  }
+  static viewType = "liberide.pipeline";
+  view;
+  disposables = [];
+  graphs = /* @__PURE__ */ new Map();
+  /** Dedup approval prompts per `${graphId}:${nodeId}` (SSE replays node_status on reconnect). */
+  promptedApprovals = /* @__PURE__ */ new Set();
+  disposed = false;
+  /** The chat the pipeline was opened from: its dispatches report there. */
+  linkedConversationId;
+  resolveWebviewView(view) {
+    this.view = view;
+    this.bindWebview(view.webview);
+    view.onDidDispose(() => {
+      if (this.view === view) this.view = void 0;
+      for (const g of this.graphs.values()) g.dispose();
+      this.graphs.clear();
+    });
+  }
+  /** Focus the pipeline; `conversationId`: the chat it was opened from (its dispatches report there). */
+  show(conversationId) {
+    if (conversationId) this.linkedConversationId = conversationId;
+    void vscode5.commands.executeCommand(`${_LiberidePipelineController.viewType}.focus`);
+  }
+  dispose() {
+    this.disposed = true;
+    for (const d of this.disposables) d.dispose();
+    for (const g of this.graphs.values()) g.dispose();
+    this.graphs.clear();
+  }
+  webviewOptions() {
+    return {
+      enableScripts: true,
+      retainContextWhenHidden: true,
+      localResourceRoots: [
+        vscode5.Uri.joinPath(this.context.extensionUri, "media"),
+        vscode5.Uri.joinPath(this.context.extensionUri, "resources")
+      ]
+    };
+  }
+  bindWebview(webview) {
+    webview.options = this.webviewOptions();
+    webview.html = this.renderHtml(webview);
+    const sub = webview.onDidReceiveMessage((message) => {
+      void this.handleMessage(webview, message);
+    });
+    this.disposables.push(sub);
+  }
+  broadcast(message) {
+    if (this.disposed) return;
+    this.view?.webview.postMessage(message);
+  }
+  broadcastFeatures() {
+    const features = this.featureSummaries();
+    const active = this.store.getActiveFeature();
+    const readiness = active ? computeTaskReadiness(active.tasks) : void 0;
+    this.broadcast({
+      type: "features",
+      features,
+      activeFeature: active ? { id: active.id, tasks: active.tasks.map((t) => this.taskSummary(t, readiness?.get(t.id)?.blockedBy ?? [])) } : void 0
+    });
+  }
+  featureSummaries() {
+    const active = this.store.getActiveFeature();
+    return this.store.getFeatures().map((feature) => ({
+      id: feature.id,
+      name: feature.name,
+      status: feature.status,
+      requirementCount: feature.requirementIds.length,
+      designCount: feature.designIds.length,
+      taskCount: feature.tasks.length,
+      active: feature.id === active?.id
+    }));
+  }
+  taskSummary(task, blockedBy) {
+    const status = blockedBy.length > 0 && task.status === "pending" ? "blocked" : task.status;
+    return { id: task.id, title: task.title, status, dependsOn: task.dependsOn, agent: task.agent, blockedBy };
+  }
+  async handleMessage(webview, message) {
+    try {
+      switch (message.type) {
+        case "ready":
+          webview.postMessage({
+            type: "init",
+            settings: readSettings(),
+            features: this.featureSummaries(),
+            apiOrigin: getApiOrigin()
+          });
+          this.broadcastFeatures();
+          break;
+        case "setActiveFeature":
+          this.store.setActiveFeature(message.featureId);
+          await this.context.workspaceState.update("liberide.activeFeatureId", message.featureId);
+          this.broadcastFeatures();
+          break;
+        case "scaffoldFeature":
+          await this.scaffold(message.name);
+          break;
+        case "dispatchFeature":
+          await this.dispatch(message.featureId, message.taskIds);
+          break;
+        case "cancelGraph": {
+          const choice = await vscode5.window.showWarningMessage(`Cancel ${message.label ?? message.graphId}?`, { modal: true }, "Cancel Run");
+          if (choice === "Cancel Run") await this.cancel(message.graphId);
+          break;
+        }
+        case "inspectRun":
+        case "refreshInspector":
+          await this.inspectGraph(message.graphId, message.nodeId);
+          break;
+        case "resolveApproval":
+          await resolveGraphApproval(message.graphId, message.approvalId, message.status, message.response);
+          await this.inspectGraph(message.graphId);
+          break;
+        case "openArtifact":
+          await this.openArtifactById(message.graphId, message.artifactId);
+          break;
+        case "openDiff":
+          await this.openWorkspaceFile(message.path);
+          break;
+        case "revertEditedFile":
+          await this.revertFile(message.path);
+          break;
+        case "openTask": {
+          const task = this.store.getTask(message.featureId, message.taskId);
+          if (task) await vscode5.window.showTextDocument(task.filePath);
+          break;
+        }
+        case "openChat":
+          if (this.linkedConversationId) await this.chat.showConversation(this.linkedConversationId);
+          else await vscode5.commands.executeCommand("liberide.openChat");
+          break;
+      }
+    } catch (error51) {
+      const msg = error51 instanceof Error ? error51.message : String(error51);
+      this.output.appendLine(`[pipeline] ${msg}`);
+      this.broadcast({ type: "operation", action: message.type === "scaffoldFeature" ? "scaffold" : message.type === "cancelGraph" ? "cancel" : "dispatch", status: "error", message: msg });
+      this.broadcast({ type: "log", message: msg, severity: "error" });
+    }
+  }
+  async scaffold(name) {
+    this.broadcast({ type: "operation", action: "scaffold", status: "running" });
+    const folder = vscode5.workspace.workspaceFolders?.[0];
+    if (!folder) {
+      const message = "Open a workspace folder to scaffold a feature.";
+      this.broadcast({ type: "operation", action: "scaffold", status: "error", message });
+      this.broadcast({ type: "log", message, severity: "warning" });
+      return;
+    }
+    const root = await scaffoldFeature(folder, name);
+    const id = root.path.split("/").pop() ?? name;
+    this.store.setActiveFeature(id);
+    await this.context.workspaceState.update("liberide.activeFeatureId", id);
+    await this.store.refresh();
+    this.broadcast({ type: "operation", action: "scaffold", status: "success", message: `Created ${name}.` });
+  }
+  async dispatch(featureId, taskIds, conversationId) {
+    this.broadcast({ type: "operation", action: "dispatch", status: "running" });
+    const feature = this.store.getFeature(featureId);
+    if (!feature) {
+      const message = `Unknown feature ${featureId}`;
+      this.broadcast({ type: "operation", action: "dispatch", status: "error", message });
+      this.broadcast({ type: "log", message, severity: "error" });
+      return;
+    }
+    const candidateTasks = taskIds?.length ? feature.tasks.filter((t) => taskIds.includes(t.id)) : feature.tasks;
+    const settings = readSettings();
+    let selectedIds = candidateTasks.map((t) => t.id);
+    if (!settings.dispatchSkipPreview) {
+      const confirmed = await this.previewDispatchPlan(feature, candidateTasks);
+      if (!confirmed) {
+        this.broadcast({ type: "operation", action: "dispatch", status: "success", message: "Dispatch cancelled." });
+        this.broadcast({ type: "log", message: "Dispatch cancelled.", severity: "info" });
+        return;
+      }
+      selectedIds = confirmed;
+    }
+    const tasks3 = feature.tasks.filter((t) => selectedIds.includes(t.id));
+    if (tasks3.length === 0) {
+      const message = "No tasks selected to dispatch.";
+      this.broadcast({ type: "operation", action: "dispatch", status: "error", message });
+      this.broadcast({ type: "log", message, severity: "warning" });
+      return;
+    }
+    const validation = validateDag(tasks3);
+    if (!validation.ok) {
+      const message = `Cannot dispatch: ${validation.error}`;
+      this.broadcast({ type: "operation", action: "dispatch", status: "error", message });
+      this.broadcast({ type: "log", message, severity: "warning" });
+      return;
+    }
+    const readiness = computeTaskReadiness(feature.tasks);
+    const chatId = resolveDispatchConversation({
+      explicit: conversationId ?? this.linkedConversationId,
+      feature: featureConversation(this.context.workspaceState, feature.id),
+      active: this.chat.activeConversationId()
+    }) ?? await this.chat.ensureConversation(`Dispatch: ${feature.name}`);
+    const ideContext = buildIdeContextPayload(chatId);
+    const result = await dispatchFeature(feature, {
+      conversationId: chatId,
+      taskIds: selectedIds,
+      ideContext: ideContext ? { ...ideContext } : void 0,
+      swarm: settings.swarm,
+      isolation: settings.isolation
+    });
+    const startEvent = {
+      graphId: result.graphId,
+      featureId: feature.id,
+      label: taskIds?.length ? `${feature.name} / ${taskIds.join(", ")}` : feature.name,
+      nodes: tasks3.map((task) => ({
+        id: task.id,
+        label: `${task.id} \xB7 ${task.title}`,
+        dependsOn: task.dependsOn,
+        parallelKey: task.agent
+      }))
+    };
+    this.broadcast({ type: "graphStart", payload: startEvent });
+    this.runsTree.trackRun(result.graphId, feature.id, startEvent.label, tasks3.map((task) => task.id));
+    for (const task of tasks3) {
+      const ready = readiness.get(task.id);
+      this.broadcast({
+        type: "graphNode",
+        payload: { graphId: result.graphId, nodeId: task.id, status: ready?.blockedBy.length ? "blocked" : "queued" }
+      });
+    }
+    this.subscribeToGraph(result.graphId);
+    if (chatId) await this.chat.trackGraph(chatId, result.graphId);
+    this.broadcast({ type: "operation", action: "dispatch", status: "success", message: `Dispatched ${startEvent.label}.` });
+  }
+  /**
+   * Result or error of a run action: a note in the chat that owns the run,
+   * else the pipeline's log (never the output channel or a popup).
+   */
+  report(graphId, message, severity = "info") {
+    const conversationId = this.chat.conversationForGraph(graphId);
+    if (conversationId) {
+      this.chat.postNote(conversationId, message, severity);
+      void this.chat.showConversation(conversationId);
+      return;
+    }
+    this.broadcast({ type: "log", message, severity });
+    this.show();
+  }
+  /**
+   * Show a plan preview before queuing a dispatch: a multi-select QuickPick of
+   * the tasks (all pre-selected) so the user can deselect tasks, confirm, or
+   * cancel. Returns the selected task ids, or undefined when cancelled.
+   * Bypassed when `liberide.dispatch.skipPreview` is enabled.
+   */
+  async previewDispatchPlan(feature, candidateTasks) {
+    const items = candidateTasks.map((task) => ({
+      taskId: task.id,
+      label: `${task.id} \xB7 ${task.title}`,
+      description: task.agent ? `agent: ${task.agent}` : void 0,
+      detail: task.dependsOn.length ? `depends on: ${task.dependsOn.join(", ")}` : "no dependencies",
+      picked: true
+    }));
+    const picked = await vscode5.window.showQuickPick(items, {
+      title: `Dispatch plan \u2014 ${feature.name} (${candidateTasks.length} task${candidateTasks.length === 1 ? "" : "s"})`,
+      placeHolder: "Review the plan. Deselect tasks to exclude, confirm to dispatch, or press Esc to cancel.",
+      canPickMany: true,
+      ignoreFocusOut: true
+    });
+    if (!picked) return void 0;
+    return picked.map((item) => item.taskId);
+  }
+  /**
+   * Subscribe to an execution graph's event stream and bridge it to the webview,
+   * approval prompts, and disconnect surfacing (task files are written back by
+   * the runs tree). Reused by
+   * dispatch, retry, and replay. Replaces any prior subscription for the graph.
+   */
+  subscribeToGraph(graphId) {
+    this.graphs.get(graphId)?.dispose();
+    const dispose = subscribeExecutionGraphEvents(graphId, (event) => {
+      if (this.disposed) return;
+      if (event.type === "node_status" && event.nodeId && event.status === "waiting_approval") {
+        void this.promptApproval(graphId, event.nodeId);
+      }
+      const update = taskStatusFromEvent(event, graphId);
+      if (update) {
+        const { taskId, status, error: error51 } = update;
+        this.broadcast({ type: "graphNode", payload: { graphId, nodeId: taskId, status, ...error51 ? { error: error51 } : {} } });
+        if (error51) this.broadcast({ type: "log", message: `${taskId} failed: ${error51}`, severity: "error" });
+      }
+      if (event.type === "done" && event.status) {
+        this.broadcast({ type: "graphDone", payload: { graphId, status: event.status } });
+        this.graphs.get(graphId)?.dispose();
+        this.graphs.delete(graphId);
+      }
+    }, {
+      log: (message) => this.output.appendLine(`[pipeline.sse] ${message}`),
+      onDisconnect: () => {
+        if (this.disposed) return;
+        this.broadcast({ type: "graphDone", payload: { graphId, status: "disconnected" } });
+        this.broadcast({ type: "log", message: `Lost connection to run ${graphId}; it may still be running on the server.`, severity: "warning" });
+      }
+    });
+    this.graphs.set(graphId, { graphId, dispose });
+  }
+  /** Retry a failed/cancelled run: re-queues failed nodes and re-attaches the event stream. */
+  async retryRun(graphId) {
+    const meta3 = this.runsTree.getRunMeta(graphId);
+    try {
+      await retryGraph(graphId);
+      if (meta3) this.runsTree.trackRun(graphId, meta3.featureId, meta3.label, meta3.nodeIds);
+      this.subscribeToGraph(graphId);
+      this.report(graphId, `Retrying run ${meta3?.label ?? graphId}.`);
+    } catch (err) {
+      this.report(graphId, `Retry failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+    }
+  }
+  /** Replay a node and its downstream dependents, re-attaching the event stream. */
+  async replayFromNode(graphId, nodeId) {
+    const meta3 = this.runsTree.getRunMeta(graphId);
+    try {
+      const serverNodeId = await this.resolveServerNodeId(graphId, nodeId);
+      const count = await replayFromNode(graphId, serverNodeId);
+      if (meta3) this.runsTree.trackRun(graphId, meta3.featureId, meta3.label, meta3.nodeIds);
+      this.subscribeToGraph(graphId);
+      this.report(graphId, `Replaying ${count} node(s) from ${nodeId}.`);
+    } catch (err) {
+      this.report(graphId, `Replay failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+    }
+  }
+  /**
+   * The server node id for a task id or node id: the Runs view's map, else
+   * the graph's nodes (`<graphId>_<taskId>`, or the first node of a swarm task).
+   */
+  async resolveServerNodeId(graphId, nodeId) {
+    const mapped = this.runsTree.serverNodeIdFor(graphId, nodeId);
+    if (mapped) return mapped;
+    try {
+      const { nodes } = await fetchGraphDetail(graphId);
+      return pickServerNodeId(graphId, nodeId, nodes.map((n) => n.id)) ?? nodeId;
+    } catch {
+      return nodeId;
+    }
+  }
+  /** A run's aggregated token/cost usage (totals + per-node breakdown), as a chat note. */
+  async viewRunCost(graphId) {
+    let metrics;
+    try {
+      metrics = await getGraphMetrics(graphId);
+    } catch (err) {
+      this.report(graphId, `Failed to load run cost: ${err instanceof Error ? err.message : String(err)}`, "error");
+      return;
+    }
+    if (!metrics || metrics.callCount === 0) {
+      this.report(graphId, "No usage recorded for this run yet.");
+      return;
+    }
+    this.report(graphId, formatRunCost(metrics));
+  }
+  /** List a run's artifacts in a QuickPick and open the chosen one in an editor tab. */
+  async viewArtifacts(graphId) {
+    let artifacts;
+    try {
+      artifacts = await listGraphArtifacts(graphId);
+    } catch (err) {
+      this.report(graphId, `Failed to load artifacts: ${err instanceof Error ? err.message : String(err)}`, "error");
+      return;
+    }
+    if (artifacts.length === 0) {
+      this.report(graphId, "This run has not produced any artifacts yet.");
+      return;
+    }
+    const pick2 = await vscode5.window.showQuickPick(
+      artifacts.map((a) => ({ label: a.title || a.path || a.id, description: `${a.kind}${a.path ? ` \xB7 ${a.path}` : ""}`, artifact: a })),
+      { placeHolder: "Open an artifact produced by this run" }
+    );
+    if (!pick2) return;
+    const doc = await vscode5.workspace.openTextDocument({
+      content: pick2.artifact.content ?? "",
+      language: languageForArtifact(pick2.artifact.path, pick2.artifact.kind)
+    });
+    await vscode5.window.showTextDocument(doc, { preview: true });
+  }
+  async inspectGraph(graphId, nodeId) {
+    try {
+      const [detail, artifacts, metrics, workingMemory] = await Promise.all([
+        fetchGraphDetail(graphId),
+        listGraphArtifacts(graphId).catch(() => []),
+        getGraphMetrics(graphId).catch(() => null),
+        getWorkingMemory(graphId).catch(() => null)
+      ]);
+      this.broadcast({
+        type: "graphInspector",
+        payload: {
+          graphId,
+          nodeId,
+          detail,
+          artifacts,
+          metrics,
+          workingMemory,
+          verification: workingMemory?.verificationHistory ?? []
+        }
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.output.appendLine(`[pipeline.inspect] ${msg}`);
+      this.broadcast({ type: "log", message: `Failed to inspect run: ${msg}`, severity: "error" });
+    }
+  }
+  async openArtifactById(graphId, artifactId) {
+    const artifact = (await listGraphArtifacts(graphId)).find((a) => a.id === artifactId);
+    if (!artifact) {
+      void vscode5.window.showInformationMessage(`Artifact not found: ${artifactId}`);
+      return;
+    }
+    await this.openArtifactDocument(artifact);
+  }
+  async openArtifactDocument(artifact) {
+    const doc = await vscode5.workspace.openTextDocument({
+      content: artifact.content ?? "",
+      language: languageForArtifact(artifact.path, artifact.kind)
+    });
+    await vscode5.window.showTextDocument(doc, { preview: true });
+  }
+  async revertFile(filePath) {
+    const root = vscode5.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!root) return;
+    const clean = filePath.replace(/^\/+/, "");
+    const absolute = resolveContainedRelativePath(root, clean);
+    const { execFile: execFile3 } = await import("node:child_process");
+    const run = (args) => new Promise((resolve9) => {
+      execFile3("git", args, { cwd: root, timeout: 15e3, windowsHide: true }, (err, _stdout, stderr) => {
+        const code = err && typeof err.code === "number" ? err.code : err ? 1 : 0;
+        resolve9({ code, stderr: stderr || (err instanceof Error ? err.message : "") });
+      });
+    });
+    const tracked = (await run(["ls-files", "--error-unmatch", "--", clean])).code === 0;
+    if (tracked) {
+      const result = await run(["checkout", "--", clean]);
+      if (result.code !== 0) throw new Error(result.stderr || `git checkout failed for ${clean}`);
+      this.broadcast({ type: "log", message: `Reverted ${clean}.`, severity: "info" });
+      return;
+    }
+    const choice = await vscode5.window.showWarningMessage(
+      `${clean} is not tracked by git. Reverting will delete this agent-created file.`,
+      { modal: true },
+      "Delete"
+    );
+    if (choice !== "Delete") {
+      this.broadcast({ type: "log", message: `Revert cancelled for ${clean}.`, severity: "info" });
+      return;
+    }
+    try {
+      await vscode5.workspace.fs.delete(vscode5.Uri.file(absolute), { useTrash: true });
+      this.broadcast({ type: "log", message: `Reverted (deleted untracked) ${clean}.`, severity: "info" });
+    } catch (err) {
+      throw new Error(`Failed to delete ${clean}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  async openWorkspaceFile(filePath) {
+    const root = vscode5.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!root) return;
+    const clean = filePath.replace(/^\/+/, "");
+    await vscode5.commands.executeCommand("vscode.open", vscode5.Uri.file(resolveContainedRelativePath(root, clean)));
+  }
+  /** Open a run's working memory (accumulated agent context) as a rendered markdown tab. */
+  async viewWorkingMemory(graphId) {
+    let memory;
+    try {
+      memory = await getWorkingMemory(graphId);
+    } catch (err) {
+      this.report(graphId, `Failed to load working memory: ${err instanceof Error ? err.message : String(err)}`, "error");
+      return;
+    }
+    if (!memory) {
+      this.report(graphId, "This run has no working memory yet.");
+      return;
+    }
+    const doc = await vscode5.workspace.openTextDocument({
+      content: renderWorkingMemory(memory),
+      language: "markdown"
+    });
+    await vscode5.window.showTextDocument(doc, { preview: true });
+  }
+  /** Append a user-supplied assumption/context note to a run's working memory. */
+  async addWorkingMemoryNote(graphId) {
+    const note = await vscode5.window.showInputBox({ prompt: "Add an assumption / context note for the agents" });
+    if (!note?.trim()) return;
+    try {
+      const memory = await getWorkingMemory(graphId);
+      const assumptions = [...memory?.assumptions ?? [], note.trim()];
+      await patchWorkingMemory(graphId, { assumptions });
+      this.report(graphId, `Added to the run's working memory: ${note.trim()}`);
+    } catch (err) {
+      this.report(graphId, `Failed to update working memory: ${err instanceof Error ? err.message : String(err)}`, "error");
+    }
+  }
+  /** Add a follow-up goal to a run. */
+  async addFollowUp(graphId) {
+    const goal = await vscode5.window.showInputBox({ prompt: "Follow-up instruction for this run" });
+    if (!goal?.trim()) return;
+    try {
+      await addFollowUp(graphId, goal.trim());
+      this.report(graphId, `Follow-up queued: ${goal.trim()}`);
+    } catch (err) {
+      this.report(graphId, `Follow-up failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+    }
+  }
+  /**
+   * A node's detail (status, input, full error, output, its agents): in the
+   * chat that owns the run, expanded there; else in the pipeline's inspector.
+   */
+  async showNodeDetail(graphId, nodeId) {
+    if (await this.chat.revealGraphNode(graphId, nodeId)) return;
+    this.show();
+    await this.inspectGraph(graphId, nodeId);
+  }
+  /** Server push: a run waits on an approval (the chat's card covers runs that report to a chat). */
+  async approvalPending(graphId, nodeId) {
+    await this.promptApproval(graphId, nodeId);
+  }
+  /** Re-open the approval prompt on demand (Runs-tree "Resolve Approval" action). */
+  async resolveApprovalForRun(graphId, nodeId) {
+    if (await this.chat.revealGraphNode(graphId, nodeId)) return;
+    this.promptedApprovals.delete(`${graphId}:${nodeId}`);
+    await this.promptApproval(graphId, nodeId);
+  }
+  /**
+   * Prompt the user to approve/reject a graph-native APPROVAL node (the swarm
+   * blocker gate). Deduped per node since the SSE stream replays node_status on
+   * reconnect. Resolves via the node-approval endpoint and advances the run.
+   */
+  async promptApproval(graphId, nodeId) {
+    if (this.disposed) return;
+    if (this.chat.conversationForGraph(graphId)) return;
+    const key = `${graphId}:${nodeId}`;
+    if (this.promptedApprovals.has(key)) return;
+    this.promptedApprovals.add(key);
+    let title = "Approval required";
+    let detail = "";
+    try {
+      const { nodes } = await fetchGraphDetail(graphId);
+      const node = nodes.find((n) => n.id === nodeId);
+      if (node && node.status !== "waiting_approval") {
+        this.promptedApprovals.delete(key);
+        return;
+      }
+      if (node) {
+        title = node.title || title;
+        detail = node.inputSummary ?? "";
+      }
+    } catch (err) {
+      this.output.appendLine(`[pipeline.approval] detail fetch failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (this.disposed) return;
+    const message = `LiberIDE run needs approval \u2014 ${title}${detail ? `: ${detail}` : ""}`;
+    const choice = await vscode5.window.showWarningMessage(message, { modal: false }, "Approve", "Reject");
+    if (!choice) {
+      this.promptedApprovals.delete(key);
+      return;
+    }
+    const decision = choice === "Approve" ? "approved" : "rejected";
+    let note;
+    if (decision === "rejected") {
+      note = await vscode5.window.showInputBox({ prompt: "Reason for rejection (optional)" }) || void 0;
+    }
+    if (this.disposed) return;
+    try {
+      await resolveNodeApproval(graphId, nodeId, decision, note);
+      this.broadcast({ type: "log", message: `Approval ${decision} for ${nodeId}.`, severity: "info" });
+    } catch (err) {
+      this.promptedApprovals.delete(key);
+      this.report(graphId, `Failed to submit approval: ${err instanceof Error ? err.message : String(err)}`, "error");
+    }
+  }
+  async cancel(graphId) {
+    this.broadcast({ type: "operation", action: "cancel", status: "running" });
+    await cancelExecutionGraph(graphId);
+    this.graphs.get(graphId)?.dispose();
+    this.graphs.delete(graphId);
+    this.runsTree.cancelRun(graphId);
+    this.broadcast({ type: "graphDone", payload: { graphId, status: "cancelled" } });
+    this.broadcast({ type: "operation", action: "cancel", status: "success", message: `Cancelled ${graphId}.` });
+  }
+  renderHtml(webview) {
+    const scriptUri = webview.asWebviewUri(vscode5.Uri.joinPath(this.context.extensionUri, "media", "pipeline.js"));
+    const styleUri = webview.asWebviewUri(vscode5.Uri.joinPath(this.context.extensionUri, "media", "webview.css"));
+    const nonce = randomNonce();
+    const csp = [
+      `default-src 'none'`,
+      // No remote images: model output could embed a URL that exfiltrates context.
+      `img-src ${webview.cspSource} data: blob:`,
+      `style-src ${webview.cspSource} 'unsafe-inline'`,
+      `font-src ${webview.cspSource}`,
+      `script-src 'nonce-${nonce}'`,
+      `connect-src ${webview.cspSource}`
+    ].join("; ");
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="${csp}" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LiberIDE Pipeline</title>
+  <link rel="stylesheet" href="${styleUri}" />
+</head>
+<body>
+  <div id="root"></div>
+  <script nonce="${nonce}" src="${scriptUri}"></script>
+</body>
+</html>`;
+  }
+};
+var ARTIFACT_LANG_BY_EXT = {
+  ts: "typescript",
+  tsx: "typescriptreact",
+  js: "javascript",
+  jsx: "javascriptreact",
+  py: "python",
+  json: "json",
+  md: "markdown",
+  diff: "diff",
+  patch: "diff",
+  yaml: "yaml",
+  yml: "yaml",
+  sh: "shellscript",
+  sql: "sql",
+  go: "go",
+  rs: "rust",
+  java: "java",
+  html: "html",
+  css: "css",
+  toml: "toml",
+  xml: "xml"
+};
+function renderWorkingMemory(m) {
+  const list = (items) => items.length ? items.map((i) => `- ${i}`).join("\n") : "_(none)_";
+  const lines = [
+    `# Working Memory`,
+    ``,
+    `**Goal:** ${m.activeGoal || "_(none)_"}`,
+    `**Updated:** ${m.updatedAt}`,
+    ``,
+    `## Active files`,
+    list(m.activeFiles),
+    ``,
+    `## Active tasks`,
+    list(m.activeTasks),
+    ``,
+    `## Blockers`,
+    list(m.blockers),
+    ``,
+    `## Assumptions`,
+    list(m.assumptions),
+    ``,
+    `## Next actions`,
+    list(m.nextActions)
+  ];
+  if (m.recentFailures.length) {
+    lines.push(``, `## Recent failures`, ...m.recentFailures.map((f) => `- ${f.nodeTitle ?? "node"}: ${f.error ?? ""}`));
+  }
+  if (m.verificationHistory.length) {
+    lines.push(``, `## Verification history`, ...m.verificationHistory.map((v) => `- ${v.nodeTitle ?? "node"}: ${v.passed ? "passed" : "failed"}`));
+  }
+  if (m.currentPlan) {
+    lines.push(``, `## Current plan`, ``, m.currentPlan);
+  }
+  return `${lines.join("\n")}
+`;
+}
+function languageForArtifact(path11, kind) {
+  const ext = path11?.split(".").pop()?.toLowerCase();
+  if (ext && ARTIFACT_LANG_BY_EXT[ext]) return ARTIFACT_LANG_BY_EXT[ext];
+  const k = (kind ?? "").toLowerCase();
+  if (k.includes("patch") || k.includes("diff")) return "diff";
+  return "markdown";
+}
+function randomNonce() {
+  return (0, import_node_crypto2.randomBytes)(16).toString("hex");
+}
+function formatRunCost(metrics) {
+  const usd = (value) => value ? `$${value.toFixed(4)}` : "n/a";
+  const lines = [
+    `**Run cost:** ${usd(metrics.estimatedCostUsd)} \xB7 ${metrics.inputTokens} in / ${metrics.outputTokens} out tokens \xB7 ${metrics.callCount} calls`
+  ];
+  if (metrics.perNode.length) {
+    lines.push("", "| Node | Cost | Tokens in/out |", "| --- | --- | --- |");
+    for (const n of metrics.perNode) lines.push(`| ${n.title || n.nodeId} | ${usd(n.estimatedCostUsd)} | ${n.inputTokens}/${n.outputTokens} |`);
+  }
+  return lines.join("\n");
+}
+function pickServerNodeId(graphId, nodeId, serverIds) {
+  if (serverIds.includes(nodeId)) return nodeId;
+  const prefixed = `${graphId}_${nodeId}`;
+  if (serverIds.includes(prefixed)) return prefixed;
+  return serverIds.find((id) => id.startsWith(`${prefixed}_`));
+}
+
+// src/chat/chat-panel.ts
+var vscode11 = __toESM(require("vscode"));
+
+// src/ide-delegate/handlers/fs.ts
+var vscode7 = __toESM(require("vscode"));
+var path4 = __toESM(require("node:path"));
+var import_node_fs4 = require("node:fs");
+var import_promises = require("node:fs/promises");
+var import_node_child_process = require("node:child_process");
+init_helpers();
+init_redaction();
+var EXCLUDED_DIRS = /* @__PURE__ */ new Set(["node_modules", ".git", "dist", "build", ".next", "__pycache__"]);
+var BINARY_EXTS = /* @__PURE__ */ new Set([
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".bmp",
+  ".ico",
+  ".webp",
+  ".svg",
+  ".woff",
+  ".woff2",
+  ".ttf",
+  ".eot",
+  ".otf",
+  ".zip",
+  ".tar",
+  ".gz",
+  ".bz2",
+  ".7z",
+  ".rar",
+  ".pdf",
+  ".doc",
+  ".docx",
+  ".xls",
+  ".xlsx",
+  ".exe",
+  ".dll",
+  ".so",
+  ".dylib",
+  ".o",
+  ".a",
+  ".mp3",
+  ".mp4",
+  ".avi",
+  ".mov",
+  ".wav",
+  ".flac",
+  ".sqlite",
+  ".db",
+  ".wasm"
+]);
+var MAX_SEARCH_FILE_BYTES = 2e6;
+var preEditSnapshots = /* @__PURE__ */ new Map();
+var MAX_SNAPSHOTS = 200;
+var MAX_SNAPSHOT_BYTES = 5e6;
+var MAX_SNAPSHOT_SCOPES = 20;
+var DEFAULT_SCOPE = "";
+function snapshotScope(scope) {
+  let map2 = preEditSnapshots.get(scope);
+  if (!map2) {
+    map2 = /* @__PURE__ */ new Map();
+    preEditSnapshots.set(scope, map2);
+    while (preEditSnapshots.size > MAX_SNAPSHOT_SCOPES) preEditSnapshots.delete(preEditSnapshots.keys().next().value);
+  }
+  return map2;
+}
+async function snapshotBeforeChange(fullPath, scope = requestConversationId() ?? DEFAULT_SCOPE) {
+  const snapshots = snapshotScope(scope);
+  if (snapshots.has(fullPath)) return;
+  const info = await (0, import_promises.lstat)(fullPath).catch(() => void 0);
+  if (info && (!info.isFile() || info.size > MAX_SNAPSHOT_BYTES)) return;
+  snapshots.set(fullPath, info ? await (0, import_promises.readFile)(fullPath, "utf8").catch(() => null) : null);
+  while (snapshots.size > MAX_SNAPSHOTS) snapshots.delete(snapshots.keys().next().value);
+}
+function resetPreEditSnapshots(scope) {
+  if (scope === void 0) preEditSnapshots.clear();
+  else preEditSnapshots.delete(scope);
+}
+async function restorePreEditSnapshot(fullPath, scope = DEFAULT_SCOPE) {
+  const snapshots = preEditSnapshots.get(scope);
+  if (!snapshots?.has(fullPath)) return false;
+  const before = snapshots.get(fullPath);
+  if (before === null) await (0, import_promises.rm)(fullPath, { force: true });
+  else {
+    await (0, import_promises.mkdir)(path4.dirname(fullPath), { recursive: true });
+    await writeFileNoFollow(fullPath, before);
+  }
+  snapshots.delete(fullPath);
+  return true;
+}
+async function writeFileNoFollow(fullPath, content, mode) {
+  const flags = import_node_fs4.constants.O_WRONLY | import_node_fs4.constants.O_CREAT | import_node_fs4.constants.O_TRUNC | (import_node_fs4.constants.O_NOFOLLOW ?? 0);
+  const handle = await (0, import_promises.open)(fullPath, flags, 438);
+  try {
+    await handle.writeFile(content, "utf8");
+    if (mode !== void 0) await handle.chmod(mode);
+  } finally {
+    await handle.close();
+  }
+}
+var MAX_READ_BYTES = 2e7;
+function relPath(payload, key = "path") {
+  const value = payload[key];
+  if (typeof value !== "string") throw new Error(`${key} is required`);
+  return value;
+}
+async function handleFsStat(root, payload) {
+  const full = await resolveInsideRoot(root, relPath(payload));
+  try {
+    const info = await (0, import_promises.stat)(full);
+    return {
+      exists: true,
+      type: info.isDirectory() ? "directory" : info.isFile() ? "file" : "other",
+      size: info.size,
+      mode: info.mode,
+      mtime: info.mtime.toISOString()
+    };
+  } catch {
+    return { exists: false };
+  }
+}
+async function handleFsRead(root, payload) {
+  const full = await resolveInsideRoot(root, relPath(payload));
+  const info = await (0, import_promises.stat)(full);
+  if (!info.isFile()) throw new Error(`Not a file: ${String(payload.path)}`);
+  const ranged = payload.offset !== void 0 || payload.length !== void 0;
+  if (!ranged) {
+    if (info.size > MAX_READ_BYTES) {
+      throw new Error(`File is too large to read whole (${info.size} bytes, limit ${MAX_READ_BYTES}); pass offset/length to read a range`);
+    }
+    return { content: await (0, import_promises.readFile)(full, "utf8") };
+  }
+  const offset = Math.max(0, Math.floor(Number(payload.offset ?? 0)) || 0);
+  const length = Math.max(0, Math.min(Math.floor(Number(payload.length ?? MAX_READ_BYTES)) || 0, MAX_READ_BYTES, Math.max(0, info.size - offset)));
+  const handle = await (0, import_promises.open)(full, "r");
+  try {
+    const buffer = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, offset);
+    return { content: buffer.subarray(0, bytesRead).toString("utf8"), offset, length: bytesRead, size: info.size, hasMore: offset + bytesRead < info.size };
+  } finally {
+    await handle.close();
+  }
+}
+async function handleFsWrite(root, payload) {
+  const full = await resolveInsideRoot(root, relPath(payload), { forWrite: true });
+  const content = typeof payload.content === "string" ? payload.content : "";
+  await snapshotBeforeChange(full);
+  await (0, import_promises.mkdir)(path4.dirname(full), { recursive: true });
+  if (!isPathInside(await (0, import_promises.realpath)(root), await (0, import_promises.realpath)(path4.dirname(full)))) {
+    throw new Error("Path escapes the workspace folder");
+  }
+  await writeFileNoFollow(full, content, typeof payload.mode === "number" ? payload.mode : void 0);
+  return { bytes: Buffer.byteLength(content) };
+}
+async function handleFsDelete(root, payload) {
+  const full = await resolveInsideRoot(root, relPath(payload));
+  if (full === path4.resolve(root)) throw new Error("Refusing to delete the workspace root");
+  await snapshotBeforeChange(full);
+  await (0, import_promises.rm)(full, { force: true, recursive: payload.recursive === true });
+  return { deleted: true };
+}
+async function handleFsRename(root, payload) {
+  const from = await resolveInsideRoot(root, relPath(payload, "from"));
+  const to = await resolveInsideRoot(root, relPath(payload, "to"));
+  if (payload.overwrite !== true && (0, import_node_fs4.existsSync)(to)) throw new Error(`Target already exists: ${String(payload.to)}`);
+  await snapshotBeforeChange(from);
+  await snapshotBeforeChange(to);
+  await (0, import_promises.mkdir)(path4.dirname(to), { recursive: true });
+  await (0, import_promises.rename)(from, to);
+  return { renamed: true };
+}
+async function listRecursive(dir, root, depth) {
+  if (depth <= 0) return [];
+  const entries = [];
+  for (const item of await (0, import_promises.readdir)(dir, { withFileTypes: true })) {
+    const full = path4.join(dir, item.name);
+    const info = await (0, import_promises.lstat)(full).catch(() => void 0);
+    if (!info || info.isSymbolicLink()) continue;
+    const entry = {
+      name: item.name,
+      path: path4.relative(root, full).replace(/\\/g, "/"),
+      type: info.isDirectory() ? "directory" : "file",
+      size: Number(info.size),
+      modifiedAt: info.mtime.toISOString()
+    };
+    if (entry.type === "directory" && depth > 1) entry.children = await listRecursive(full, root, depth - 1);
+    entries.push(entry);
+  }
+  entries.sort((a, b) => a.type !== b.type ? a.type === "directory" ? -1 : 1 : a.name.localeCompare(b.name));
+  return entries;
+}
+async function handleFsList(root, payload) {
+  const full = await resolveInsideRoot(root, typeof payload.path === "string" ? payload.path : ".");
+  const depth = Math.max(1, Math.min(Number(payload.depth ?? 1), 5));
+  const info = await (0, import_promises.stat)(full).catch(() => void 0);
+  if (!info) throw new Error(`Directory not found: ${String(payload.path ?? ".")}`);
+  if (!info.isDirectory()) throw new Error(`Not a directory: ${String(payload.path ?? ".")}`);
+  return { entries: await listRecursive(full, await (0, import_promises.realpath)(root), depth) };
+}
+function bundledRipgrep() {
+  const candidates = [
+    path4.join(vscode7.env.appRoot, "node_modules", "@vscode", "ripgrep", "bin", "rg"),
+    path4.join(vscode7.env.appRoot, "node_modules.asar.unpacked", "@vscode", "ripgrep", "bin", "rg")
+  ];
+  const suffix = process.platform === "win32" ? ".exe" : "";
+  return candidates.map((candidate) => candidate + suffix).find((candidate) => (0, import_node_fs4.existsSync)(candidate));
+}
+function searchWithRipgrep(rg, root, query, isRegex, include, maxResults) {
+  const args = ["--json"];
+  if (!isRegex) args.push("--fixed-strings");
+  for (const dir of EXCLUDED_DIRS) args.push("--glob", `!${dir}`);
+  for (const ext of BINARY_EXTS) args.push("--glob", `!*${ext}`);
+  if (include) args.push("--glob", include);
+  args.push("--", query, ".");
+  return new Promise((resolve9, reject) => {
+    const proc = (0, import_node_child_process.spawn)(rg, args, { cwd: root, windowsHide: true });
+    const results = [];
+    let buffer = "";
+    const consume = (line) => {
+      if (!line || results.length >= maxResults) return;
+      try {
+        const parsed = JSON.parse(line);
+        if (parsed.type === "match") {
+          results.push({ file: String(parsed.data.path.text).replace(/\\/g, "/"), line: parsed.data.line_number, text: String(parsed.data.lines.text ?? "").trimEnd() });
+        }
+      } catch {
+      }
+    };
+    proc.stdout.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      lines.forEach(consume);
+      if (results.length >= maxResults) proc.kill();
+    });
+    proc.on("error", reject);
+    proc.on("close", (code) => {
+      consume(buffer);
+      if (code === 2 && results.length === 0) reject(new Error("ripgrep error"));
+      else resolve9(results);
+    });
+  });
+}
+function globToRegExp(pattern) {
+  const source = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*/g, "\0").replace(/\*/g, "[^/]*").replace(/\u0000/g, ".*").replace(/\?/g, ".");
+  return new RegExp(`^${source}$`);
+}
+function parseGitignore(text) {
+  const rules = [];
+  for (const raw of text.split(/\r?\n/)) {
+    let line = raw.replace(/\s+$/, "");
+    if (!line || line.startsWith("#")) continue;
+    const negate = line.startsWith("!");
+    if (negate) line = line.slice(1);
+    const dirOnly = line.endsWith("/");
+    if (dirOnly) line = line.replace(/\/+$/, "");
+    const anchored = line.includes("/");
+    line = line.replace(/^\//, "").replace(/^\*\*\//, "");
+    if (!line) continue;
+    rules.push({ re: globToRegExp(line), dirOnly, negate, anchored: anchored && !raw.trimStart().startsWith("**/") });
+  }
+  return rules;
+}
+function isIgnored(rules, rel2, isDir) {
+  let ignored = false;
+  const name = rel2.split("/").pop() ?? rel2;
+  for (const rule of rules) {
+    if (rule.dirOnly && !isDir) continue;
+    if (rule.anchored ? rule.re.test(rel2) : rule.re.test(name) || rule.re.test(rel2)) ignored = !rule.negate;
+  }
+  return ignored;
+}
+async function searchWithScan(root, query, isRegex, include, maxResults) {
+  const results = [];
+  const pattern = isRegex ? new RegExp(query) : void 0;
+  const includeRe = include ? globToRegExp(include) : void 0;
+  const ignoredBy = (scopes, full, isDir) => scopes.some((scope) => isIgnored(scope.rules, path4.relative(scope.dir, full).replace(/\\/g, "/"), isDir));
+  const walk = async (dir, parents) => {
+    const ignoreText = await (0, import_promises.readFile)(path4.join(dir, ".gitignore"), "utf8").catch(() => "");
+    const scopes = ignoreText ? [...parents, { dir, rules: parseGitignore(ignoreText) }] : parents;
+    for (const entry of await (0, import_promises.readdir)(dir, { withFileTypes: true }).catch(() => [])) {
+      if (results.length >= maxResults) return;
+      const full = path4.join(dir, entry.name);
+      const rel2 = path4.relative(root, full).replace(/\\/g, "/");
+      const explicitlyIncluded = includeRe !== void 0 && (includeRe.test(entry.name) || includeRe.test(rel2));
+      if (entry.isDirectory()) {
+        if (EXCLUDED_DIRS.has(entry.name) || entry.name.startsWith(".") || ignoredBy(scopes, full, true)) continue;
+        await walk(full, scopes);
+        continue;
+      }
+      if (!entry.isFile() || BINARY_EXTS.has(path4.extname(entry.name).toLowerCase())) continue;
+      if (includeRe && !explicitlyIncluded) continue;
+      if (!explicitlyIncluded && (entry.name.startsWith(".") || ignoredBy(scopes, full, false))) continue;
+      const info = await (0, import_promises.stat)(full).catch(() => void 0);
+      if (!info || info.size > MAX_SEARCH_FILE_BYTES) continue;
+      const lines = (await (0, import_promises.readFile)(full, "utf8").catch(() => "")).split("\n");
+      for (let i = 0; i < lines.length && results.length < maxResults; i++) {
+        const text = lines[i];
+        if (pattern ? pattern.test(text) : text.includes(query)) results.push({ file: rel2, line: i + 1, text: text.trimEnd() });
+      }
+    }
+  };
+  await walk(root, []);
+  return results;
+}
+function redactSearchMatches(results) {
+  return results.map((match) => {
+    const { text, redacted } = redactIfSecret(match.file, match.text);
+    return redacted ? { ...match, text, redacted: true } : match;
+  });
+}
+async function handleFsSearch(root, payload) {
+  const query = String(payload.query ?? "");
+  if (!query) throw new Error("query is required");
+  const isRegex = payload.isRegex === true;
+  const include = typeof payload.includePattern === "string" && payload.includePattern ? payload.includePattern : void 0;
+  const maxResults = Math.max(1, Math.min(Number(payload.maxResults ?? 50), 200));
+  const realRoot = await (0, import_promises.realpath)(root);
+  const rg = bundledRipgrep();
+  let results;
+  if (rg) results = await searchWithRipgrep(rg, realRoot, query, isRegex, include, maxResults).catch(() => void 0);
+  results ??= await searchWithScan(realRoot, query, isRegex, include, maxResults);
+  results = redactSearchMatches(results);
+  return { results, totalMatches: results.length };
+}
+
+// src/chat/chat-panel.ts
+init_helpers();
+var import_node_crypto4 = require("node:crypto");
+var nodePath = __toESM(require("node:path"));
+
+// src/project/identity.ts
+var vscode8 = __toESM(require("vscode"));
+var import_node_child_process2 = require("node:child_process");
+var import_node_crypto3 = require("node:crypto");
+function gitExec(args, cwd) {
+  return new Promise((resolve9) => {
+    (0, import_node_child_process2.execFile)("git", args, { cwd, timeout: 5e3, windowsHide: true }, (err, stdout) => {
+      if (err) return resolve9(null);
+      resolve9(stdout.toString().trim());
+    });
+  });
+}
+function normaliseRemote(remote) {
+  let out = remote.trim();
+  if (out.endsWith(".git")) out = out.slice(0, -4);
+  const sshMatch = out.match(/^[a-zA-Z0-9_-]+@([^:]+):(.+)$/);
+  if (sshMatch) out = `${sshMatch[1]}/${sshMatch[2]}`;
+  return out.replace(/^https?:\/\//, "").toLowerCase();
+}
+function shortHash(input) {
+  return (0, import_node_crypto3.createHash)("sha1").update(input).digest("hex").slice(0, 24);
+}
+var activeProjectFolderPath;
+function getActiveProjectFolder() {
+  const folders = vscode8.workspace.workspaceFolders ?? [];
+  if (activeProjectFolderPath) {
+    const match = folders.find((f) => f.uri.fsPath === activeProjectFolderPath);
+    if (match) return match;
+  }
+  return folders[0];
+}
+function setActiveProjectFolder(folder) {
+  activeProjectFolderPath = folder.uri.fsPath;
+}
+async function detectProjectIdentity(folder) {
+  const target = folder ?? getActiveProjectFolder();
+  if (!target || target.uri.scheme !== "file") {
+    return { id: "none", source: "none", name: "No workspace" };
+  }
+  const cwd = target.uri.fsPath;
+  const [remoteRaw, firstCommit, branch] = await Promise.all([
+    gitExec(["config", "--get", "remote.origin.url"], cwd),
+    gitExec(["rev-list", "--max-parents=0", "HEAD"], cwd),
+    gitExec(["rev-parse", "--abbrev-ref", "HEAD"], cwd)
+  ]);
+  if (remoteRaw || firstCommit) {
+    const remote = remoteRaw ? normaliseRemote(remoteRaw) : void 0;
+    const composite = `${remote ?? ""}|${firstCommit ?? ""}`;
+    return {
+      id: `git:${shortHash(composite)}`,
+      source: "git",
+      name: target.name,
+      remoteUrl: remote,
+      firstCommit: firstCommit ?? void 0,
+      branch: branch ?? void 0,
+      rootPath: cwd
+    };
+  }
+  return {
+    id: `folder:${shortHash(cwd)}`,
+    source: "folder",
+    name: target.name,
+    rootPath: cwd
+  };
+}
+function projectFolderName(identity) {
+  if (identity.source === "git" && identity.remoteUrl) {
+    return `repo:${identity.remoteUrl}`;
+  }
+  if (identity.source === "git") {
+    return `repo:${identity.id}`;
+  }
+  if (identity.source === "folder") {
+    return `local:${identity.name}`;
+  }
+  return "workspace";
+}
+function projectConversationTag(identity) {
+  return `ide-project:${identity.id}`;
+}
+function conversationHasProjectTag(identity, tags) {
+  if (!tags?.length || identity.source === "none") return false;
+  return tags.includes(projectConversationTag(identity));
+}
+
 // src/chat/context-blocks.ts
 function toChips(blocks) {
   return blocks.map((b) => ({ id: b.id, kind: b.kind, label: b.label }));
@@ -17699,6 +18018,22 @@ function findConfiguredModel(models, provider, modelId) {
 }
 function defaultEnabledModel(models) {
   return models.find((m) => m.enabled && m.apiKeyConfigured) ?? models.find((m) => m.enabled) ?? models[0];
+}
+function effectiveModelSelection(conversationSelection, model, globalDefault) {
+  if (model === "auto") return "auto";
+  return conversationSelection ?? globalDefault;
+}
+function resolveTurnModel(input) {
+  if (input.forced) return { ...input.forced, modelSelection: "manual" };
+  const pinned = input.model && input.model !== "auto" ? findConfiguredModel(input.models, input.provider, input.model) : void 0;
+  if (input.selection === "auto") {
+    const provider = input.provider ?? pinned?.provider ?? defaultEnabledModel(input.models)?.provider;
+    if (!provider) return null;
+    return { provider: toWireProvider(provider), model: "auto", modelSelection: "auto" };
+  }
+  const chosen = pinned ?? defaultEnabledModel(input.models);
+  if (!chosen) return null;
+  return { provider: toWireProvider(chosen.provider), model: chosen.modelId, modelSelection: "manual" };
 }
 
 // src/chat/copilot-lm.ts
@@ -17913,6 +18248,17 @@ async function consumeChatStream(body, handlers) {
       case "conversation":
         handlers.onConversation?.(data.conversationId);
         break;
+      case "route": {
+        const route = data;
+        if (route && typeof route.provider === "string" && typeof route.model === "string") {
+          handlers.onRoute?.({
+            provider: route.provider,
+            model: route.model,
+            ...route.modelSelection === "auto" || route.modelSelection === "manual" ? { modelSelection: route.modelSelection } : {}
+          });
+        }
+        break;
+      }
       case "token":
         handlers.onToken?.(data.token);
         break;
@@ -18002,12 +18348,13 @@ function isAgentRunResumed(value) {
 function streamApprovalResume(approvalId, handlers, signal) {
   return streamChatEndpoint(`/api/approvals/${encodeURIComponent(approvalId)}/resume/stream`, {}, handlers, signal);
 }
-async function resolveApproval(approvalId, status, response) {
+async function resolveApproval(approvalId, status, response, resumeMode = "client") {
   const res = await apiFetch(`/api/approvals/${encodeURIComponent(approvalId)}`, {
     method: "PATCH",
     // "client": we stream the continuation ourselves via resume/stream, so the
     // server must not also resume the paused turn in the background.
-    body: JSON.stringify({ status, ...response ? { response } : {}, resumeMode: "client" })
+    // "server": an agent run's approval; the server continues the run.
+    body: JSON.stringify({ status, ...response ? { response } : {}, resumeMode })
   });
   if (!res.ok) {
     const err = await errorFromResponse(res);
@@ -18097,6 +18444,8 @@ function toolActivityKind(name) {
   if (name === "ide_terminal_session" || name === "terminal_run" || name === "ide_run_command" || name === "ide_tasks_run" || name === "ide_tasks_cancel" || name === "ide_test_run" || name === "ide_debug_start" || name === "ide_debug_stop" || name === "ide_notebook_execute" || name === "ide_workspace_config_write") return "executing";
   return "executing";
 }
+var AGENT_STREAM_IDLE_MS = 15e3;
+var CATALOG_FOCUS_REFRESH_MS = 1e4;
 var LiberideChatPanelController = class _LiberideChatPanelController {
   constructor(context, store2, output) {
     this.context = context;
@@ -18163,6 +18512,24 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
   patchTimers = /* @__PURE__ */ new Map();
   /** conversationId -> placeholder shown while a resumed sub-agent works; kept across refreshes until its result lands. */
   agentResumeNotes = /* @__PURE__ */ new Map();
+  /** conversationId -> runId -> run card state (anchors, run list, live stream). */
+  agentRuns = /* @__PURE__ */ new Map();
+  /** conversationId -> live `/agents/stream` subscription. */
+  agentStreams = /* @__PURE__ */ new Map();
+  /** conversationId -> run ids changed since the last flush to the webview. */
+  agentRunChanges = /* @__PURE__ */ new Map();
+  agentRunFlushTimer;
+  /** Conversations whose run list was fetched (re-fetched on resync). */
+  hydratedAgentRuns = /* @__PURE__ */ new Set();
+  /** conversationId -> pending approvals of its agent runs. */
+  runApprovals = /* @__PURE__ */ new Map();
+  /** conversationId -> local notes in the transcript (run actions and their errors). */
+  localNotes = /* @__PURE__ */ new Map();
+  /** conversationId -> graph cards shown before the server posted the graph's message. */
+  pendingGraphAnchors = /* @__PURE__ */ new Map();
+  lastCatalogRefresh = 0;
+  /** Node to reveal once the view has loaded. */
+  pendingReveal;
   /** Locally-staged session for "new chat" before the first message creates it on the backend. */
   /** Conversations opened from another surface: listed even when they are not this project's. */
   openedConversations = /* @__PURE__ */ new Set();
@@ -18173,6 +18540,24 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
   disposed = false;
   async onConversationListEvent(event) {
     if (this.disposed) return;
+    if (event.type === "models_changed") {
+      await this.refreshCatalog();
+      return;
+    }
+    if (event.type === "agent_run_updated") {
+      this.onAgentRunUpdated(event);
+      return;
+    }
+    if (event.type === "approvals_changed") {
+      const targets = event.conversationId ? [event.conversationId] : [...this.messagesCache.keys()];
+      for (const id of targets) {
+        if (!this.messagesCache.has(id)) continue;
+        this.hydratedApprovalConversations.delete(id);
+        void this.hydrateApprovals(id);
+        void this.hydrateRunApprovals(id);
+      }
+      return;
+    }
     if (event.type === "message_updated" && event.conversationId) {
       this.agentResumeNotes.delete(event.conversationId);
       if (this.messagesCache.has(event.conversationId)) await this.refreshSingleConversation(event.conversationId);
@@ -18181,7 +18566,9 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     }
     await this.refreshConversations();
     if (event.type === "resync" && this.activeSessionId && this.messagesCache.has(this.activeSessionId)) {
+      this.hydratedAgentRuns.delete(this.activeSessionId);
       await this.refreshSingleConversation(this.activeSessionId);
+      void this.refreshCatalog();
     }
   }
   async onWorkspaceFoldersChanged() {
@@ -18198,7 +18585,12 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
   resolveWebviewView(view) {
     this.view = view;
     this.bindWebview(view.webview);
+    const visibility = view.onDidChangeVisibility(() => {
+      if (!view.visible || this.disposed || Date.now() - this.lastCatalogRefresh < CATALOG_FOCUS_REFRESH_MS) return;
+      void this.refreshCatalog();
+    });
     view.onDidDispose(() => {
+      visibility.dispose();
       if (this.view === view) this.view = void 0;
     });
   }
@@ -18257,6 +18649,12 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     this.graphWatchers.clear();
     for (const timer of this.patchTimers.values()) clearTimeout(timer);
     this.patchTimers.clear();
+    for (const stream of this.agentStreams.values()) {
+      stream.dispose();
+      if (stream.idleTimer) clearTimeout(stream.idleTimer);
+    }
+    this.agentStreams.clear();
+    if (this.agentRunFlushTimer) clearTimeout(this.agentRunFlushTimer);
   }
   // ---------------------------------------------------------------------------
   // Webview plumbing
@@ -18365,7 +18763,19 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
           this.broadcast({ type: "openSettings" });
           break;
         case "openPipeline":
-          await vscode11.commands.executeCommand("liberide.openPipeline");
+          await vscode11.commands.executeCommand("liberide.openPipeline", { conversationId: this.activeConversationId() });
+          break;
+        case "resolveNodeApproval":
+          await this.resolveGraphNodeApproval(message.sessionId, message.graphId, message.nodeId, message.decision);
+          break;
+        case "resolveRunApproval":
+          await this.resolveRunApproval(message.sessionId, message.approvalId, message.decision);
+          break;
+        case "replayNode":
+          await vscode11.commands.executeCommand("liberide.replayFromNode", { graphId: message.graphId, nodeId: message.nodeId });
+          break;
+        case "loadRunToolCalls":
+          await this.loadRunToolCalls(message.sessionId, message.runId);
           break;
         case "copilotGithubLogin":
           await this.copilotGithubLogin();
@@ -18408,8 +18818,11 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
       apiOrigin: getApiOrigin()
     });
     if (this.activeSessionId) void this.attachRunningTurn(this.activeSessionId);
+    if (this.pendingReveal?.sessionId === this.activeSessionId) this.broadcast(this.pendingReveal);
+    this.pendingReveal = void 0;
   }
   async refreshCatalog() {
+    this.lastCatalogRefresh = Date.now();
     const reachability = await probeBackend();
     if (reachability === "unconfigured") {
       this.backendStatus = "unconfigured";
@@ -18516,8 +18929,9 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
       if (this.disposed) return;
       await this.syncProjectConversations(all);
       const owned = all.filter((c) => this.conversationBelongsToProject(c) || this.openedConversations.has(c.id));
+      const previous = new Map(this.conversations);
       this.conversations.clear();
-      for (const c of owned) this.conversations.set(c.id, c);
+      for (const c of owned) this.conversations.set(c.id, this.keepModelWhileStreaming(c, previous.get(c.id)));
       const keptIds = buildKeptConversationIds(
         owned.map((c) => c.id),
         this.activeSessionId,
@@ -18530,6 +18944,9 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
         consumedPipelineCards: this.consumedPipelineCards,
         attachmentBytes: this.attachmentBytes
       });
+      for (const id of [...this.agentRuns.keys(), ...this.agentStreams.keys()]) {
+        if (!keptIds.has(id)) this.forgetAgentRuns(id);
+      }
       void this.persistSessionKinds();
       void this.context.workspaceState.update(OVERRIDES_STORAGE_KEY, this.overrides);
       if (this.activeSessionId && this.activeSessionId.startsWith("draft:")) {
@@ -18572,8 +18989,21 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
   /** Start graph watchers and fetch approval details for freshly loaded messages. */
   afterMessagesLoaded(conversationId) {
     const messages = this.messagesCache.get(conversationId) ?? [];
+    this.mergeAnchorRuns(conversationId, messages);
+    if (!this.hydratedAgentRuns.has(conversationId)) {
+      this.hydratedAgentRuns.add(conversationId);
+      void this.hydrateAgentRuns(conversationId);
+      void this.hydrateRunApprovals(conversationId);
+    }
     for (const m of messages) {
       if (m.role !== "assistant" || !m.executionGraphId) continue;
+      const watcher = this.graphWatchers.get(m.executionGraphId);
+      if (watcher && watcher.conversationId === conversationId && watcher.messageId !== m.id) {
+        const view = this.graphViews.get(watcher.messageId);
+        if (view && !this.graphViews.has(m.id)) this.graphViews.set(m.id, view);
+        this.graphViews.delete(watcher.messageId);
+        watcher.messageId = m.id;
+      }
       if (m.graphStatus && isTerminalGraphStatus(m.graphStatus)) {
         this.finishedGraphs.add(m.executionGraphId);
         const view = this.graphViews.get(m.id);
@@ -18603,6 +19033,322 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
       this.hydratedApprovalConversations.delete(conversationId);
       this.output.appendLine(`[chat.approvals] ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+  // ---------------------------------------------------------------------------
+  // Agent runs: every run of a chat is drawn in it (graph nodes, sub-agents,
+  // background agents), with its live output, tool calls and result/error.
+  // ---------------------------------------------------------------------------
+  runsOf(conversationId) {
+    let runs2 = this.agentRuns.get(conversationId);
+    if (!runs2) {
+      runs2 = /* @__PURE__ */ new Map();
+      this.agentRuns.set(conversationId, runs2);
+    }
+    return runs2;
+  }
+  /** Fold the server's anchor cards (one message per run) into the run state. */
+  mergeAnchorRuns(conversationId, messages) {
+    let runs2;
+    for (const m of messages) {
+      const anchor = agentRunFromAnchor(m);
+      if (!anchor) continue;
+      runs2 ??= this.runsOf(conversationId);
+      runs2.set(anchor.runId, mergeAgentRun(runs2.get(anchor.runId), anchor));
+    }
+    if (runs2) this.syncAgentStream(conversationId);
+  }
+  async hydrateAgentRuns(conversationId) {
+    try {
+      const list = await listConversationAgentRuns(conversationId);
+      if (this.disposed) return;
+      if (list.length) {
+        const runs2 = this.runsOf(conversationId);
+        for (const run of list) {
+          runs2.set(run.runId, mergeAgentRun(runs2.get(run.runId), run));
+          this.markAgentRunChanged(conversationId, run.runId);
+        }
+      }
+      this.syncAgentStream(conversationId);
+    } catch (err) {
+      this.output.appendLine(`[chat.agent-runs] ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  /** Pending approvals raised by the chat's agent runs (turn approvals have their own card). */
+  async hydrateRunApprovals(conversationId) {
+    try {
+      const approvals = await listConversationApprovals(conversationId);
+      if (this.disposed) return;
+      const turnApprovals = new Set((this.messagesCache.get(conversationId) ?? []).map((m) => m.approvalId).filter(Boolean));
+      const previous = new Map((this.runApprovals.get(conversationId) ?? []).map((a) => [a.id, a]));
+      const pending2 = approvals.filter((a) => a.status === "pending" && !turnApprovals.has(a.id)).map((a) => ({ ...approvalCardFrom(a), agentRunId: a.agentRunId, busy: previous.get(a.id)?.busy, error: previous.get(a.id)?.error }));
+      if (pending2.length) this.runApprovals.set(conversationId, pending2);
+      else this.runApprovals.delete(conversationId);
+      this.broadcast({ type: "runApprovals", sessionId: conversationId, approvals: pending2 });
+    } catch (err) {
+      this.output.appendLine(`[chat.run-approvals] ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  /** `agent_run_updated`: a run of a chat changed status (live output comes from the agents stream). */
+  onAgentRunUpdated(event) {
+    const conversationId = event.conversationId;
+    if (!conversationId) return;
+    if (!this.messagesCache.has(conversationId) && conversationId !== this.activeSessionId) return;
+    if (!event.runId) {
+      const known2 = event.graphId && (this.messagesCache.get(conversationId) ?? []).some((m) => m.executionGraphId === event.graphId);
+      if (event.graphId && !known2) this.scheduleConversationRefresh(conversationId);
+      return;
+    }
+    const runs2 = this.runsOf(conversationId);
+    const known = runs2.get(event.runId);
+    const status = event.status ?? known?.status ?? "running";
+    runs2.set(event.runId, mergeAgentRun(known, {
+      runId: event.runId,
+      status,
+      text: "",
+      toolCalls: [],
+      ...event.graphId ? { graphId: event.graphId } : {},
+      ...event.nodeId ? { nodeId: event.nodeId } : {},
+      ...event.parentRunId ? { parentRunId: event.parentRunId } : {},
+      ...event.messageId ? { messageId: event.messageId } : {}
+    }));
+    this.markAgentRunChanged(conversationId, event.runId);
+    this.syncAgentStream(conversationId, isActiveAgentRunStatus(status));
+    const hasAnchor = event.messageId && (this.messagesCache.get(conversationId) ?? []).some((m) => m.id === event.messageId);
+    if (!known || !hasAnchor || !isActiveAgentRunStatus(status)) this.scheduleConversationRefresh(conversationId);
+  }
+  refreshTimers = /* @__PURE__ */ new Map();
+  /** Coalesce reloads triggered by bursts of run events. */
+  scheduleConversationRefresh(conversationId) {
+    if (this.refreshTimers.has(conversationId)) return;
+    this.refreshTimers.set(conversationId, setTimeout(() => {
+      this.refreshTimers.delete(conversationId);
+      if (this.messagesCache.has(conversationId)) void this.refreshSingleConversation(conversationId);
+    }, 400));
+  }
+  /**
+   * Keep the conversation's agents stream open while any run is active
+   * (`force`: a run just started), and close it a while after the last one ends.
+   */
+  syncAgentStream(conversationId, force = false) {
+    if (this.disposed || conversationId.startsWith("draft:")) return;
+    const runs2 = this.agentRuns.get(conversationId);
+    const active = force || [...runs2?.values() ?? []].some((run) => isActiveAgentRunStatus(run.status));
+    const existing = this.agentStreams.get(conversationId);
+    if (active) {
+      if (existing?.idleTimer) {
+        clearTimeout(existing.idleTimer);
+        existing.idleTimer = void 0;
+      }
+      if (existing || this.backendStatus !== "ok") return;
+      const state = { connected: true, dispose: () => void 0 };
+      this.agentStreams.set(conversationId, state);
+      state.dispose = subscribeConversationAgents(conversationId, (event) => {
+        if (this.disposed) return;
+        const changed = applyAgentStreamEvent(this.runsOf(conversationId), event);
+        for (const runId of changed) this.markAgentRunChanged(conversationId, runId);
+        if (event.type === "status" && !isActiveAgentRunStatus(event.status)) this.scheduleConversationRefresh(conversationId);
+        if (event.type === "snapshot" || event.type === "status") this.syncAgentStream(conversationId);
+      }, {
+        onConnectionChange: (connected) => {
+          if (state.connected === connected) return;
+          state.connected = connected;
+          this.broadcast({ type: "agentRuns", sessionId: conversationId, runs: [], connected });
+        },
+        log: (message) => this.output.appendLine(`[chat.agents] ${message}`)
+      });
+      return;
+    }
+    if (!existing || existing.idleTimer) return;
+    existing.idleTimer = setTimeout(() => {
+      existing.idleTimer = void 0;
+      const stillActive = [...this.agentRuns.get(conversationId)?.values() ?? []].some((run) => isActiveAgentRunStatus(run.status));
+      if (stillActive || this.agentStreams.get(conversationId) !== existing) return;
+      existing.dispose();
+      this.agentStreams.delete(conversationId);
+      if (!existing.connected) this.broadcast({ type: "agentRuns", sessionId: conversationId, runs: [], connected: true });
+    }, AGENT_STREAM_IDLE_MS);
+  }
+  /** Batch run updates to the webview (streamed text arrives token by token). */
+  markAgentRunChanged(conversationId, runId) {
+    let changed = this.agentRunChanges.get(conversationId);
+    if (!changed) {
+      changed = /* @__PURE__ */ new Set();
+      this.agentRunChanges.set(conversationId, changed);
+    }
+    changed.add(runId);
+    if (this.agentRunFlushTimer) return;
+    this.agentRunFlushTimer = setTimeout(() => {
+      this.agentRunFlushTimer = void 0;
+      const pending2 = [...this.agentRunChanges];
+      this.agentRunChanges.clear();
+      for (const [id, runIds] of pending2) {
+        const runs2 = this.agentRuns.get(id);
+        if (!runs2) continue;
+        const views = [...runIds].map((runId2) => runs2.get(runId2)).filter((run) => Boolean(run));
+        if (views.length) this.broadcast({ type: "agentRuns", sessionId: id, runs: views.map((run) => ({ ...run, toolCalls: [...run.toolCalls] })), connected: this.agentStreams.get(id)?.connected ?? true });
+      }
+    }, 100);
+  }
+  /** Tool calls of a finished run (the stream only carries those it saw live). */
+  async loadRunToolCalls(conversationId, runId) {
+    const run = this.agentRuns.get(conversationId)?.get(runId);
+    if (!run) return;
+    try {
+      const calls = await listAgentRunToolCalls(runId);
+      run.toolCalls = mergeAgentRun({ ...run, toolCalls: [] }, { ...run, toolCalls: [...calls, ...run.toolCalls] }).toolCalls;
+      this.markAgentRunChanged(conversationId, runId);
+    } catch (err) {
+      this.output.appendLine(`[chat.tool-calls] ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  forgetAgentRuns(conversationId) {
+    const stream = this.agentStreams.get(conversationId);
+    if (stream) {
+      stream.dispose();
+      if (stream.idleTimer) clearTimeout(stream.idleTimer);
+      this.agentStreams.delete(conversationId);
+    }
+    this.agentRuns.delete(conversationId);
+    this.hydratedAgentRuns.delete(conversationId);
+    this.runApprovals.delete(conversationId);
+    this.localNotes.delete(conversationId);
+    this.pendingGraphAnchors.delete(conversationId);
+  }
+  /** Approve/reject a graph APPROVAL node from its step in the graph card. */
+  async resolveGraphNodeApproval(conversationId, graphId, nodeId, decision) {
+    try {
+      await resolveNodeApproval(graphId, nodeId, decision);
+    } catch (err) {
+      this.postNote(conversationId, `Could not ${decision === "approved" ? "approve" : "reject"} the step: ${err instanceof Error ? err.message : String(err)}`, "error");
+    }
+  }
+  /** Approve/reject an approval raised by an agent run; the server continues the run. */
+  async resolveRunApproval(conversationId, approvalId, decision) {
+    const cards = this.runApprovals.get(conversationId) ?? [];
+    const card = cards.find((c) => c.id === approvalId);
+    const publish = () => this.broadcast({ type: "runApprovals", sessionId: conversationId, approvals: this.runApprovals.get(conversationId) ?? [] });
+    if (card) {
+      card.busy = true;
+      card.error = void 0;
+      publish();
+    }
+    try {
+      await resolveApproval(approvalId, decision, void 0, "server");
+      const rest = (this.runApprovals.get(conversationId) ?? []).filter((c) => c.id !== approvalId);
+      if (rest.length) this.runApprovals.set(conversationId, rest);
+      else this.runApprovals.delete(conversationId);
+    } catch (err) {
+      if (card) {
+        card.busy = false;
+        card.error = err instanceof Error ? err.message : String(err);
+      }
+      if (err instanceof ChatStreamError && err.details.status === 404) void this.hydrateRunApprovals(conversationId);
+    }
+    publish();
+  }
+  /** While a turn streams, a list refresh keeps the chip's model (the turn may still change it). */
+  keepModelWhileStreaming(next, previous) {
+    if (!previous || !this.streams.has(next.id)) return next;
+    return { ...next, provider: previous.provider, model: previous.model, modelSelection: previous.modelSelection };
+  }
+  // ---------------------------------------------------------------------------
+  // ChatRunLink: the pipeline, Runs view and workflow triggers report here
+  // ---------------------------------------------------------------------------
+  async ensureConversation(title) {
+    const active = this.activeConversationId();
+    if (active) return active;
+    if (this.backendStatus !== "ok") await this.refreshCatalog();
+    if (this.backendStatus !== "ok") return void 0;
+    const draft = this.draftSession;
+    const conversation = await this.createSessionConversation(title, draft?.overrides ?? {});
+    if (!conversation) return void 0;
+    this.conversations.set(conversation.id, conversation);
+    this.messagesCache.set(conversation.id, []);
+    this.hydratedAgentRuns.add(conversation.id);
+    if (draft && this.activeSessionId === draft.id) {
+      this.sessionKinds.set(conversation.id, this.sessionKinds.get(draft.id) ?? draft.kind);
+      this.sessionKinds.delete(draft.id);
+      this.draftSession = null;
+      await this.persistSessionKinds();
+    }
+    this.activeSessionId = conversation.id;
+    await this.persistActive();
+    this.broadcastSessions();
+    this.broadcastActiveSession();
+    return conversation.id;
+  }
+  conversationForGraph(graphId) {
+    for (const [conversationId, messages] of this.messagesCache) {
+      if (messages.some((m) => m.executionGraphId === graphId)) return conversationId;
+    }
+    const watcher = this.graphWatchers.get(graphId);
+    if (watcher) return watcher.conversationId;
+    for (const [conversationId, runs2] of this.agentRuns) {
+      for (const run of runs2.values()) if (run.graphId === graphId) return conversationId;
+    }
+    return graphConversation(this.context.workspaceState, graphId);
+  }
+  async trackGraph(conversationId, graphId) {
+    await linkGraphConversation(this.context.workspaceState, graphId, conversationId);
+    if (!this.conversations.has(conversationId)) {
+      this.openedConversations.add(conversationId);
+      await this.refreshConversations();
+    }
+    await this.ensureMessagesLoaded(conversationId);
+    const messages = this.messagesCache.get(conversationId) ?? [];
+    let host = messages.find((m) => m.executionGraphId === graphId);
+    if (!host) {
+      host = {
+        id: `local:graph:${graphId}`,
+        conversationId,
+        role: "assistant",
+        content: "",
+        executionGraphId: graphId,
+        createdAt: (/* @__PURE__ */ new Date()).toISOString()
+      };
+      messages.push(host);
+      this.messagesCache.set(conversationId, messages);
+      this.pendingGraphAnchors.set(conversationId, [...this.pendingGraphAnchors.get(conversationId) ?? [], host]);
+    }
+    this.watchGraph(conversationId, host.id, graphId);
+    await this.showConversation(conversationId);
+    this.scheduleConversationRefresh(conversationId);
+  }
+  async showConversation(conversationId) {
+    if (!this.conversations.has(conversationId)) this.openedConversations.add(conversationId);
+    this.show();
+    if (this.activeSessionId !== conversationId) {
+      this.activeSessionId = conversationId;
+      await this.persistActive();
+    }
+    if (this.view) await this.openSession(conversationId);
+    this.scheduleConversationRefresh(conversationId);
+  }
+  async revealGraphNode(graphId, nodeId) {
+    const conversationId = this.conversationForGraph(graphId);
+    if (!conversationId) return false;
+    await this.showConversation(conversationId);
+    if (!this.graphWatchers.has(graphId) && !this.finishedGraphs.has(graphId)) {
+      const host = (this.messagesCache.get(conversationId) ?? []).find((m) => m.executionGraphId === graphId);
+      if (host) this.watchGraph(conversationId, host.id, graphId);
+    }
+    const reveal = { type: "revealGraphNode", sessionId: conversationId, graphId, nodeId };
+    if (this.view) this.broadcast(reveal);
+    else this.pendingReveal = reveal;
+    return true;
+  }
+  postNote(conversationId, text, severity = "info") {
+    const note = {
+      id: `local:note:${randomId()}`,
+      role: "assistant",
+      content: text,
+      createdAt: Date.now(),
+      status: "complete",
+      note: severity
+    };
+    const notes = [...this.localNotes.get(conversationId) ?? [], note].slice(-50);
+    this.localNotes.set(conversationId, notes);
+    if (this.activeSessionId === conversationId) this.broadcastActiveSession();
   }
   // ---------------------------------------------------------------------------
   // Session view models
@@ -18681,7 +19427,15 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
       if (consumed?.has(m.id)) base.pipelineCardConsumed = true;
       return base;
     });
+    const notes = this.localNotes.get(conv.id) ?? [];
+    for (const note of notes) {
+      const index = messages.findIndex((m) => m.createdAt > note.createdAt);
+      if (index < 0) messages.push(note);
+      else messages.splice(index, 0, note);
+    }
     const kind = this.sessionKinds.get(conv.id) ?? "vibe";
+    const runs2 = this.agentRuns.get(conv.id);
+    const routed = [...cached2].reverse().find((m) => m.role === "assistant" && m.model && m.model !== "auto" && !agentRunFromAnchor(m));
     return {
       id: conv.id,
       conversationId: conv.id,
@@ -18691,12 +19445,19 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
       remote: true,
       createdAt: new Date(conv.createdAt).getTime() || Date.now(),
       updatedAt: new Date(conv.updatedAt).getTime() || Date.now(),
-      kind
+      kind,
+      ...routed ? { routedModel: { provider: routed.provider, model: routed.model } } : {},
+      ...runs2?.size ? { agentRuns: [...runs2.values()] } : {},
+      ...this.runApprovals.get(conv.id)?.length ? { runApprovals: this.runApprovals.get(conv.id) } : {},
+      agentsConnected: this.agentStreams.get(conv.id)?.connected ?? true
     };
   }
   decorateAssistantMessage(view, m, turnStatus) {
     if (turnStatus) view.turnStatus = turnStatus;
     if (m.error) view.error = m.error;
+    const anchor = agentRunFromAnchor(m);
+    if (anchor) view.agentRunId = anchor.runId;
+    if (m.model) view.model = { provider: m.provider, model: m.model };
     const warnings = [.../* @__PURE__ */ new Set([...m.warnings ?? [], ...this.turnWarnings.get(m.id) ?? []])];
     if (warnings.length) view.warnings = warnings;
     const thinking = this.thinkingByMessage.get(m.id);
@@ -18733,9 +19494,12 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     const stored = this.overrides[conv.id] ?? {};
     const settings = readSettings();
     const defaultAllowed = resolveAllowedAgentIds(this.catalog.agents, settings.defaultAllowedAgentIds);
+    const model = conv.model ?? stored.model;
     return {
       provider: conv.provider ?? stored.provider,
-      model: conv.model ?? stored.model,
+      model,
+      // The conversation's own mode (set here or on the web) wins over the local default.
+      modelSelection: effectiveModelSelection(conv.modelSelection ?? stored.modelSelection, model, settings.modelSelection),
       chatMode: "agent",
       useRag: stored.useRag,
       toolsEnabled: true,
@@ -18817,6 +19581,7 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
       delete this.overrides[id];
       this.sessionKinds.delete(id);
       this.consumedPipelineCards.delete(id);
+      this.forgetAgentRuns(id);
       await this.persistOverrides();
       await this.persistSessionKinds();
       if (this.activeSessionId === id) this.activeSessionId = null;
@@ -19016,6 +19781,7 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
     const patch = {};
     if (normalizedOverrides.provider) patch.provider = toWireProvider(normalizedOverrides.provider);
     if (normalizedOverrides.model) patch.model = normalizedOverrides.model;
+    if (normalizedOverrides.modelSelection) patch.modelSelection = normalizedOverrides.modelSelection;
     if (normalizedOverrides.agentId !== void 0) patch.agentId = normalizedOverrides.agentId;
     if (normalizedOverrides.allowedAgentIds) patch.allowedAgentIds = normalizedOverrides.allowedAgentIds;
     if (Object.keys(patch).length > 0) {
@@ -19032,11 +19798,18 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
   // ---------------------------------------------------------------------------
   // Sending chat
   // ---------------------------------------------------------------------------
-  resolveProviderModel(overrides) {
-    const fromOverride = overrides.provider && overrides.model ? findConfiguredModel(this.catalog.models, overrides.provider, overrides.model) : void 0;
-    const chosen = fromOverride ?? defaultEnabledModel(this.catalog.models);
-    if (!chosen) return null;
-    return { provider: toWireProvider(chosen.provider), model: chosen.modelId };
+  /**
+   * Provider/model/selection for a turn: the chat's own model selection
+   * (drafts without one use the global default); auto sends model `auto`.
+   */
+  resolveProviderModel(overrides, forced) {
+    return resolveTurnModel({
+      models: this.catalog.models,
+      selection: effectiveModelSelection(overrides.modelSelection, overrides.model, readSettings().modelSelection),
+      provider: overrides.provider,
+      model: overrides.model,
+      forced
+    });
   }
   buildIdeContext(conversationId) {
     return buildIdeContextPayload(conversationId);
@@ -19069,7 +19842,7 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
       this.broadcast({ type: "log", message: hint });
       return;
     }
-    const resolved = forced ?? this.resolveProviderModel(session.overrides);
+    const resolved = this.resolveProviderModel(session.overrides, forced);
     if (!resolved) {
       this.broadcast({ type: "log", message: "No configured model. Add one in the LiberIDE app first." });
       return;
@@ -19129,8 +19902,8 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
       conversationId,
       provider: resolved.provider,
       model: resolved.model,
-      // An explicit retry with a chosen alternative is a pin, not a routing hint.
-      modelSelection: forced ? "manual" : settings.modelSelection,
+      // The chat's own selection (an explicit retry with a chosen alternative is a pin).
+      modelSelection: resolved.modelSelection,
       chatMode,
       content: outgoingContent,
       systemPrompt,
@@ -19239,6 +20012,11 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
         streamState.serverConversationId = serverConversationId;
         if (streamState.stopRequested) void requestTurnCancel(serverConversationId);
       },
+      onRoute: (route) => {
+        assistantMessage.provider = route.provider;
+        assistantMessage.model = route.model;
+        if (this.activeSessionId === conversationId) this.broadcastActiveSession();
+      },
       onToken: (text) => {
         buffer += text;
         assistantMessage.content = buffer;
@@ -19286,7 +20064,7 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
     const server = response.assistantMessage;
     if (server) {
       if (server.content) assistantMessage.content = server.content;
-      for (const key of ["status", "approvalId", "pausedAgentRunId", "executionGraphId", "graphStatus", "error", "warnings", "resolution"]) {
+      for (const key of ["status", "approvalId", "pausedAgentRunId", "executionGraphId", "graphStatus", "error", "warnings", "resolution", "provider", "model"]) {
         if (server[key] !== void 0) assistantMessage[key] = server[key];
       }
       if (server.id && server.id !== localId) {
@@ -19457,18 +20235,24 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
     const view = this.graphViews.get(messageId) ?? { graphId, status: "running", steps: [] };
     this.graphViews.set(messageId, view);
     const watcher = { conversationId, messageId, dispose: () => void 0 };
-    const publish = (coalesce = true) => this.postPatch(conversationId, watcher.messageId, { graph: { ...view, steps: [...view.steps] } }, coalesce);
+    const publish = (coalesce = true) => this.postPatch(conversationId, watcher.messageId, { graph: { ...view, steps: view.steps.map((step) => ({ ...step })) } }, coalesce);
     watcher.dispose = subscribeExecutionGraphEvents(graphId, (event) => {
       if (event.type === "init" || event.type === "graph_status") {
         if (event.status) view.status = event.status;
       } else if (event.type === "node_status" && event.nodeId) {
-        const step = view.steps.find((s) => s.nodeId === event.nodeId);
-        if (step) {
-          if (event.status) step.status = event.status;
-          if (event.title) step.title = event.title;
-        } else {
-          view.steps.push({ nodeId: event.nodeId, title: event.title, status: event.status ?? "queued" });
+        let step = view.steps.find((s) => s.nodeId === event.nodeId);
+        if (!step) {
+          step = { nodeId: event.nodeId, status: event.status ?? "queued" };
+          view.steps.push(step);
         }
+        if (event.status) step.status = event.status;
+        if (event.title) step.title = event.title;
+        if (typeof event.taskId === "string" && event.taskId) step.taskId = event.taskId;
+        const error51 = nodeEventError(event);
+        if (error51) step.error = error51;
+        else if (event.status && event.status !== "failed") step.error = void 0;
+        const output = [event.output, event.summary, event.outputSummary, event.result].find((v) => typeof v === "string" && v.trim() !== "");
+        if (output) step.output = output;
       } else if (event.type === "done") {
         view.status = event.status ?? view.status;
         view.cancelling = false;
@@ -19628,7 +20412,7 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
     if (!content.trim()) return;
     this.fallbacks.delete(messageId);
     this.postPatch(sessionId, messageId, { fallback: void 0 });
-    await this.updateOverrides(sessionId, { provider, model });
+    await this.updateOverrides(sessionId, { modelSelection: "manual", provider, model });
     await this.sendChat(sessionId, content, { provider, model });
   }
   findSession(id) {
@@ -19666,6 +20450,9 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
       const settings = readSettings();
       const allowedAgentIds = overrides.allowedAgentIds?.length ? overrides.allowedAgentIds : resolveAllowedAgentIds(this.catalog.agents, settings.defaultAllowedAgentIds);
       const patch = {};
+      patch.modelSelection = effectiveModelSelection(overrides.modelSelection, overrides.model, settings.modelSelection);
+      if (overrides.provider) patch.provider = toWireProvider(overrides.provider);
+      if (overrides.model) patch.model = overrides.model;
       if (overrides.agentId) patch.agentId = overrides.agentId;
       if (allowedAgentIds.length) patch.allowedAgentIds = allowedAgentIds;
       if (Object.keys(patch).length) {
@@ -19688,7 +20475,7 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
     try {
       const list = await listConversations();
       const updated = list.find((c) => c.id === id);
-      if (updated) this.conversations.set(id, updated);
+      if (updated) this.conversations.set(id, this.keepModelWhileStreaming(updated, this.conversations.get(id)));
       const fresh = await listConversationMessages(id);
       if (this.streams.has(id)) {
         this.pendingRefresh.add(id);
@@ -19696,6 +20483,10 @@ _Wrote **${written}** task contract${written === 1 ? "" : "s"} for the active fe
       }
       const note = this.agentResumeNotes.get(id);
       if (note && !fresh.some((m) => m.id === note.id)) fresh.push(note);
+      const anchors = (this.pendingGraphAnchors.get(id) ?? []).filter((a) => !fresh.some((m) => m.executionGraphId === a.executionGraphId));
+      if (anchors.length) this.pendingGraphAnchors.set(id, anchors);
+      else this.pendingGraphAnchors.delete(id);
+      fresh.push(...anchors);
       this.messagesCache.set(id, fresh);
       this.hydratedApprovalConversations.delete(id);
       this.afterMessagesLoaded(id);
@@ -19877,6 +20668,7 @@ ${block}
       return;
     }
     const slug = root.path.split("/").pop() ?? featureName;
+    await linkFeatureConversation(this.context.workspaceState, slug, session.conversationId);
     const tasksDirUri = vscode11.Uri.joinPath(root, "tasks");
     const requirementsUri = vscode11.Uri.joinPath(root, "requirements.md");
     const designUri = vscode11.Uri.joinPath(root, "design.md");
@@ -19915,7 +20707,7 @@ ${block}
       conversationId,
       provider: resolved.provider,
       model: resolved.model,
-      modelSelection: readSettings().modelSelection,
+      modelSelection: resolved.modelSelection,
       chatMode: "agent",
       content: userPrompt,
       displayContent: userLabel,
@@ -20589,6 +21381,13 @@ var RunsTreeProvider = class {
   /** The node id awaiting approval for a run, if any (used by the resolve-approval command). */
   getWaitingNodeId(graphId) {
     return this.runs.get(graphId)?.waitingNodeId;
+  }
+  /** The server node id recorded for a task id (or a server id the run has seen). */
+  serverNodeIdFor(graphId, nodeId) {
+    const run = this.runs.get(graphId);
+    if (!run) return void 0;
+    if ([...run.serverNodeIds.values()].includes(nodeId)) return nodeId;
+    return run.serverNodeIds.get(nodeId);
   }
   /** Run metadata used to re-establish a subscription on retry/replay. */
   getRunMeta(graphId) {
@@ -23009,7 +23808,7 @@ function ideWorkflowPayload() {
     ...activeFile && !activeFile.startsWith("..") && editor && !editor.selection.isEmpty ? { selection: { startLine: editor.selection.start.line + 1, endLine: editor.selection.end.line + 1 } } : {}
   };
 }
-async function runIdeWorkflowCommand(output) {
+async function runIdeWorkflowCommand(output, chat2) {
   const triggers = await listIdeWorkflowTriggers();
   if (!triggers.length) {
     void vscode37.window.showInformationMessage("No workflows have an IDE command trigger. Add one to a workflow in the LiberIDE app.");
@@ -23031,11 +23830,13 @@ async function runIdeWorkflowCommand(output) {
     placeHolder: picked.trigger.command
   });
   if (input === void 0) return;
-  const payload = ideWorkflowPayload();
-  output.appendLine(`[workflow] ${picked.trigger.pipelineName}: starting (${picked.trigger.command})`);
-  output.show(true);
+  const name = picked.trigger.pipelineName;
+  const conversationId = await chat2.ensureConversation(`Workflow: ${name}`);
+  if (conversationId) await chat2.showConversation(conversationId);
+  const body = ideWorkflowRunBody(picked.trigger.command, input, ideWorkflowPayload(), conversationId);
+  output.appendLine(`[workflow] ${name}: starting (${picked.trigger.command})${conversationId ? ` in chat ${conversationId}` : ""}`);
   const run = await vscode37.window.withProgress(
-    { location: vscode37.ProgressLocation.Notification, title: `Running ${picked.trigger.pipelineName}\u2026`, cancellable: true },
+    { location: vscode37.ProgressLocation.Notification, title: `Running ${name}\u2026`, cancellable: true },
     async (_progress, token) => {
       const abort = new AbortController();
       const subscription = token.onCancellationRequested(() => abort.abort());
@@ -23043,7 +23844,7 @@ async function runIdeWorkflowCommand(output) {
         return await readJsonOrThrow(await apiFetch("/api/workflows/triggers/ide/run", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ command: picked.trigger.command, input: input.trim() || void 0, payload }),
+          body: JSON.stringify(body),
           signal: abort.signal
         }));
       } finally {
@@ -23051,18 +23852,32 @@ async function runIdeWorkflowCommand(output) {
       }
     }
   ).then((result) => result, (err) => {
-    const message = err instanceof Error ? err.name === "AbortError" ? "stopped waiting (the run continues on the server)" : err.message : String(err);
-    output.appendLine(`[workflow] ${picked.trigger.pipelineName}: ${message}`);
-    if (!(err instanceof Error && err.name === "AbortError")) void vscode37.window.showErrorMessage(`Workflow failed: ${message}`);
+    const aborted2 = err instanceof Error && err.name === "AbortError";
+    const message = aborted2 ? "stopped waiting (the run continues on the server)" : err instanceof Error ? err.message : String(err);
+    output.appendLine(`[workflow] ${name}: ${message}`);
+    if (conversationId) chat2.postNote(conversationId, `Workflow **${name}**: ${message}`, aborted2 ? "info" : "error");
+    else if (!aborted2) void vscode37.window.showErrorMessage(`Workflow failed: ${message}`);
     return void 0;
   });
   if (!run) return;
-  output.appendLine(`[workflow] ${run.pipelineName ?? picked.trigger.pipelineName}: ${run.status} (run ${run.id})`);
-  if (run.output) output.appendLine(run.output);
-  if (run.error) output.appendLine(`error: ${run.error}`);
-  const summary = `Workflow ${run.pipelineName ?? picked.trigger.pipelineName}: ${run.status}`;
-  if (run.status === "failed" || run.error) void vscode37.window.showErrorMessage(summary, "Show Output").then((choice) => choice && output.show());
-  else void vscode37.window.showInformationMessage(summary, "Show Output").then((choice) => choice && output.show());
+  output.appendLine(`[workflow] ${run.pipelineName ?? name}: ${run.status} (run ${run.id})`);
+  const failed = run.status === "failed" || Boolean(run.error);
+  if (conversationId) {
+    if (failed && run.error) chat2.postNote(conversationId, `Workflow **${run.pipelineName ?? name}** failed: ${run.error}`, "error");
+    await chat2.showConversation(conversationId);
+    return;
+  }
+  const summary = `Workflow ${run.pipelineName ?? name}: ${run.status}${run.error ? ` \u2014 ${run.error}` : ""}`;
+  if (failed) void vscode37.window.showErrorMessage(summary);
+  else void vscode37.window.showInformationMessage(summary);
+}
+function ideWorkflowRunBody(command, input, payload, conversationId) {
+  return {
+    command,
+    input: input.trim() || void 0,
+    payload: conversationId ? { ...payload, conversationId } : payload,
+    ...conversationId ? { conversationId } : {}
+  };
 }
 
 // src/pairing.ts
@@ -23192,11 +24007,11 @@ async function activate(context) {
   });
   const approvalsTree = new ApprovalsTreeProvider((message) => output.appendLine(message));
   const mcpTree = new McpTreeProvider((message) => output.appendLine(message));
-  pipeline = new LiberidePipelineController(context, store, output, runsTree);
   chat = new LiberideChatPanelController(context, store, output);
+  pipeline = new LiberidePipelineController(context, store, output, runsTree, chat);
   const notificationCenter = new IdeNotificationCenter(output, {
     onApprovalPending: ({ graphId, nodeId }) => {
-      if (graphId && nodeId) void pipeline.resolveApprovalForRun(graphId, nodeId);
+      if (graphId && nodeId) void pipeline.approvalPending(graphId, nodeId);
       approvalsTree.refresh();
     },
     onRunStatus: () => {
@@ -23231,7 +24046,7 @@ async function activate(context) {
       });
     }),
     vscode40.commands.registerCommand("liberide.runWorkflow", () => {
-      runIdeWorkflowCommand(output).catch((err) => {
+      runIdeWorkflowCommand(output, chat).catch((err) => {
         void vscode40.window.showErrorMessage(err instanceof Error ? err.message : String(err));
       });
     }),
@@ -23332,7 +24147,8 @@ function commands8(context, specsTree, tasksTree, runsTree, approvalsTree, mcpTr
     vscode40.commands.registerCommand("liberide.renameChat", safe(async () => {
       await chat.renameActiveChat();
     })),
-    vscode40.commands.registerCommand("liberide.openPipeline", () => pipeline.show()),
+    // From a chat (Open pipeline): that chat receives the pipeline's runs.
+    vscode40.commands.registerCommand("liberide.openPipeline", (arg) => pipeline.show(arg?.conversationId ?? chat.activeConversationId())),
     vscode40.commands.registerCommand("liberide.refreshSpecs", safe(async () => {
       await store.refresh();
       specsTree.refresh();
@@ -23453,7 +24269,7 @@ function commands8(context, specsTree, tasksTree, runsTree, approvalsTree, mcpTr
         void vscode40.window.showInformationMessage("Select a node in the Agent Runs view to replay from.");
         return;
       }
-      await pipeline.replayFromNode(arg.graphId, arg.nodeId);
+      await pipeline.replayFromNode(arg.graphId, arg.serverNodeId ?? arg.nodeId);
     })),
     vscode40.commands.registerCommand("liberide.showNodeDetail", safe(async (arg) => {
       if (!arg?.graphId || !arg?.nodeId) return;

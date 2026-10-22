@@ -100,3 +100,69 @@ export function describeModelLabel(
   if (m) return m.displayName;
   return `${providerLabel(provider)} \u00b7 ${modelId}`;
 }
+
+export type ModelSelectionMode = "auto" | "manual";
+
+/** True when the chat routes each turn (`modelSelection: "auto"` or the `auto` model id). */
+export function isAutoSelection(selection: ModelSelectionMode | undefined, model: string | undefined): boolean {
+  return selection === "auto" || model === "auto";
+}
+
+/**
+ * The model selection a chat uses: the conversation's own (set here or on
+ * the web), else the global `liberide.modelSelection` default (brand-new
+ * drafts, or conversations from servers that do not store it).
+ */
+export function effectiveModelSelection(
+  conversationSelection: ModelSelectionMode | undefined,
+  model: string | undefined,
+  globalDefault: ModelSelectionMode,
+): ModelSelectionMode {
+  if (model === "auto") return "auto";
+  return conversationSelection ?? globalDefault;
+}
+
+/**
+ * Provider/model/selection sent with a turn. Auto sends `model: "auto"` so
+ * the server routes; manual sends the pinned model, else the first usable
+ * one. An explicit retry with a chosen alternative is always a manual pin.
+ */
+export function resolveTurnModel(input: {
+  models: readonly ConfiguredModel[];
+  selection: ModelSelectionMode;
+  provider?: ConfiguredProvider;
+  model?: string;
+  forced?: { provider: Provider; model: string };
+}): { provider: Provider; model: string; modelSelection: ModelSelectionMode } | null {
+  if (input.forced) return { ...input.forced, modelSelection: "manual" };
+  const pinned = input.model && input.model !== "auto" ? findConfiguredModel(input.models, input.provider, input.model) : undefined;
+  if (input.selection === "auto") {
+    const provider = input.provider ?? pinned?.provider ?? defaultEnabledModel(input.models)?.provider;
+    if (!provider) return null;
+    return { provider: toWireProvider(provider), model: "auto", modelSelection: "auto" };
+  }
+  const chosen = pinned ?? defaultEnabledModel(input.models);
+  if (!chosen) return null;
+  return { provider: toWireProvider(chosen.provider), model: chosen.modelId, modelSelection: "manual" };
+}
+
+/** The composer's model chip: "Auto", "Auto → <routed model>", or the pinned model's name. */
+export function modelChipLabel(input: {
+  models: readonly ConfiguredModel[];
+  selection: ModelSelectionMode;
+  provider?: ConfiguredProvider;
+  model?: string;
+  /** Model the last auto-routed turn ran on. */
+  routed?: { provider?: string; model?: string };
+}): string {
+  if (input.selection === "auto" || input.model === "auto") {
+    const routed = input.routed;
+    if (routed?.model && routed.model !== "auto") {
+      const known = input.models.find((m) => m.modelId === routed.model && (!routed.provider || toWireProvider(m.provider) === routed.provider));
+      return `Auto → ${known?.displayName ?? routed.model}`;
+    }
+    return "Auto";
+  }
+  if (!input.provider || !input.model) return input.models.length === 0 ? "No models configured" : "Pick a model";
+  return describeModelLabel(input.models, input.provider, input.model);
+}

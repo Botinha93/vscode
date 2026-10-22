@@ -121,8 +121,38 @@ export const appliedEdits: WorkspaceEdit[] = [];
 /** Terminals created through `window.createTerminal({ pty })`; tests read what was written. */
 export const createdTerminals: Array<{ name: string; written: string; pty: { open: () => void; close: () => void; handleInput?: (data: string) => void }; disposed: boolean }> = [];
 
+/** Answers for `window.showQuickPick` (default: every item, as picked). */
+export const quickPickAnswers: Array<(items: unknown[]) => unknown> = [];
+/** Messages shown with `window.show*Message`, for assertions. */
+export const shownMessages: Array<{ severity: "info" | "warning" | "error"; message: string }> = [];
+
+export const ProgressLocation = { SourceControl: 1, Window: 10, Notification: 15 };
+
 export const window = {
   activeTextEditor: undefined as undefined | { document: { uri: Uri } },
+  async showQuickPick(items: unknown[] | Promise<unknown[]>, _options?: unknown) {
+    const list = await items;
+    const answer = quickPickAnswers.shift();
+    return answer ? answer(list) : list;
+  },
+  async showInputBox(_options?: unknown) {
+    return undefined as string | undefined;
+  },
+  async showInformationMessage(message: string, ..._items: unknown[]) {
+    shownMessages.push({ severity: "info", message });
+    return undefined;
+  },
+  async showWarningMessage(message: string, ..._items: unknown[]) {
+    shownMessages.push({ severity: "warning", message });
+    return undefined;
+  },
+  async showErrorMessage(message: string, ..._items: unknown[]) {
+    shownMessages.push({ severity: "error", message });
+    return undefined;
+  },
+  async withProgress<T>(_options: unknown, task: (progress: unknown, token: { onCancellationRequested: (listener: () => void) => { dispose(): void } }) => Promise<T>) {
+    return task({ report: () => undefined }, { onCancellationRequested: () => ({ dispose: () => undefined }) });
+  },
   createTerminal(options: { name: string; pty: { onDidWrite: (listener: Listener<string>) => unknown; open: () => void; close: () => void; handleInput?: (data: string) => void } }) {
     const record = { name: options.name, written: "", pty: options.pty, disposed: false };
     options.pty.onDidWrite((chunk) => { record.written += chunk; });
@@ -147,6 +177,7 @@ export const workspace = {
     inspect: (_key: string) => undefined,
     update: async () => undefined,
   }),
+  onDidChangeConfiguration: (_listener: unknown) => ({ dispose: () => undefined }),
   textDocuments: [] as Array<{ uri: Uri; isDirty: boolean; save: () => Promise<boolean>; getText: (range?: Range) => string }>,
   async applyEdit(edit: WorkspaceEdit) {
     appliedEdits.push(edit);
@@ -179,6 +210,7 @@ export const env = { appRoot: "/nonexistent-vscode-app-root", sessionId: "test-w
 
 export const vscodeMock = {
   env,
+  ProgressLocation,
   EventEmitter,
   CancellationTokenSource,
   LanguageModelTextPart,

@@ -5,10 +5,11 @@ import type {
   DocumentRecord,
   SharingFolder,
 } from "./chat/types";
-import type { ApprovalGrant, ExecutionGraph, McpServer, PermissionPolicy } from "@nexus/shared";
+import { conversationAgentsStreamPath, type ApprovalGrant, type ExecutionGraph, type McpServer, type PermissionPolicy } from "@nexus/shared";
 import { existsSync, mkdirSync, readFileSync, statSync, unwatchFile, watchFile, writeFileSync, chmodSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { backoffDelay, readSseStream } from "./sse";
+import { agentRunFrom, parseAgentStreamEvent, toolCallFrom, type AgentRunToolCallView, type AgentRunView, type AgentStreamEvent } from "./chat/agent-runs";
 
 type IntegrationSnapshot = {
   apiOrigin?: string;
@@ -557,9 +558,45 @@ export async function pingBackend(): Promise<boolean> {
 }
 
 export interface ConversationListEvent {
-  type: "conversations_changed" | "folders_changed" | "message_updated" | "resync";
+  /**
+   * agent_run_updated: a run in `conversationId` changed (`runId`, `status`…).
+   * approvals_changed: an approval was created or resolved.
+   * models_changed: the configured models (or their routing) changed.
+   * resync: the stream reconnected; catch up on anything missed.
+   */
+  type: "conversations_changed" | "folders_changed" | "message_updated" | "agent_run_updated" | "approvals_changed" | "models_changed" | "resync";
   conversationId?: string;
   messageId?: string;
+  runId?: string;
+  graphId?: string;
+  nodeId?: string;
+  parentRunId?: string;
+  status?: string;
+  /** agent_run_updated for a graph node transition: the node's status (`runId` once the node has a run). */
+  nodeStatus?: string;
+  code?: string;
+}
+
+const CONVERSATION_EVENT_TYPES = new Set<ConversationListEvent["type"]>([
+  "conversations_changed",
+  "folders_changed",
+  "message_updated",
+  "agent_run_updated",
+  "approvals_changed",
+  "models_changed",
+]);
+
+/** A `/api/conversations/stream` payload as an event, or undefined for unknown/malformed ones. */
+export function parseConversationListEvent(data: unknown): ConversationListEvent | undefined {
+  if (!data || typeof data !== "object") return undefined;
+  const raw = data as Record<string, unknown>;
+  if (typeof raw.type !== "string" || !CONVERSATION_EVENT_TYPES.has(raw.type as ConversationListEvent["type"])) return undefined;
+  const event: ConversationListEvent = { type: raw.type as ConversationListEvent["type"] };
+  for (const key of ["conversationId", "messageId", "runId", "graphId", "nodeId", "parentRunId", "status", "nodeStatus", "code"] as const) {
+    const value = raw[key];
+    if (typeof value === "string" && value) event[key] = value;
+  }
+  return event;
 }
 
 /**
@@ -624,11 +661,8 @@ export function subscribeConversationListSync(onChange: (event: ConversationList
       if (wasReconnect) onChange({ type: "resync" });
       // The server heartbeats every 15s; 60s of silence means a dead socket.
       await readSseStream(response.body, ({ data }) => {
-        const event = data as Partial<ConversationListEvent> | null;
-        if (!event || typeof event !== "object") return;
-        if (event.type === "conversations_changed" || event.type === "folders_changed" || event.type === "message_updated") {
-          onChange({ type: event.type, conversationId: event.conversationId, messageId: event.messageId });
-        }
+        const event = parseConversationListEvent(data);
+        if (event) onChange(event);
       }, { idleTimeoutMs: 60_000 });
     } catch {
       // fall through to reconnect
@@ -657,6 +691,96 @@ export function subscribeConversationListSync(onChange: (event: ConversationList
     abort?.abort();
     stopPoll();
     if (retryTimer) clearTimeout(retryTimer);
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Agent runs of a conversation (chat cards)
+// ---------------------------------------------------------------------------
+
+/** `GET /api/conversations/:id/agent-runs` (array, or `{ runs }`). */
+export async function listConversationAgentRuns(conversationId: string): Promise<AgentRunView[]> {
+  const payload = await readJson<unknown>(await apiFetch(`/api/conversations/${encodeURIComponent(conversationId)}/agent-runs`));
+  const list = Array.isArray(payload) ? payload : Array.isArray((payload as { runs?: unknown } | null)?.runs) ? (payload as { runs: unknown[] }).runs : [];
+  return list.map(agentRunFrom).filter((run): run is AgentRunView => Boolean(run));
+}
+
+/** `GET /api/agent-runs/:id/tool-calls` (array, or `{ toolCalls }`). */
+export async function listAgentRunToolCalls(runId: string): Promise<AgentRunToolCallView[]> {
+  const payload = await readJson<unknown>(await apiFetch(`/api/agent-runs/${encodeURIComponent(runId)}/tool-calls`));
+  const list = Array.isArray(payload) ? payload : Array.isArray((payload as { toolCalls?: unknown } | null)?.toolCalls) ? (payload as { toolCalls: unknown[] }).toolCalls : [];
+  return list.map(toolCallFrom).filter((call): call is AgentRunToolCallView => Boolean(call));
+}
+
+export interface AgentsStreamOptions {
+  /** Connection state, for a "reconnecting" hint on the cards. */
+  onConnectionChange?: (connected: boolean) => void;
+  log?: (message: string) => void;
+}
+
+/**
+ * Follow `GET /api/conversations/:id/agents/stream`: a `snapshot` of the
+ * conversation's runs, then `delta` / `tool` / `status` events. Reconnects
+ * with backoff (the server re-sends the snapshot) until disposed.
+ */
+export function subscribeConversationAgents(
+  conversationId: string,
+  onEvent: (event: AgentStreamEvent) => void,
+  options: AgentsStreamOptions = {},
+): () => void {
+  let closed = false;
+  let attempt = 0;
+  let abort: AbortController | null = null;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const scheduleReconnect = (reason: string) => {
+    if (closed || retryTimer) return;
+    options.onConnectionChange?.(false);
+    options.log?.(`agents ${conversationId}: reconnecting (${reason})`);
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      void connect();
+    }, backoffDelay(attempt++, 1_000, 30_000));
+  };
+
+  const connect = async () => {
+    if (closed) return;
+    abort = new AbortController();
+    try {
+      const response = await apiFetch(conversationAgentsStreamPath(conversationId), {
+        headers: { Accept: "text/event-stream" },
+        signal: abort.signal,
+      });
+      if (response.status === 404 || response.status === 403) {
+        // Older server or not ours: nothing to follow.
+        response.body?.cancel().catch(() => undefined);
+        options.log?.(`agents ${conversationId}: stream unavailable (${response.status})`);
+        return;
+      }
+      if (!response.ok || !response.body) {
+        response.body?.cancel().catch(() => undefined);
+        scheduleReconnect(`HTTP ${response.status}`);
+        return;
+      }
+      attempt = 0;
+      options.onConnectionChange?.(true);
+      await readSseStream(response.body, ({ event, data }) => {
+        const parsed = parseAgentStreamEvent(event, data);
+        if (parsed && !closed) onEvent(parsed);
+      }, { idleTimeoutMs: 90_000 });
+      if (!closed) scheduleReconnect("stream ended");
+    } catch (err) {
+      if (closed) return;
+      scheduleReconnect(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  void connect();
+  return () => {
+    closed = true;
+    abort?.abort();
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = null;
   };
 }
 

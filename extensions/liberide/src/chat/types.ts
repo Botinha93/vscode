@@ -1,4 +1,4 @@
-import type { AgentApprovalRequest, ModelCapability, ModelProfileV1, ModelRoutingResolution, Provider } from "@nexus/shared";
+import type { AgentApprovalRequest, AgentRunCardMetadata, ModelCapability, ModelProfileV1, ModelRoutingResolution, Provider } from "@nexus/shared";
 
 export type { AgentApprovalRequest } from "@nexus/shared";
 export type FallbackRequiredResolution = Extract<ModelRoutingResolution, { status: "approval_required" }>;
@@ -119,6 +119,8 @@ export interface ConversationMessage {
   error?: string;
   warnings?: string[];
   resolution?: string;
+  /** Set on agent run card messages (`metadata.kind = "agent_run"`). */
+  agentRun?: AgentRunCardMetadata;
   createdAt: string;
 }
 

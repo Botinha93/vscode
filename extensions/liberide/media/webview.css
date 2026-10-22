@@ -1830,6 +1830,110 @@ section.liberide-tab.active { display: flex; flex-direction: column; }
 .graph-step-status { color: var(--chatllm-muted); font-size: 0.9em; }
 .graph-step.status-failed .graph-step-status { color: var(--vscode-errorForeground, #f48771); }
 .graph-warning { color: var(--vscode-editorWarning-foreground, #c4a000); font-size: 0.9em; }
+button.graph-step {
+  width: 100%;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  padding: 1px 2px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+button.graph-step:disabled { cursor: default; opacity: 1; }
+button.graph-step:not(:disabled):hover { background: color-mix(in srgb, var(--vscode-foreground) 6%, transparent); }
+.graph-step-chevron { color: var(--chatllm-muted); width: 1em; text-align: center; flex-shrink: 0; }
+.graph-step-runs { color: var(--chatllm-muted); font-size: 0.85em; white-space: nowrap; }
+.graph-step-detail {
+  margin: 2px 0 6px 18px;
+  padding-left: 8px;
+  border-left: 2px solid var(--chatllm-border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.graph-step-error, .agent-run-error {
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--vscode-errorForeground, #f48771) 10%, transparent);
+  color: var(--vscode-errorForeground, #f48771);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.92em;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 260px;
+  overflow: auto;
+}
+.graph-step-output { max-height: 260px; overflow: auto; }
+.graph-branches { display: flex; flex-wrap: wrap; gap: 8px; }
+.graph-branch {
+  flex: 1 1 220px;
+  min-width: 0;
+  border: 1px solid var(--chatllm-border);
+  border-radius: 8px;
+  padding: 4px 6px;
+}
+.graph-branch-title { font-weight: 600; color: var(--chatllm-muted); font-size: 0.9em; margin-bottom: 2px; }
+.graph-reconnecting {
+  color: var(--vscode-editorWarning-foreground, #c4a000);
+  font-size: 0.85em;
+  white-space: nowrap;
+}
+.graph-step-block.flash, .graph-card.flash { outline: 1px solid var(--vscode-focusBorder, #007fd4); border-radius: 6px; }
+
+/* Agent run cards (graph nodes, sub-agents, background agents) */
+.agent-run-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.agent-run-card {
+  border: 1px solid var(--chatllm-border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--vscode-foreground) 3%, transparent);
+  font-size: 0.88em;
+  min-width: 0;
+}
+.agent-run-card.nested { background: transparent; }
+.agent-run-card.status-failed { border-color: color-mix(in srgb, var(--vscode-errorForeground, #f48771) 50%, transparent); }
+.agent-run-card.status-waiting_approval { border-color: color-mix(in srgb, var(--vscode-editorWarning-foreground, #c4a000) 55%, transparent); }
+.agent-run-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 8px;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.agent-run-title { font-weight: 600; flex-shrink: 0; }
+.agent-run-excerpt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--chatllm-muted); }
+.agent-run-status { margin-left: auto; color: var(--chatllm-muted); font-size: 0.9em; white-space: nowrap; }
+.agent-run-card.status-failed .agent-run-status { color: var(--vscode-errorForeground, #f48771); }
+.agent-run-body { padding: 0 8px 8px; display: flex; flex-direction: column; gap: 6px; }
+.agent-run-tools { display: flex; flex-direction: column; gap: 1px; color: var(--chatllm-muted); }
+.agent-run-tools code { font-size: 0.92em; }
+.agent-run-text { max-height: 320px; overflow: auto; }
+.agent-run-children { display: flex; flex-direction: column; gap: 6px; padding-left: 8px; border-left: 2px solid var(--chatllm-border); }
+.agent-runs-tail { display: flex; flex-direction: column; gap: 6px; }
+
+/* Local notes (run actions and their results) */
+.turn-note { display: block; }
+.chat-note {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px dashed var(--chatllm-border);
+  font-size: 0.88em;
+  color: var(--chatllm-muted);
+}
+.note-error .chat-note { color: var(--vscode-errorForeground, #f48771); border-color: color-mix(in srgb, var(--vscode-errorForeground, #f48771) 50%, transparent); }
+.note-warning .chat-note { color: var(--vscode-editorWarning-foreground, #c4a000); }
+.chat-note .turn-content { flex: 1; min-width: 0; }
 .fallback-options { display: flex; flex-wrap: wrap; gap: 6px; }
 .btn-secondary.small, .btn-primary.small { padding: 2px 8px; font-size: 0.9em; }
 

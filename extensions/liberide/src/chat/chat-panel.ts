@@ -11,6 +11,8 @@ import {
   deleteConversation,
   fetchConfig,
   getApiOrigin,
+  listAgentRunToolCalls,
+  listConversationAgentRuns,
   listConversationMessages,
   listConversations,
   listDocuments,
@@ -18,11 +20,20 @@ import {
   onAuthChanged,
   patchConversation,
   probeBackend,
+  subscribeConversationAgents,
   subscribeConversationListSync,
   uploadDocument,
   type ConversationListEvent,
 } from "../api";
-import { cancelExecutionGraph, isTerminalGraphStatus, subscribeExecutionGraphEvents } from "../dispatch/client";
+import { cancelExecutionGraph, isTerminalGraphStatus, nodeEventError, resolveNodeApproval, subscribeExecutionGraphEvents } from "../dispatch/client";
+import { graphConversation, linkFeatureConversation, linkGraphConversation, type ChatRunLink } from "../dispatch/conversation-link";
+import {
+  agentRunFromAnchor,
+  applyAgentStreamEvent,
+  isActiveAgentRunStatus,
+  mergeAgentRun,
+  type AgentRunView,
+} from "./agent-runs";
 import { onSettingsChange, readSettings, writeSetting, type LiberideSettings } from "../settings";
 import {
   conversationHasProjectTag,
@@ -39,7 +50,7 @@ import {
   SPEC_SYSTEM_PROMPTS,
   extractTaskBlocks,
 } from "./commands";
-import { defaultEnabledModel, findConfiguredModel, supportsTextGeneration, toWireProvider } from "./models";
+import { effectiveModelSelection, resolveTurnModel, supportsTextGeneration, toWireProvider } from "./models";
 import { listCopilotLmModels, streamCopilotChat } from "./copilot-lm";
 import {
   BUSY_MESSAGE,
@@ -79,6 +90,7 @@ import type {
   ChatWebviewToHost,
   EditedFileSummary,
   ProjectInfo,
+  RunApprovalView,
   SessionSummary,
   ChatSessionKind,
   ToolTimelineEntry,
@@ -213,7 +225,19 @@ function toolActivityKind(name: string): ToolTimelineEntry["activityKind"] {
   return "executing";
 }
 
-export class LiberideChatPanelController implements vscode.WebviewViewProvider, vscode.Disposable {
+interface AgentStreamState {
+  dispose: () => void;
+  connected: boolean;
+  /** Closes the stream once no run has been active for a while. */
+  idleTimer?: ReturnType<typeof setTimeout>;
+}
+
+/** Keep the agents stream this long after the last run finished (late events, follow-up runs). */
+const AGENT_STREAM_IDLE_MS = 15_000;
+/** Refresh the catalog on view focus at most this often. */
+const CATALOG_FOCUS_REFRESH_MS = 10_000;
+
+export class LiberideChatPanelController implements vscode.WebviewViewProvider, vscode.Disposable, ChatRunLink {
   static readonly viewType = "liberide.chat";
 
   private view?: vscode.WebviewView;
@@ -258,6 +282,24 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
   private patchTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** conversationId -> placeholder shown while a resumed sub-agent works; kept across refreshes until its result lands. */
   private agentResumeNotes = new Map<string, ConversationMessage>();
+  /** conversationId -> runId -> run card state (anchors, run list, live stream). */
+  private agentRuns = new Map<string, Map<string, AgentRunView>>();
+  /** conversationId -> live `/agents/stream` subscription. */
+  private agentStreams = new Map<string, AgentStreamState>();
+  /** conversationId -> run ids changed since the last flush to the webview. */
+  private agentRunChanges = new Map<string, Set<string>>();
+  private agentRunFlushTimer?: ReturnType<typeof setTimeout>;
+  /** Conversations whose run list was fetched (re-fetched on resync). */
+  private hydratedAgentRuns = new Set<string>();
+  /** conversationId -> pending approvals of its agent runs. */
+  private runApprovals = new Map<string, RunApprovalView[]>();
+  /** conversationId -> local notes in the transcript (run actions and their errors). */
+  private localNotes = new Map<string, ChatMessage[]>();
+  /** conversationId -> graph cards shown before the server posted the graph's message. */
+  private pendingGraphAnchors = new Map<string, ConversationMessage[]>();
+  private lastCatalogRefresh = 0;
+  /** Node to reveal once the view has loaded. */
+  private pendingReveal?: Extract<ChatHostToWebview, { type: "revealGraphNode" }>;
 
   /** Locally-staged session for "new chat" before the first message creates it on the backend. */
   /** Conversations opened from another surface: listed even when they are not this project's. */
@@ -297,6 +339,24 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
 
   private async onConversationListEvent(event: ConversationListEvent): Promise<void> {
     if (this.disposed) return;
+    if (event.type === "models_changed") {
+      await this.refreshCatalog();
+      return;
+    }
+    if (event.type === "agent_run_updated") {
+      this.onAgentRunUpdated(event);
+      return;
+    }
+    if (event.type === "approvals_changed") {
+      const targets = event.conversationId ? [event.conversationId] : [...this.messagesCache.keys()];
+      for (const id of targets) {
+        if (!this.messagesCache.has(id)) continue;
+        this.hydratedApprovalConversations.delete(id);
+        void this.hydrateApprovals(id);
+        void this.hydrateRunApprovals(id);
+      }
+      return;
+    }
     if (event.type === "message_updated" && event.conversationId) {
       // A resumed sub-agent posted its result: the placeholder has served its purpose.
       this.agentResumeNotes.delete(event.conversationId);
@@ -308,7 +368,9 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     }
     await this.refreshConversations();
     if (event.type === "resync" && this.activeSessionId && this.messagesCache.has(this.activeSessionId)) {
+      this.hydratedAgentRuns.delete(this.activeSessionId);
       await this.refreshSingleConversation(this.activeSessionId);
+      void this.refreshCatalog();
     }
   }
 
@@ -328,7 +390,13 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
     this.bindWebview(view.webview);
+    // Models changed on the web while the view was hidden: pick them up on focus.
+    const visibility = view.onDidChangeVisibility(() => {
+      if (!view.visible || this.disposed || Date.now() - this.lastCatalogRefresh < CATALOG_FOCUS_REFRESH_MS) return;
+      void this.refreshCatalog();
+    });
     view.onDidDispose(() => {
+      visibility.dispose();
       if (this.view === view) this.view = undefined;
     });
   }
@@ -396,6 +464,12 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     this.graphWatchers.clear();
     for (const timer of this.patchTimers.values()) clearTimeout(timer);
     this.patchTimers.clear();
+    for (const stream of this.agentStreams.values()) {
+      stream.dispose();
+      if (stream.idleTimer) clearTimeout(stream.idleTimer);
+    }
+    this.agentStreams.clear();
+    if (this.agentRunFlushTimer) clearTimeout(this.agentRunFlushTimer);
   }
 
   // ---------------------------------------------------------------------------
@@ -512,7 +586,19 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
           this.broadcast({ type: "openSettings" });
           break;
         case "openPipeline":
-          await vscode.commands.executeCommand("liberide.openPipeline");
+          await vscode.commands.executeCommand("liberide.openPipeline", { conversationId: this.activeConversationId() });
+          break;
+        case "resolveNodeApproval":
+          await this.resolveGraphNodeApproval(message.sessionId, message.graphId, message.nodeId, message.decision);
+          break;
+        case "resolveRunApproval":
+          await this.resolveRunApproval(message.sessionId, message.approvalId, message.decision);
+          break;
+        case "replayNode":
+          await vscode.commands.executeCommand("liberide.replayFromNode", { graphId: message.graphId, nodeId: message.nodeId });
+          break;
+        case "loadRunToolCalls":
+          await this.loadRunToolCalls(message.sessionId, message.runId);
           break;
         case "copilotGithubLogin":
           await this.copilotGithubLogin();
@@ -557,9 +643,12 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       apiOrigin: getApiOrigin(),
     });
     if (this.activeSessionId) void this.attachRunningTurn(this.activeSessionId);
+    if (this.pendingReveal?.sessionId === this.activeSessionId) this.broadcast(this.pendingReveal);
+    this.pendingReveal = undefined;
   }
 
   private async refreshCatalog(): Promise<void> {
+    this.lastCatalogRefresh = Date.now();
     const reachability = await probeBackend();
     if (reachability === "unconfigured") {
       this.backendStatus = "unconfigured";
@@ -676,8 +765,9 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       if (this.disposed) return;
       await this.syncProjectConversations(all);
       const owned = all.filter((c) => this.conversationBelongsToProject(c) || this.openedConversations.has(c.id));
+      const previous = new Map(this.conversations);
       this.conversations.clear();
-      for (const c of owned) this.conversations.set(c.id, c);
+      for (const c of owned) this.conversations.set(c.id, this.keepModelWhileStreaming(c, previous.get(c.id)));
 
       const keptIds = buildKeptConversationIds(
         owned.map((c) => c.id),
@@ -691,6 +781,9 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
         consumedPipelineCards: this.consumedPipelineCards,
         attachmentBytes: this.attachmentBytes,
       });
+      for (const id of [...this.agentRuns.keys(), ...this.agentStreams.keys()]) {
+        if (!keptIds.has(id)) this.forgetAgentRuns(id);
+      }
       void this.persistSessionKinds();
       void this.context.workspaceState.update(OVERRIDES_STORAGE_KEY, this.overrides);
 
@@ -739,8 +832,22 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
   /** Start graph watchers and fetch approval details for freshly loaded messages. */
   private afterMessagesLoaded(conversationId: string): void {
     const messages = this.messagesCache.get(conversationId) ?? [];
+    this.mergeAnchorRuns(conversationId, messages);
+    if (!this.hydratedAgentRuns.has(conversationId)) {
+      this.hydratedAgentRuns.add(conversationId);
+      void this.hydrateAgentRuns(conversationId);
+      void this.hydrateRunApprovals(conversationId);
+    }
     for (const m of messages) {
       if (m.role !== "assistant" || !m.executionGraphId) continue;
+      // The server posted the graph's own message: move a local placeholder's card onto it.
+      const watcher = this.graphWatchers.get(m.executionGraphId);
+      if (watcher && watcher.conversationId === conversationId && watcher.messageId !== m.id) {
+        const view = this.graphViews.get(watcher.messageId);
+        if (view && !this.graphViews.has(m.id)) this.graphViews.set(m.id, view);
+        this.graphViews.delete(watcher.messageId);
+        watcher.messageId = m.id;
+      }
       if (m.graphStatus && isTerminalGraphStatus(m.graphStatus)) {
         this.finishedGraphs.add(m.executionGraphId);
         const view = this.graphViews.get(m.id);
@@ -772,6 +879,357 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       this.hydratedApprovalConversations.delete(conversationId);
       this.output.appendLine(`[chat.approvals] ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Agent runs: every run of a chat is drawn in it (graph nodes, sub-agents,
+  // background agents), with its live output, tool calls and result/error.
+  // ---------------------------------------------------------------------------
+
+  private runsOf(conversationId: string): Map<string, AgentRunView> {
+    let runs = this.agentRuns.get(conversationId);
+    if (!runs) {
+      runs = new Map();
+      this.agentRuns.set(conversationId, runs);
+    }
+    return runs;
+  }
+
+  /** Fold the server's anchor cards (one message per run) into the run state. */
+  private mergeAnchorRuns(conversationId: string, messages: ConversationMessage[]): void {
+    let runs: Map<string, AgentRunView> | undefined;
+    for (const m of messages) {
+      const anchor = agentRunFromAnchor(m);
+      if (!anchor) continue;
+      runs ??= this.runsOf(conversationId);
+      runs.set(anchor.runId, mergeAgentRun(runs.get(anchor.runId), anchor));
+    }
+    if (runs) this.syncAgentStream(conversationId);
+  }
+
+  private async hydrateAgentRuns(conversationId: string): Promise<void> {
+    try {
+      const list = await listConversationAgentRuns(conversationId);
+      if (this.disposed) return;
+      if (list.length) {
+        const runs = this.runsOf(conversationId);
+        for (const run of list) {
+          runs.set(run.runId, mergeAgentRun(runs.get(run.runId), run));
+          this.markAgentRunChanged(conversationId, run.runId);
+        }
+      }
+      this.syncAgentStream(conversationId);
+    } catch (err) {
+      // Older servers have no run list: anchors and live events still work.
+      this.output.appendLine(`[chat.agent-runs] ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /** Pending approvals raised by the chat's agent runs (turn approvals have their own card). */
+  private async hydrateRunApprovals(conversationId: string): Promise<void> {
+    try {
+      const approvals = await listConversationApprovals(conversationId);
+      if (this.disposed) return;
+      const turnApprovals = new Set((this.messagesCache.get(conversationId) ?? []).map((m) => m.approvalId).filter(Boolean));
+      const previous = new Map((this.runApprovals.get(conversationId) ?? []).map((a) => [a.id, a] as const));
+      const pending: RunApprovalView[] = approvals
+        .filter((a) => a.status === "pending" && !turnApprovals.has(a.id))
+        .map((a) => ({ ...approvalCardFrom(a), agentRunId: a.agentRunId, busy: previous.get(a.id)?.busy, error: previous.get(a.id)?.error }));
+      if (pending.length) this.runApprovals.set(conversationId, pending);
+      else this.runApprovals.delete(conversationId);
+      this.broadcast({ type: "runApprovals", sessionId: conversationId, approvals: pending });
+    } catch (err) {
+      this.output.appendLine(`[chat.run-approvals] ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /** `agent_run_updated`: a run of a chat changed status (live output comes from the agents stream). */
+  private onAgentRunUpdated(event: ConversationListEvent): void {
+    const conversationId = event.conversationId;
+    if (!conversationId) return;
+    if (!this.messagesCache.has(conversationId) && conversationId !== this.activeSessionId) return;
+    if (!event.runId) {
+      // A node of the chat's graph moved before it has a run: the graph card
+      // follows the graph itself; load the graph's message if it is new here.
+      const known = event.graphId && (this.messagesCache.get(conversationId) ?? []).some((m) => m.executionGraphId === event.graphId);
+      if (event.graphId && !known) this.scheduleConversationRefresh(conversationId);
+      return;
+    }
+    const runs = this.runsOf(conversationId);
+    const known = runs.get(event.runId);
+    const status = event.status ?? known?.status ?? "running";
+    runs.set(event.runId, mergeAgentRun(known, {
+      runId: event.runId,
+      status,
+      text: "",
+      toolCalls: [],
+      ...(event.graphId ? { graphId: event.graphId } : {}),
+      ...(event.nodeId ? { nodeId: event.nodeId } : {}),
+      ...(event.parentRunId ? { parentRunId: event.parentRunId } : {}),
+      ...(event.messageId ? { messageId: event.messageId } : {}),
+    }));
+    this.markAgentRunChanged(conversationId, event.runId);
+    this.syncAgentStream(conversationId, isActiveAgentRunStatus(status));
+    // A new anchor card, or a finished run's final excerpt: reload the messages.
+    const hasAnchor = event.messageId && (this.messagesCache.get(conversationId) ?? []).some((m) => m.id === event.messageId);
+    if (!known || !hasAnchor || !isActiveAgentRunStatus(status)) this.scheduleConversationRefresh(conversationId);
+  }
+
+  private readonly refreshTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  /** Coalesce reloads triggered by bursts of run events. */
+  private scheduleConversationRefresh(conversationId: string): void {
+    if (this.refreshTimers.has(conversationId)) return;
+    this.refreshTimers.set(conversationId, setTimeout(() => {
+      this.refreshTimers.delete(conversationId);
+      if (this.messagesCache.has(conversationId)) void this.refreshSingleConversation(conversationId);
+    }, 400));
+  }
+
+  /**
+   * Keep the conversation's agents stream open while any run is active
+   * (`force`: a run just started), and close it a while after the last one ends.
+   */
+  private syncAgentStream(conversationId: string, force = false): void {
+    if (this.disposed || conversationId.startsWith("draft:")) return;
+    const runs = this.agentRuns.get(conversationId);
+    const active = force || [...(runs?.values() ?? [])].some((run) => isActiveAgentRunStatus(run.status));
+    const existing = this.agentStreams.get(conversationId);
+    if (active) {
+      if (existing?.idleTimer) {
+        clearTimeout(existing.idleTimer);
+        existing.idleTimer = undefined;
+      }
+      if (existing || this.backendStatus !== "ok") return;
+      const state: AgentStreamState = { connected: true, dispose: () => undefined };
+      this.agentStreams.set(conversationId, state);
+      state.dispose = subscribeConversationAgents(conversationId, (event) => {
+        if (this.disposed) return;
+        const changed = applyAgentStreamEvent(this.runsOf(conversationId), event);
+        for (const runId of changed) this.markAgentRunChanged(conversationId, runId);
+        if (event.type === "status" && !isActiveAgentRunStatus(event.status)) this.scheduleConversationRefresh(conversationId);
+        if (event.type === "snapshot" || event.type === "status") this.syncAgentStream(conversationId);
+      }, {
+        onConnectionChange: (connected) => {
+          if (state.connected === connected) return;
+          state.connected = connected;
+          this.broadcast({ type: "agentRuns", sessionId: conversationId, runs: [], connected });
+        },
+        log: (message) => this.output.appendLine(`[chat.agents] ${message}`),
+      });
+      return;
+    }
+    if (!existing || existing.idleTimer) return;
+    existing.idleTimer = setTimeout(() => {
+      existing.idleTimer = undefined;
+      const stillActive = [...(this.agentRuns.get(conversationId)?.values() ?? [])].some((run) => isActiveAgentRunStatus(run.status));
+      if (stillActive || this.agentStreams.get(conversationId) !== existing) return;
+      existing.dispose();
+      this.agentStreams.delete(conversationId);
+      if (!existing.connected) this.broadcast({ type: "agentRuns", sessionId: conversationId, runs: [], connected: true });
+    }, AGENT_STREAM_IDLE_MS);
+  }
+
+  /** Batch run updates to the webview (streamed text arrives token by token). */
+  private markAgentRunChanged(conversationId: string, runId: string): void {
+    let changed = this.agentRunChanges.get(conversationId);
+    if (!changed) {
+      changed = new Set();
+      this.agentRunChanges.set(conversationId, changed);
+    }
+    changed.add(runId);
+    if (this.agentRunFlushTimer) return;
+    this.agentRunFlushTimer = setTimeout(() => {
+      this.agentRunFlushTimer = undefined;
+      const pending = [...this.agentRunChanges];
+      this.agentRunChanges.clear();
+      for (const [id, runIds] of pending) {
+        const runs = this.agentRuns.get(id);
+        if (!runs) continue;
+        const views = [...runIds].map((runId) => runs.get(runId)).filter((run): run is AgentRunView => Boolean(run));
+        if (views.length) this.broadcast({ type: "agentRuns", sessionId: id, runs: views.map((run) => ({ ...run, toolCalls: [...run.toolCalls] })), connected: this.agentStreams.get(id)?.connected ?? true });
+      }
+    }, 100);
+  }
+
+  /** Tool calls of a finished run (the stream only carries those it saw live). */
+  private async loadRunToolCalls(conversationId: string, runId: string): Promise<void> {
+    const run = this.agentRuns.get(conversationId)?.get(runId);
+    if (!run) return;
+    try {
+      const calls = await listAgentRunToolCalls(runId);
+      run.toolCalls = mergeAgentRun({ ...run, toolCalls: [] }, { ...run, toolCalls: [...calls, ...run.toolCalls] }).toolCalls;
+      this.markAgentRunChanged(conversationId, runId);
+    } catch (err) {
+      this.output.appendLine(`[chat.tool-calls] ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  private forgetAgentRuns(conversationId: string): void {
+    const stream = this.agentStreams.get(conversationId);
+    if (stream) {
+      stream.dispose();
+      if (stream.idleTimer) clearTimeout(stream.idleTimer);
+      this.agentStreams.delete(conversationId);
+    }
+    this.agentRuns.delete(conversationId);
+    this.hydratedAgentRuns.delete(conversationId);
+    this.runApprovals.delete(conversationId);
+    this.localNotes.delete(conversationId);
+    this.pendingGraphAnchors.delete(conversationId);
+  }
+
+  /** Approve/reject a graph APPROVAL node from its step in the graph card. */
+  private async resolveGraphNodeApproval(
+    conversationId: string,
+    graphId: string,
+    nodeId: string,
+    decision: "approved" | "rejected",
+  ): Promise<void> {
+    try {
+      await resolveNodeApproval(graphId, nodeId, decision);
+    } catch (err) {
+      this.postNote(conversationId, `Could not ${decision === "approved" ? "approve" : "reject"} the step: ${err instanceof Error ? err.message : String(err)}`, "error");
+    }
+  }
+
+  /** Approve/reject an approval raised by an agent run; the server continues the run. */
+  private async resolveRunApproval(conversationId: string, approvalId: string, decision: "approved" | "rejected"): Promise<void> {
+    const cards = this.runApprovals.get(conversationId) ?? [];
+    const card = cards.find((c) => c.id === approvalId);
+    const publish = () => this.broadcast({ type: "runApprovals", sessionId: conversationId, approvals: this.runApprovals.get(conversationId) ?? [] });
+    if (card) {
+      card.busy = true;
+      card.error = undefined;
+      publish();
+    }
+    try {
+      await resolveApproval(approvalId, decision, undefined, "server");
+      const rest = (this.runApprovals.get(conversationId) ?? []).filter((c) => c.id !== approvalId);
+      if (rest.length) this.runApprovals.set(conversationId, rest);
+      else this.runApprovals.delete(conversationId);
+    } catch (err) {
+      if (card) {
+        card.busy = false;
+        card.error = err instanceof Error ? err.message : String(err);
+      }
+      if (err instanceof ChatStreamError && err.details.status === 404) void this.hydrateRunApprovals(conversationId);
+    }
+    publish();
+  }
+
+  /** While a turn streams, a list refresh keeps the chip's model (the turn may still change it). */
+  private keepModelWhileStreaming(next: Conversation, previous: Conversation | undefined): Conversation {
+    if (!previous || !this.streams.has(next.id)) return next;
+    return { ...next, provider: previous.provider, model: previous.model, modelSelection: previous.modelSelection };
+  }
+
+  // ---------------------------------------------------------------------------
+  // ChatRunLink: the pipeline, Runs view and workflow triggers report here
+  // ---------------------------------------------------------------------------
+
+  async ensureConversation(title: string): Promise<string | undefined> {
+    const active = this.activeConversationId();
+    if (active) return active;
+    if (this.backendStatus !== "ok") await this.refreshCatalog();
+    if (this.backendStatus !== "ok") return undefined;
+    const draft = this.draftSession;
+    const conversation = await this.createSessionConversation(title, draft?.overrides ?? {});
+    if (!conversation) return undefined;
+    this.conversations.set(conversation.id, conversation);
+    this.messagesCache.set(conversation.id, []);
+    this.hydratedAgentRuns.add(conversation.id);
+    if (draft && this.activeSessionId === draft.id) {
+      this.sessionKinds.set(conversation.id, this.sessionKinds.get(draft.id) ?? draft.kind);
+      this.sessionKinds.delete(draft.id);
+      this.draftSession = null;
+      await this.persistSessionKinds();
+    }
+    this.activeSessionId = conversation.id;
+    await this.persistActive();
+    this.broadcastSessions();
+    this.broadcastActiveSession();
+    return conversation.id;
+  }
+
+  conversationForGraph(graphId: string): string | undefined {
+    for (const [conversationId, messages] of this.messagesCache) {
+      if (messages.some((m) => m.executionGraphId === graphId)) return conversationId;
+    }
+    const watcher = this.graphWatchers.get(graphId);
+    if (watcher) return watcher.conversationId;
+    for (const [conversationId, runs] of this.agentRuns) {
+      for (const run of runs.values()) if (run.graphId === graphId) return conversationId;
+    }
+    return graphConversation(this.context.workspaceState, graphId);
+  }
+
+  async trackGraph(conversationId: string, graphId: string): Promise<void> {
+    await linkGraphConversation(this.context.workspaceState, graphId, conversationId);
+    if (!this.conversations.has(conversationId)) {
+      this.openedConversations.add(conversationId);
+      await this.refreshConversations();
+    }
+    await this.ensureMessagesLoaded(conversationId);
+    const messages = this.messagesCache.get(conversationId) ?? [];
+    let host = messages.find((m) => m.executionGraphId === graphId);
+    if (!host) {
+      // Shown right away; replaced by the server's graph message when it lands.
+      host = {
+        id: `local:graph:${graphId}`,
+        conversationId,
+        role: "assistant",
+        content: "",
+        executionGraphId: graphId,
+        createdAt: new Date().toISOString(),
+      };
+      messages.push(host);
+      this.messagesCache.set(conversationId, messages);
+      this.pendingGraphAnchors.set(conversationId, [...(this.pendingGraphAnchors.get(conversationId) ?? []), host]);
+    }
+    this.watchGraph(conversationId, host.id, graphId);
+    await this.showConversation(conversationId);
+    this.scheduleConversationRefresh(conversationId);
+  }
+
+  async showConversation(conversationId: string): Promise<void> {
+    if (!this.conversations.has(conversationId)) this.openedConversations.add(conversationId);
+    this.show();
+    if (this.activeSessionId !== conversationId) {
+      this.activeSessionId = conversationId;
+      await this.persistActive();
+    }
+    if (this.view) await this.openSession(conversationId);
+    this.scheduleConversationRefresh(conversationId);
+  }
+
+  async revealGraphNode(graphId: string, nodeId: string): Promise<boolean> {
+    const conversationId = this.conversationForGraph(graphId);
+    if (!conversationId) return false;
+    await this.showConversation(conversationId);
+    if (!this.graphWatchers.has(graphId) && !this.finishedGraphs.has(graphId)) {
+      const host = (this.messagesCache.get(conversationId) ?? []).find((m) => m.executionGraphId === graphId);
+      if (host) this.watchGraph(conversationId, host.id, graphId);
+    }
+    const reveal = { type: "revealGraphNode" as const, sessionId: conversationId, graphId, nodeId };
+    // A view still loading gets it after `init`.
+    if (this.view) this.broadcast(reveal);
+    else this.pendingReveal = reveal;
+    return true;
+  }
+
+  postNote(conversationId: string, text: string, severity: "info" | "warning" | "error" = "info"): void {
+    const note: ChatMessage = {
+      id: `local:note:${randomId()}`,
+      role: "assistant",
+      content: text,
+      createdAt: Date.now(),
+      status: "complete",
+      note: severity,
+    };
+    const notes = [...(this.localNotes.get(conversationId) ?? []), note].slice(-50);
+    this.localNotes.set(conversationId, notes);
+    if (this.activeSessionId === conversationId) this.broadcastActiveSession();
   }
 
   // ---------------------------------------------------------------------------
@@ -857,7 +1315,16 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
         if (consumed?.has(m.id)) base.pipelineCardConsumed = true;
         return base;
       });
+    const notes = this.localNotes.get(conv.id) ?? [];
+    for (const note of notes) {
+      // Notes go in time order between the server's messages.
+      const index = messages.findIndex((m) => m.createdAt > note.createdAt);
+      if (index < 0) messages.push(note);
+      else messages.splice(index, 0, note);
+    }
     const kind = this.sessionKinds.get(conv.id) ?? "vibe";
+    const runs = this.agentRuns.get(conv.id);
+    const routed = [...cached].reverse().find((m) => m.role === "assistant" && m.model && m.model !== "auto" && !agentRunFromAnchor(m));
     return {
       id: conv.id,
       conversationId: conv.id,
@@ -868,6 +1335,10 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       createdAt: new Date(conv.createdAt).getTime() || Date.now(),
       updatedAt: new Date(conv.updatedAt).getTime() || Date.now(),
       kind,
+      ...(routed ? { routedModel: { provider: routed.provider, model: routed.model } } : {}),
+      ...(runs?.size ? { agentRuns: [...runs.values()] } : {}),
+      ...(this.runApprovals.get(conv.id)?.length ? { runApprovals: this.runApprovals.get(conv.id) } : {}),
+      agentsConnected: this.agentStreams.get(conv.id)?.connected ?? true,
     };
   }
 
@@ -878,6 +1349,9 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
   ): void {
     if (turnStatus) view.turnStatus = turnStatus;
     if (m.error) view.error = m.error;
+    const anchor = agentRunFromAnchor(m);
+    if (anchor) view.agentRunId = anchor.runId;
+    if (m.model) view.model = { provider: m.provider, model: m.model };
     const warnings = [...new Set([...(m.warnings ?? []), ...(this.turnWarnings.get(m.id) ?? [])])];
     if (warnings.length) view.warnings = warnings;
     const thinking = this.thinkingByMessage.get(m.id);
@@ -918,9 +1392,12 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     const stored = this.overrides[conv.id] ?? {};
     const settings = readSettings();
     const defaultAllowed = resolveAllowedAgentIds(this.catalog.agents, settings.defaultAllowedAgentIds);
+    const model = conv.model ?? stored.model;
     return {
       provider: (conv.provider as ConfiguredProvider) ?? stored.provider,
-      model: conv.model ?? stored.model,
+      model,
+      // The conversation's own mode (set here or on the web) wins over the local default.
+      modelSelection: effectiveModelSelection(conv.modelSelection ?? stored.modelSelection, model, settings.modelSelection),
       chatMode: "agent",
       useRag: stored.useRag,
       toolsEnabled: true,
@@ -1012,6 +1489,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       delete this.overrides[id];
       this.sessionKinds.delete(id);
       this.consumedPipelineCards.delete(id);
+      this.forgetAgentRuns(id);
       await this.persistOverrides();
       await this.persistSessionKinds();
       if (this.activeSessionId === id) this.activeSessionId = null;
@@ -1238,6 +1716,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     const patch: Record<string, unknown> = {};
     if (normalizedOverrides.provider) patch.provider = toWireProvider(normalizedOverrides.provider);
     if (normalizedOverrides.model) patch.model = normalizedOverrides.model;
+    if (normalizedOverrides.modelSelection) patch.modelSelection = normalizedOverrides.modelSelection;
     if (normalizedOverrides.agentId !== undefined) patch.agentId = normalizedOverrides.agentId;
     if (normalizedOverrides.allowedAgentIds) patch.allowedAgentIds = normalizedOverrides.allowedAgentIds;
     if (Object.keys(patch).length > 0) {
@@ -1256,13 +1735,21 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
   // Sending chat
   // ---------------------------------------------------------------------------
 
-  private resolveProviderModel(overrides: ChatOverrides): { provider: Provider; model: string } | null {
-    const fromOverride = overrides.provider && overrides.model
-      ? findConfiguredModel(this.catalog.models, overrides.provider, overrides.model)
-      : undefined;
-    const chosen = fromOverride ?? defaultEnabledModel(this.catalog.models);
-    if (!chosen) return null;
-    return { provider: toWireProvider(chosen.provider), model: chosen.modelId };
+  /**
+   * Provider/model/selection for a turn: the chat's own model selection
+   * (drafts without one use the global default); auto sends model `auto`.
+   */
+  private resolveProviderModel(
+    overrides: ChatOverrides,
+    forced?: { provider: Provider; model: string },
+  ): { provider: Provider; model: string; modelSelection: "auto" | "manual" } | null {
+    return resolveTurnModel({
+      models: this.catalog.models,
+      selection: effectiveModelSelection(overrides.modelSelection, overrides.model, readSettings().modelSelection),
+      provider: overrides.provider,
+      model: overrides.model,
+      forced,
+    });
   }
 
   private buildIdeContext(conversationId: string): IdeToolContextPayload | undefined {
@@ -1312,7 +1799,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       this.broadcast({ type: "log", message: hint });
       return;
     }
-    const resolved = forced ?? this.resolveProviderModel(session.overrides);
+    const resolved = this.resolveProviderModel(session.overrides, forced);
     if (!resolved) {
       this.broadcast({ type: "log", message: "No configured model. Add one in the LiberIDE app first." });
       return;
@@ -1389,8 +1876,8 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       conversationId,
       provider: resolved.provider,
       model: resolved.model,
-      // An explicit retry with a chosen alternative is a pin, not a routing hint.
-      modelSelection: forced ? "manual" : settings.modelSelection,
+      // The chat's own selection (an explicit retry with a chosen alternative is a pin).
+      modelSelection: resolved.modelSelection,
       chatMode,
       content: outgoingContent,
       systemPrompt,
@@ -1528,6 +2015,12 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
         streamState.serverConversationId = serverConversationId;
         if (streamState.stopRequested) void requestTurnCancel(serverConversationId);
       },
+      onRoute: (route) => {
+        // Auto turns: the chip shows the routed model while the turn runs.
+        assistantMessage.provider = route.provider as Provider;
+        assistantMessage.model = route.model;
+        if (this.activeSessionId === conversationId) this.broadcastActiveSession();
+      },
       onToken: (text: string) => {
         buffer += text;
         assistantMessage.content = buffer;
@@ -1577,7 +2070,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     const server = response.assistantMessage;
     if (server) {
       if (server.content) assistantMessage.content = server.content;
-      for (const key of ["status", "approvalId", "pausedAgentRunId", "executionGraphId", "graphStatus", "error", "warnings", "resolution"] as const) {
+      for (const key of ["status", "approvalId", "pausedAgentRunId", "executionGraphId", "graphStatus", "error", "warnings", "resolution", "provider", "model"] as const) {
         if (server[key] !== undefined) (assistantMessage as unknown as Record<string, unknown>)[key] = server[key];
       }
       if (server.id && server.id !== localId) {
@@ -1773,19 +2266,25 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     const view: GraphProgressView = this.graphViews.get(messageId) ?? { graphId, status: "running", steps: [] };
     this.graphViews.set(messageId, view);
     const watcher: GraphWatcher = { conversationId, messageId, dispose: () => undefined };
-    const publish = (coalesce = true) => this.postPatch(conversationId, watcher.messageId, { graph: { ...view, steps: [...view.steps] } }, coalesce);
+    const publish = (coalesce = true) => this.postPatch(conversationId, watcher.messageId, { graph: { ...view, steps: view.steps.map((step) => ({ ...step })) } }, coalesce);
 
     watcher.dispose = subscribeExecutionGraphEvents(graphId, (event) => {
       if (event.type === "init" || event.type === "graph_status") {
         if (event.status) view.status = event.status;
       } else if (event.type === "node_status" && event.nodeId) {
-        const step = view.steps.find((s) => s.nodeId === event.nodeId);
-        if (step) {
-          if (event.status) step.status = event.status;
-          if (event.title) step.title = event.title;
-        } else {
-          view.steps.push({ nodeId: event.nodeId, title: event.title, status: event.status ?? "queued" });
+        let step = view.steps.find((s) => s.nodeId === event.nodeId);
+        if (!step) {
+          step = { nodeId: event.nodeId, status: event.status ?? "queued" };
+          view.steps.push(step);
         }
+        if (event.status) step.status = event.status;
+        if (event.title) step.title = event.title;
+        if (typeof event.taskId === "string" && event.taskId) step.taskId = event.taskId;
+        const error = nodeEventError(event);
+        if (error) step.error = error;
+        else if (event.status && event.status !== "failed") step.error = undefined;
+        const output = [event.output, event.summary, event.outputSummary, event.result].find((v): v is string => typeof v === "string" && v.trim() !== "");
+        if (output) step.output = output;
       } else if (event.type === "done") {
         view.status = event.status ?? view.status;
         view.cancelling = false;
@@ -1965,7 +2464,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     if (!content.trim()) return;
     this.fallbacks.delete(messageId);
     this.postPatch(sessionId, messageId, { fallback: undefined });
-    await this.updateOverrides(sessionId, { provider: provider as ConfiguredProvider, model });
+    await this.updateOverrides(sessionId, { modelSelection: "manual", provider: provider as ConfiguredProvider, model });
     await this.sendChat(sessionId, content, { provider, model });
   }
 
@@ -2012,6 +2511,10 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
         ? overrides.allowedAgentIds
         : resolveAllowedAgentIds(this.catalog.agents, settings.defaultAllowedAgentIds);
       const patch: Record<string, unknown> = {};
+      // The draft's model choice (else the local default) becomes the conversation's.
+      patch.modelSelection = effectiveModelSelection(overrides.modelSelection, overrides.model, settings.modelSelection);
+      if (overrides.provider) patch.provider = toWireProvider(overrides.provider);
+      if (overrides.model) patch.model = overrides.model;
       if (overrides.agentId) patch.agentId = overrides.agentId;
       if (allowedAgentIds.length) patch.allowedAgentIds = allowedAgentIds;
       if (Object.keys(patch).length) {
@@ -2036,7 +2539,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
     try {
       const list = await listConversations();
       const updated = list.find((c) => c.id === id);
-      if (updated) this.conversations.set(id, updated);
+      if (updated) this.conversations.set(id, this.keepModelWhileStreaming(updated, this.conversations.get(id)));
       const fresh = await listConversationMessages(id);
       if (this.streams.has(id)) {
         this.pendingRefresh.add(id);
@@ -2044,6 +2547,11 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       }
       const note = this.agentResumeNotes.get(id);
       if (note && !fresh.some((m) => m.id === note.id)) fresh.push(note);
+      // A dispatched graph's card stays until the server posts the graph's message.
+      const anchors = (this.pendingGraphAnchors.get(id) ?? []).filter((a) => !fresh.some((m) => m.executionGraphId === a.executionGraphId));
+      if (anchors.length) this.pendingGraphAnchors.set(id, anchors);
+      else this.pendingGraphAnchors.delete(id);
+      fresh.push(...anchors);
       this.messagesCache.set(id, fresh);
       this.hydratedApprovalConversations.delete(id);
       this.afterMessagesLoaded(id);
@@ -2236,6 +2744,8 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       return;
     }
     const slug = root.path.split("/").pop() ?? featureName;
+    // Dispatches of this feature report back to this chat.
+    await linkFeatureConversation(this.context.workspaceState, slug, session.conversationId);
     const tasksDirUri = vscode.Uri.joinPath(root, "tasks");
     const requirementsUri = vscode.Uri.joinPath(root, "requirements.md");
     const designUri = vscode.Uri.joinPath(root, "design.md");
@@ -2279,7 +2789,7 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
       conversationId,
       provider: resolved.provider,
       model: resolved.model,
-      modelSelection: readSettings().modelSelection,
+      modelSelection: resolved.modelSelection,
       chatMode: "agent",
       content: userPrompt,
       displayContent: userLabel,

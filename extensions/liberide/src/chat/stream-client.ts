@@ -40,6 +40,8 @@ export interface ChatStreamHandlers {
   onFallbackRequired?: (resolution: FallbackRequiredResolution) => void;
   onRoutingUnsatisfied?: (resolution: RoutingUnsatisfiedResolution) => void;
   onTerminalDelegate?: (payload: TerminalDelegateEvent) => void | Promise<void>;
+  /** The model the turn runs on (the router's pick in auto mode; again on a reroute). */
+  onRoute?: (route: { provider: string; model: string; modelSelection?: "auto" | "manual" }) => void;
 }
 
 export type ChatStreamErrorKind =
@@ -118,6 +120,17 @@ async function consumeChatStream(body: ReadableStream<Uint8Array>, handlers: Cha
       case "conversation":
         handlers.onConversation?.((data as { conversationId: string }).conversationId);
         break;
+      case "route": {
+        const route = data as { provider?: unknown; model?: unknown; modelSelection?: unknown } | null;
+        if (route && typeof route.provider === "string" && typeof route.model === "string") {
+          handlers.onRoute?.({
+            provider: route.provider,
+            model: route.model,
+            ...(route.modelSelection === "auto" || route.modelSelection === "manual" ? { modelSelection: route.modelSelection } : {}),
+          });
+        }
+        break;
+      }
       case "token":
         handlers.onToken?.((data as { token: string }).token);
         break;
@@ -240,12 +253,14 @@ export async function resolveApproval(
   approvalId: string,
   status: "approved" | "rejected",
   response?: string,
+  resumeMode: "client" | "server" = "client",
 ): Promise<AgentApprovalRequest> {
   const res = await apiFetch(`/api/approvals/${encodeURIComponent(approvalId)}`, {
     method: "PATCH",
     // "client": we stream the continuation ourselves via resume/stream, so the
     // server must not also resume the paused turn in the background.
-    body: JSON.stringify({ status, ...(response ? { response } : {}), resumeMode: "client" }),
+    // "server": an agent run's approval; the server continues the run.
+    body: JSON.stringify({ status, ...(response ? { response } : {}), resumeMode }),
   });
   if (!res.ok) {
     const err = await errorFromResponse(res);

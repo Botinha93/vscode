@@ -102,6 +102,13 @@ export class RunsTreeProvider implements vscode.TreeDataProvider<Item> {
   cancelRun(graphId: string): void { this.runs.get(graphId)?.dispose?.(); this.runs.delete(graphId); this.fireChange(); }
   /** The node id awaiting approval for a run, if any (used by the resolve-approval command). */
   getWaitingNodeId(graphId: string): string | undefined { return this.runs.get(graphId)?.waitingNodeId; }
+  /** The server node id recorded for a task id (or a server id the run has seen). */
+  serverNodeIdFor(graphId: string, nodeId: string): string | undefined {
+    const run = this.runs.get(graphId);
+    if (!run) return undefined;
+    if ([...run.serverNodeIds.values()].includes(nodeId)) return nodeId;
+    return run.serverNodeIds.get(nodeId);
+  }
   /** Run metadata used to re-establish a subscription on retry/replay. */
   getRunMeta(graphId: string): { featureId: string; label: string; nodeIds: string[] } | undefined {
     const run = this.runs.get(graphId);

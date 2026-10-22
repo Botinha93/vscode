@@ -48,12 +48,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const approvalsTree = new ApprovalsTreeProvider((message) => output.appendLine(message));
   const mcpTree = new McpTreeProvider((message) => output.appendLine(message));
 
-  pipeline = new LiberidePipelineController(context, store, output, runsTree);
   chat = new LiberideChatPanelController(context, store, output);
+  pipeline = new LiberidePipelineController(context, store, output, runsTree, chat);
 
   const notificationCenter = new IdeNotificationCenter(output, {
     onApprovalPending: ({ graphId, nodeId }) => {
-      if (graphId && nodeId) void pipeline.resolveApprovalForRun(graphId, nodeId);
+      if (graphId && nodeId) void pipeline.approvalPending(graphId, nodeId);
       approvalsTree.refresh();
     },
     onRunStatus: () => {
@@ -89,7 +89,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       });
     }),
     vscode.commands.registerCommand("liberide.runWorkflow", () => {
-      runIdeWorkflowCommand(output).catch((err: unknown) => {
+      runIdeWorkflowCommand(output, chat).catch((err: unknown) => {
         void vscode.window.showErrorMessage(err instanceof Error ? err.message : String(err));
       });
     }),
@@ -192,7 +192,8 @@ function commands(
     vscode.commands.registerCommand("liberide.renameChat", safe(async () => {
       await chat.renameActiveChat();
     })),
-    vscode.commands.registerCommand("liberide.openPipeline", () => pipeline.show()),
+    // From a chat (Open pipeline): that chat receives the pipeline's runs.
+    vscode.commands.registerCommand("liberide.openPipeline", (arg?: { conversationId?: string }) => pipeline.show(arg?.conversationId ?? chat.activeConversationId())),
     vscode.commands.registerCommand("liberide.refreshSpecs", safe(async () => { await store.refresh(); specsTree.refresh(); })),
     vscode.commands.registerCommand("liberide.refreshTasks", safe(async () => { await store.refresh(); tasksTree.refresh(); })),
     vscode.commands.registerCommand("liberide.refreshRuns", () => runsTree.refresh()),
@@ -302,12 +303,13 @@ function commands(
       }
       await pipeline.retryRun(graphId);
     })),
-    vscode.commands.registerCommand("liberide.replayFromNode", safe(async (arg?: { graphId?: string; nodeId?: string }) => {
+    vscode.commands.registerCommand("liberide.replayFromNode", safe(async (arg?: { graphId?: string; nodeId?: string; serverNodeId?: string }) => {
       if (!arg?.graphId || !arg?.nodeId) {
         void vscode.window.showInformationMessage("Select a node in the Agent Runs view to replay from.");
         return;
       }
-      await pipeline.replayFromNode(arg.graphId, arg.nodeId);
+      // Runs-view items carry the task id as `nodeId` and the server's id as `serverNodeId`.
+      await pipeline.replayFromNode(arg.graphId, arg.serverNodeId ?? arg.nodeId);
     })),
     vscode.commands.registerCommand("liberide.showNodeDetail", safe(async (arg?: { graphId?: string; nodeId?: string }) => {
       if (!arg?.graphId || !arg?.nodeId) return;
