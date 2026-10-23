@@ -23,7 +23,7 @@ function taskInput(feature: FeatureSpec, task: TaskContract): string {
     "",
     "## Instructions",
     task.body,
-  ].join("\n").slice(0, 2000);
+  ].join("\n").slice(0, 8000);
 }
 
 export async function dispatchFeature(feature: FeatureSpec, options: { conversationId?: string; taskIds?: string[]; ideContext?: IdeToolContextPayload; swarm?: boolean; isolation?: "worktree" | "shared"; approvalMode?: ApprovalMode } = {}): Promise<SpecDispatchResult> {
