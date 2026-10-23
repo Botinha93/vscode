@@ -15631,6 +15631,42 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     return scan(code, specs);
   }
 
+  // src/webview/view-state.ts
+  var STICK_TO_BOTTOM_PX = 40;
+  function isAtBottom(box, threshold = STICK_TO_BOTTOM_PX) {
+    return box.scrollHeight - box.scrollTop - box.clientHeight <= threshold;
+  }
+  function captureBoxState(box) {
+    return { top: box.scrollTop, atBottom: isAtBottom(box) };
+  }
+  function restoredScrollTop(previous, box, follow) {
+    const max = Math.max(0, box.scrollHeight - box.clientHeight);
+    if (!previous) return follow ? max : void 0;
+    if (previous.atBottom) return max;
+    return Math.min(previous.top, max);
+  }
+  function pickAnchor(candidates, viewport) {
+    const viewTop = viewport.scrollTop;
+    const viewBottom = viewport.scrollTop + viewport.clientHeight;
+    let inside;
+    let straddling;
+    for (const candidate of candidates) {
+      if (candidate.bottom <= viewTop || candidate.top >= viewBottom) continue;
+      if (candidate.top >= viewTop) {
+        if (!inside || candidate.top < inside.top) inside = candidate;
+      } else if (!straddling || candidate.top >= straddling.top) {
+        straddling = candidate;
+      }
+    }
+    return inside ?? straddling;
+  }
+  function restoredTranscriptTop(previous, box, anchorTopAfter2) {
+    const max = Math.max(0, box.scrollHeight - box.clientHeight);
+    if (previous.atBottom) return max;
+    const top = previous.anchor && anchorTopAfter2 !== void 0 ? previous.top + (anchorTopAfter2 - previous.anchor.top) : previous.top;
+    return Math.min(Math.max(0, top), max);
+  }
+
   // src/chat/approval-mode.ts
   var APPROVAL_MODE_OPTIONS = [
     { id: "ask", label: "Ask", description: "Ask before edits, commands and other gated actions." },
@@ -16043,17 +16079,82 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     );
     return runLayout;
   }
+  var ANCHOR_SELECTOR = ".turn[data-message-id], .agent-run-card[data-run-id], .graph-step-block[data-step-key]";
+  function anchorKeyOf(el) {
+    if (el.classList.contains("graph-step-block")) return `step:${el.dataset.stepKey ?? ""}`;
+    if (el.classList.contains("agent-run-card")) return `run:${el.dataset.runId ?? ""}`;
+    return `turn:${el.dataset.messageId ?? ""}`;
+  }
+  function anchorCandidates(transcript) {
+    const origin = transcript.getBoundingClientRect().top - transcript.scrollTop;
+    const candidates = [];
+    transcript.querySelectorAll(ANCHOR_SELECTOR).forEach((el) => {
+      const rect = el.getBoundingClientRect();
+      if (rect.height <= 0) return;
+      candidates.push({ key: anchorKeyOf(el), top: rect.top - origin, bottom: rect.bottom - origin });
+    });
+    return candidates;
+  }
+  function anchorTopAfter(transcript, key) {
+    const origin = transcript.getBoundingClientRect().top - transcript.scrollTop;
+    for (const el of transcript.querySelectorAll(ANCHOR_SELECTOR)) {
+      if (anchorKeyOf(el) === key) return el.getBoundingClientRect().top - origin;
+    }
+    return void 0;
+  }
+  function captureView(transcript) {
+    const boxes = /* @__PURE__ */ new Map();
+    transcript.querySelectorAll("[data-scroll-key]").forEach((el) => {
+      boxes.set(el.dataset.scrollKey, captureBoxState(el));
+    });
+    const position = captureBoxState(transcript);
+    return {
+      transcript: { ...position, anchor: position.atBottom ? void 0 : pickAnchor(anchorCandidates(transcript), transcript) },
+      boxes
+    };
+  }
+  function restoreView(transcript, snapshot) {
+    transcript.querySelectorAll("[data-scroll-key]").forEach((el) => {
+      const top2 = restoredScrollTop(snapshot.boxes.get(el.dataset.scrollKey), el, el.hasAttribute("data-follow"));
+      if (top2 !== void 0 && el.scrollTop !== top2) el.scrollTop = top2;
+    });
+    const anchor = snapshot.transcript.anchor;
+    const top = restoredTranscriptTop(snapshot.transcript, transcript, anchor ? anchorTopAfter(transcript, anchor.key) : void 0);
+    if (transcript.scrollTop !== top) transcript.scrollTop = top;
+  }
+  var preservingView = false;
+  function preserveView(update) {
+    const transcript = root.querySelector("#transcript");
+    if (!transcript || preservingView) {
+      update();
+      return;
+    }
+    const snapshot = captureView(transcript);
+    preservingView = true;
+    try {
+      update();
+    } finally {
+      preservingView = false;
+    }
+    restoreView(transcript, snapshot);
+  }
   function renderTranscript(options = {}) {
     const transcript = root.querySelector("#transcript");
     if (!transcript) return;
-    const atBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 40;
-    const previousTop = transcript.scrollTop;
+    if (options.keepScroll) {
+      preserveView(() => fillTranscript(transcript));
+    } else {
+      fillTranscript(transcript);
+      transcript.scrollTop = transcript.scrollHeight;
+    }
+    renderActivity();
+  }
+  function fillTranscript(transcript) {
     transcript.innerHTML = "";
     const messages = state.activeSession?.messages ?? [];
     const layout = computeRunLayout();
     if (messages.length === 0 && layout.orphans.length === 0 && state.runApprovals.length === 0) {
       transcript.appendChild(renderEmptyState());
-      renderActivity();
       return;
     }
     for (const m of messages) {
@@ -16062,8 +16163,6 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     }
     const tail = renderRunsTail();
     if (tail) transcript.appendChild(tail);
-    transcript.scrollTop = options.keepScroll && !atBottom ? previousTop : transcript.scrollHeight;
-    renderActivity();
   }
   function renderRunsTail() {
     const placed = new Set(runIdsInLayout());
@@ -16105,20 +16204,20 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
       return;
     }
     const transcript = root.querySelector("#transcript");
-    const atBottom = transcript ? transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 40 : false;
     const owners = new Set(runIds.map(ownerOfRun));
-    for (const owner of owners) {
-      if (owner === RUNS_TAIL_ID) {
-        const current = root.querySelector(`.turn[data-message-id="${cssAttr(RUNS_TAIL_ID)}"]`);
-        const next = renderRunsTail();
-        if (current && next) current.replaceWith(next);
-        else if (!current && next) transcript?.appendChild(next);
-        else current?.remove();
-      } else {
-        rerenderMessageInDom(owner);
+    preserveView(() => {
+      for (const owner of owners) {
+        if (owner === RUNS_TAIL_ID) {
+          const current = root.querySelector(`.turn[data-message-id="${cssAttr(RUNS_TAIL_ID)}"]`);
+          const next = renderRunsTail();
+          if (current && next) current.replaceWith(next);
+          else if (!current && next) transcript?.appendChild(next);
+          else current?.remove();
+        } else {
+          rerenderMessageInDom(owner);
+        }
       }
-    }
-    if (transcript && atBottom) transcript.scrollTop = transcript.scrollHeight;
+    });
   }
   function renderEmptyState() {
     const el = document.createElement("div");
@@ -16243,7 +16342,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     });
     return turn;
   }
-  var expandedThinking = /* @__PURE__ */ new Set();
+  var thinkingToggles = /* @__PURE__ */ new Map();
   var TURN_STATUS_LABEL = {
     failed: "Failed",
     cancelled: "Cancelled",
@@ -16263,10 +16362,11 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
   }
   function renderThinking(message) {
     if (!message.thinking) return "";
-    const open = expandedThinking.has(message.id) || message.status === "streaming" && !message.content;
+    const live = message.status === "streaming" && !message.content;
+    const open = thinkingToggles.get(message.id) ?? live;
     return `<details class="thinking-block"${open ? " open" : ""}>
-    <summary>${message.status === "streaming" && !message.content ? "Thinking\u2026" : "Reasoning"}</summary>
-    <div class="thinking-body">${escapeHtml2(message.thinking)}</div>
+    <summary>${live ? "Thinking\u2026" : "Reasoning"}</summary>
+    <div class="thinking-body" data-scroll-key="thinking:${escapeAttr(message.id)}"${message.status === "streaming" ? " data-follow" : ""}>${escapeHtml2(message.thinking)}</div>
   </details>`;
   }
   function renderPlan(message) {
@@ -16300,7 +16400,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
       ${card.risk ? `<span class="approval-risk risk-${escapeAttr(card.risk)}">${escapeHtml2(card.risk)} risk</span>` : ""}
     </div>
     ${card.reason ? `<div class="approval-reason">${escapeHtml2(card.reason)}</div>` : ""}
-    ${card.details ? `<pre class="approval-details">${escapeHtml2(card.details)}</pre>` : ""}
+    ${card.details ? `<pre class="approval-details" data-scroll-key="approval:${escapeAttr(card.id)}">${escapeHtml2(card.details)}</pre>` : ""}
     ${card.error ? `<div class="turn-error">${escapeHtml2(card.error)}</div>` : ""}
     <div class="approval-actions">
       <span class="approval-status">${card.busy ? `<span class="turn-indicator"></span>` : ""}${escapeHtml2(statusText)}</span>
@@ -16337,9 +16437,12 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     return `${graphId}|${nodeId}`;
   }
   function stepOpen(graphId, step, runIds) {
-    const toggled = stepToggles.get(stepKey(graphId, step.nodeId));
+    const key = stepKey(graphId, step.nodeId);
+    const toggled = stepToggles.get(key);
     if (toggled !== void 0) return toggled;
-    return step.status === "running" || step.status === "failed" || step.status === "waiting_approval" || runIds.some((id) => isActiveAgentRunStatus(state.agentRuns.get(id)?.status));
+    const open = step.status === "running" || step.status === "failed" || step.status === "waiting_approval" || runIds.some((id) => isActiveAgentRunStatus(state.agentRuns.get(id)?.status));
+    if (open) stepToggles.set(key, true);
+    return open;
   }
   function renderGraphStep(graph, step) {
     const runIds = runLayout.nodeRuns.get(graph.graphId)?.get(step.nodeId) ?? [];
@@ -16347,8 +16450,8 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     const open = hasDetail && stepOpen(graph.graphId, step, runIds);
     const key = stepKey(graph.graphId, step.nodeId);
     const detail = open ? `<div class="graph-step-detail">
-      ${step.error ? `<pre class="graph-step-error">${escapeHtml2(step.error)}</pre>` : ""}
-      ${step.output ? `<div class="graph-step-output">${renderMarkdownish(step.output)}</div>` : ""}
+      ${step.error ? `<pre class="graph-step-error" data-scroll-key="step-error:${escapeAttr(key)}">${escapeHtml2(step.error)}</pre>` : ""}
+      ${step.output ? `<div class="graph-step-output" data-scroll-key="step-output:${escapeAttr(key)}"${step.status === "running" ? " data-follow" : ""}>${renderMarkdownish(step.output)}</div>` : ""}
       ${runIds.map((id) => renderAgentRunCard(id, 1)).join("")}
       ${step.status === "waiting_approval" ? `<div class="approval-actions">
         <span class="approval-status">Waiting for your decision</span>
@@ -16440,8 +16543,8 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     const reconnecting = active && !state.agentsConnected;
     const body = open ? `<div class="agent-run-body">
       ${tools ? `<div class="agent-run-tools">${tools}</div>` : ""}
-      ${run.text ? `<div class="agent-run-text${active ? " streaming" : ""}" data-run-text="${escapeAttr(runId)}">${renderMarkdownish(run.text)}</div>` : active ? `<div class="assistant-status"><span class="turn-indicator"></span><span>${reconnecting ? "Reconnecting to live output\u2026" : "Working\u2026"}</span></div>` : ""}
-      ${run.error ? `<pre class="agent-run-error">${escapeHtml2(run.error)}</pre>` : ""}
+      ${run.text ? `<div class="agent-run-text${active ? " streaming" : ""}" data-run-text="${escapeAttr(runId)}" data-scroll-key="run-text:${escapeAttr(runId)}"${active ? " data-follow" : ""}>${renderMarkdownish(run.text)}</div>` : active ? `<div class="assistant-status"><span class="turn-indicator"></span><span>${reconnecting ? "Reconnecting to live output\u2026" : "Working\u2026"}</span></div>` : ""}
+      ${run.error ? `<pre class="agent-run-error" data-scroll-key="run-error:${escapeAttr(runId)}">${escapeHtml2(run.error)}</pre>` : ""}
       ${approvals.map(renderRunApprovalCard).join("")}
       ${children.length ? `<div class="agent-run-children">${children.map((id) => renderAgentRunCard(id, depth + 1)).join("")}</div>` : ""}
     </div>` : approvals.map(renderRunApprovalCard).join("");
@@ -16516,9 +16619,6 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
         send({ type: "resolveRunApproval", sessionId, approvalId, decision: btn.dataset.runApproval === "approved" ? "approved" : "rejected" });
       });
     });
-    scope.querySelectorAll("[data-run-text]").forEach((el) => {
-      if (el.classList.contains("streaming")) el.scrollTop = el.scrollHeight;
-    });
     scope.querySelectorAll(".agent-run-card").forEach((card) => {
       const runId = card.dataset.runId;
       const run = state.agentRuns.get(runId);
@@ -16538,10 +16638,9 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
   function bindTurnExtras(turn, message) {
     const sessionId = state.activeSession?.id;
     if (!sessionId) return;
-    turn.querySelector(".thinking-block")?.addEventListener("toggle", (event) => {
-      const el = event.currentTarget;
-      if (el.open) expandedThinking.add(message.id);
-      else expandedThinking.delete(message.id);
+    const thinking = turn.querySelector(".thinking-block");
+    thinking?.querySelector("summary")?.addEventListener("click", () => {
+      thinkingToggles.set(message.id, !thinking.open);
     });
     turn.querySelectorAll("[data-approval]").forEach((btn) => {
       btn.addEventListener("click", () => {
@@ -17622,6 +17721,8 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
   function appendChunkInDom(messageId, chunk) {
     const turn = root.querySelector(`.turn[data-message-id="${cssAttr(messageId)}"] .turn-content`);
     if (!turn) return;
+    const transcript = root.querySelector("#transcript");
+    const follow = transcript ? isAtBottom(transcript) : false;
     const session = state.activeSession;
     const fullMessage = session?.messages.find((m) => m.id === messageId);
     if (fullMessage) {
@@ -17633,8 +17734,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
       if (turn.querySelector(".placeholder")) turn.innerHTML = "";
       turn.appendChild(document.createTextNode(chunk));
     }
-    const transcript = root.querySelector("#transcript");
-    if (transcript) transcript.scrollTop = transcript.scrollHeight;
+    if (transcript && follow) transcript.scrollTop = transcript.scrollHeight;
   }
   function rerenderMessageInDom(messageId) {
     const session = state.activeSession;
@@ -17643,7 +17743,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     if (!message) return;
     const turn = root.querySelector(`.turn[data-message-id="${cssAttr(messageId)}"]`);
     if (!turn) return;
-    turn.replaceWith(renderMessage(message));
+    preserveView(() => turn.replaceWith(renderMessage(message)));
   }
   function cssAttr(id) {
     return id.replace(/"/g, '\\"');
@@ -17748,17 +17848,19 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
         state.activeSessionId = msg.activeSessionId;
         renderSidebar();
         break;
-      case "session":
+      case "session": {
+        const sameChat = state.activeSession?.id === msg.session.id;
         adoptSessionRuns(msg.session);
         state.activeSession = msg.session;
         state.activeSessionId = msg.session.id;
         state.streaming = msg.session.messages.some((m) => m.status === "streaming");
-        renderTranscript();
+        renderTranscript({ keepScroll: sameChat });
         renderComposer();
         renderComposerAttachments();
         if (state.approvalPickerOpen) renderApprovalPicker();
         renderApprovalModeOffer();
         break;
+      }
       case "messageStart":
         if (state.activeSession && state.activeSession.id === msg.sessionId) {
           const m = state.activeSession.messages.find((x) => x.id === msg.messageId);
@@ -17844,10 +17946,6 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
             computeRunLayout();
             if (msg.patch.graph && runPlacement() !== before) renderTranscript({ keepScroll: true });
             else rerenderMessageInDom(msg.messageId);
-            if (msg.patch.content !== void 0) {
-              const transcript = root.querySelector("#transcript");
-              if (transcript) transcript.scrollTop = transcript.scrollHeight;
-            }
           }
         }
         break;

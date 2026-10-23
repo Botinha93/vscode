@@ -24,6 +24,7 @@ import type { ContextBlockChip } from "../chat/context-blocks";
 import type { WorkspaceIntelligence } from "../workspace/intelligence";
 import { buildChatSlashCommands, parseSlashQuery, parseTaskContractBlock, type TaskContractView } from "@nexus/shared";
 import { highlightCode } from "./highlight";
+import { captureBoxState, isAtBottom, pickAnchor, restoredScrollTop, restoredTranscriptTop, type AnchorCandidate, type BoxState, type TranscriptState } from "./view-state";
 import { APPROVAL_MODE_OPTIONS, approvalModeAllowed, approvalModeLabel, DEFAULT_APPROVAL_MODE, type ApprovalMode } from "../chat/approval-mode";
 
 interface VsCodeApi {
@@ -530,18 +531,110 @@ function computeRunLayout(): AgentRunLayout {
   return runLayout;
 }
 
+// ---------------------------------------------------------------------------
+// Scroll preservation across live re-renders (see view-state.ts)
+// ---------------------------------------------------------------------------
+
+/** Elements that can hold the transcript's place: turns, run cards, graph steps. */
+const ANCHOR_SELECTOR = ".turn[data-message-id], .agent-run-card[data-run-id], .graph-step-block[data-step-key]";
+
+function anchorKeyOf(el: HTMLElement): string {
+  if (el.classList.contains("graph-step-block")) return `step:${el.dataset.stepKey ?? ""}`;
+  if (el.classList.contains("agent-run-card")) return `run:${el.dataset.runId ?? ""}`;
+  return `turn:${el.dataset.messageId ?? ""}`;
+}
+
+/** Visible anchor elements, in content coordinates of the transcript. */
+function anchorCandidates(transcript: HTMLElement): AnchorCandidate[] {
+  const origin = transcript.getBoundingClientRect().top - transcript.scrollTop;
+  const candidates: AnchorCandidate[] = [];
+  transcript.querySelectorAll<HTMLElement>(ANCHOR_SELECTOR).forEach((el) => {
+    const rect = el.getBoundingClientRect();
+    if (rect.height <= 0) return;
+    candidates.push({ key: anchorKeyOf(el), top: rect.top - origin, bottom: rect.bottom - origin });
+  });
+  return candidates;
+}
+
+function anchorTopAfter(transcript: HTMLElement, key: string): number | undefined {
+  const origin = transcript.getBoundingClientRect().top - transcript.scrollTop;
+  for (const el of transcript.querySelectorAll<HTMLElement>(ANCHOR_SELECTOR)) {
+    if (anchorKeyOf(el) === key) return el.getBoundingClientRect().top - origin;
+  }
+  return undefined;
+}
+
+interface ViewSnapshot {
+  transcript: TranscriptState;
+  /** Inner scroll boxes by `data-scroll-key`. */
+  boxes: Map<string, BoxState>;
+}
+
+function captureView(transcript: HTMLElement): ViewSnapshot {
+  const boxes = new Map<string, BoxState>();
+  transcript.querySelectorAll<HTMLElement>("[data-scroll-key]").forEach((el) => {
+    boxes.set(el.dataset.scrollKey!, captureBoxState(el));
+  });
+  const position = captureBoxState(transcript);
+  return {
+    transcript: { ...position, anchor: position.atBottom ? undefined : pickAnchor(anchorCandidates(transcript), transcript) },
+    boxes,
+  };
+}
+
+function restoreView(transcript: HTMLElement, snapshot: ViewSnapshot): void {
+  transcript.querySelectorAll<HTMLElement>("[data-scroll-key]").forEach((el) => {
+    const top = restoredScrollTop(snapshot.boxes.get(el.dataset.scrollKey!), el, el.hasAttribute("data-follow"));
+    if (top !== undefined && el.scrollTop !== top) el.scrollTop = top;
+  });
+  const anchor = snapshot.transcript.anchor;
+  const top = restoredTranscriptTop(snapshot.transcript, transcript, anchor ? anchorTopAfter(transcript, anchor.key) : undefined);
+  if (transcript.scrollTop !== top) transcript.scrollTop = top;
+}
+
+let preservingView = false;
+
+/**
+ * Run a DOM update without moving the user: the transcript follows new
+ * content only if it was at the bottom, inner scroll boxes keep their offset
+ * (or follow their tail if they were at it). Nested calls run inside the
+ * outermost one.
+ */
+function preserveView(update: () => void): void {
+  const transcript = root.querySelector<HTMLDivElement>("#transcript");
+  if (!transcript || preservingView) {
+    update();
+    return;
+  }
+  const snapshot = captureView(transcript);
+  preservingView = true;
+  try {
+    update();
+  } finally {
+    preservingView = false;
+  }
+  restoreView(transcript, snapshot);
+}
+
 /** `keepScroll`: live updates stay where the user scrolled unless they were at the bottom. */
 function renderTranscript(options: { keepScroll?: boolean } = {}): void {
   const transcript = root.querySelector<HTMLDivElement>("#transcript");
   if (!transcript) return;
-  const atBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 40;
-  const previousTop = transcript.scrollTop;
+  if (options.keepScroll) {
+    preserveView(() => fillTranscript(transcript));
+  } else {
+    fillTranscript(transcript);
+    transcript.scrollTop = transcript.scrollHeight;
+  }
+  renderActivity();
+}
+
+function fillTranscript(transcript: HTMLElement): void {
   transcript.innerHTML = "";
   const messages = state.activeSession?.messages ?? [];
   const layout = computeRunLayout();
   if (messages.length === 0 && layout.orphans.length === 0 && state.runApprovals.length === 0) {
     transcript.appendChild(renderEmptyState());
-    renderActivity();
     return;
   }
   for (const m of messages) {
@@ -550,8 +643,6 @@ function renderTranscript(options: { keepScroll?: boolean } = {}): void {
   }
   const tail = renderRunsTail();
   if (tail) transcript.appendChild(tail);
-  transcript.scrollTop = options.keepScroll && !atBottom ? previousTop : transcript.scrollHeight;
-  renderActivity();
 }
 
 /** Runs (and run approvals) with no message to sit in: after the transcript. */
@@ -601,20 +692,20 @@ function rerenderRuns(runIds: string[], placementChanged: boolean): void {
     return;
   }
   const transcript = root.querySelector<HTMLDivElement>("#transcript");
-  const atBottom = transcript ? transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 40 : false;
   const owners = new Set(runIds.map(ownerOfRun));
-  for (const owner of owners) {
-    if (owner === RUNS_TAIL_ID) {
-      const current = root.querySelector<HTMLElement>(`.turn[data-message-id="${cssAttr(RUNS_TAIL_ID)}"]`);
-      const next = renderRunsTail();
-      if (current && next) current.replaceWith(next);
-      else if (!current && next) transcript?.appendChild(next);
-      else current?.remove();
-    } else {
-      rerenderMessageInDom(owner);
+  preserveView(() => {
+    for (const owner of owners) {
+      if (owner === RUNS_TAIL_ID) {
+        const current = root.querySelector<HTMLElement>(`.turn[data-message-id="${cssAttr(RUNS_TAIL_ID)}"]`);
+        const next = renderRunsTail();
+        if (current && next) current.replaceWith(next);
+        else if (!current && next) transcript?.appendChild(next);
+        else current?.remove();
+      } else {
+        rerenderMessageInDom(owner);
+      }
     }
-  }
-  if (transcript && atBottom) transcript.scrollTop = transcript.scrollHeight;
+  });
 }
 
 function renderEmptyState(): HTMLElement {
@@ -760,8 +851,8 @@ function renderMessage(message: ChatMessage): HTMLElement {
 // Turn status, warnings, thinking, approval / graph / fallback cards
 // ---------------------------------------------------------------------------
 
-/** messageId -> whether the reasoning block is expanded */
-const expandedThinking = new Set<string>();
+/** messageId -> the user's open/closed choice for the reasoning block (unset = default). */
+const thinkingToggles = new Map<string, boolean>();
 
 const TURN_STATUS_LABEL: Record<NonNullable<ChatMessage["turnStatus"]>, string> = {
   failed: "Failed",
@@ -784,10 +875,11 @@ function renderStatusBadges(message: ChatMessage): string {
 
 function renderThinking(message: ChatMessage): string {
   if (!message.thinking) return "";
-  const open = expandedThinking.has(message.id) || (message.status === "streaming" && !message.content);
+  const live = message.status === "streaming" && !message.content;
+  const open = thinkingToggles.get(message.id) ?? live;
   return `<details class="thinking-block"${open ? " open" : ""}>
-    <summary>${message.status === "streaming" && !message.content ? "Thinking\u2026" : "Reasoning"}</summary>
-    <div class="thinking-body">${escapeHtml(message.thinking)}</div>
+    <summary>${live ? "Thinking\u2026" : "Reasoning"}</summary>
+    <div class="thinking-body" data-scroll-key="thinking:${escapeAttr(message.id)}"${message.status === "streaming" ? " data-follow" : ""}>${escapeHtml(message.thinking)}</div>
   </details>`;
 }
 
@@ -828,7 +920,7 @@ function renderApprovalCard(card: ApprovalCardView): string {
       ${card.risk ? `<span class="approval-risk risk-${escapeAttr(card.risk)}">${escapeHtml(card.risk)} risk</span>` : ""}
     </div>
     ${card.reason ? `<div class="approval-reason">${escapeHtml(card.reason)}</div>` : ""}
-    ${card.details ? `<pre class="approval-details">${escapeHtml(card.details)}</pre>` : ""}
+    ${card.details ? `<pre class="approval-details" data-scroll-key="approval:${escapeAttr(card.id)}">${escapeHtml(card.details)}</pre>` : ""}
     ${card.error ? `<div class="turn-error">${escapeHtml(card.error)}</div>` : ""}
     <div class="approval-actions">
       <span class="approval-status">${card.busy ? `<span class="turn-indicator"></span>` : ""}${escapeHtml(statusText)}</span>
@@ -863,11 +955,16 @@ function stepKey(graphId: string, nodeId: string): string {
 }
 
 function stepOpen(graphId: string, step: GraphProgressView["steps"][number], runIds: string[]): boolean {
-  const toggled = stepToggles.get(stepKey(graphId, step.nodeId));
+  const key = stepKey(graphId, step.nodeId);
+  const toggled = stepToggles.get(key);
   if (toggled !== undefined) return toggled;
   // Live, failed and blocked-on-you steps show their output without a click.
-  return step.status === "running" || step.status === "failed" || step.status === "waiting_approval"
+  const open = step.status === "running" || step.status === "failed" || step.status === "waiting_approval"
     || runIds.some((id) => isActiveAgentRunStatus(state.agentRuns.get(id)?.status));
+  // Once shown open it stays open (until the user closes it): a step finishing
+  // must not fold away the output the user is reading.
+  if (open) stepToggles.set(key, true);
+  return open;
 }
 
 function renderGraphStep(graph: GraphProgressView, step: GraphProgressView["steps"][number]): string {
@@ -876,8 +973,8 @@ function renderGraphStep(graph: GraphProgressView, step: GraphProgressView["step
   const open = hasDetail && stepOpen(graph.graphId, step, runIds);
   const key = stepKey(graph.graphId, step.nodeId);
   const detail = open ? `<div class="graph-step-detail">
-      ${step.error ? `<pre class="graph-step-error">${escapeHtml(step.error)}</pre>` : ""}
-      ${step.output ? `<div class="graph-step-output">${renderMarkdownish(step.output)}</div>` : ""}
+      ${step.error ? `<pre class="graph-step-error" data-scroll-key="step-error:${escapeAttr(key)}">${escapeHtml(step.error)}</pre>` : ""}
+      ${step.output ? `<div class="graph-step-output" data-scroll-key="step-output:${escapeAttr(key)}"${step.status === "running" ? " data-follow" : ""}>${renderMarkdownish(step.output)}</div>` : ""}
       ${runIds.map((id) => renderAgentRunCard(id, 1)).join("")}
       ${step.status === "waiting_approval" ? `<div class="approval-actions">
         <span class="approval-status">Waiting for your decision</span>
@@ -979,9 +1076,9 @@ function renderAgentRunCard(runId: string, depth: number): string {
   const reconnecting = active && !state.agentsConnected;
   const body = open ? `<div class="agent-run-body">
       ${tools ? `<div class="agent-run-tools">${tools}</div>` : ""}
-      ${run.text ? `<div class="agent-run-text${active ? " streaming" : ""}" data-run-text="${escapeAttr(runId)}">${renderMarkdownish(run.text)}</div>`
+      ${run.text ? `<div class="agent-run-text${active ? " streaming" : ""}" data-run-text="${escapeAttr(runId)}" data-scroll-key="run-text:${escapeAttr(runId)}"${active ? " data-follow" : ""}>${renderMarkdownish(run.text)}</div>`
         : active ? `<div class="assistant-status"><span class="turn-indicator"></span><span>${reconnecting ? "Reconnecting to live output\u2026" : "Working\u2026"}</span></div>` : ""}
-      ${run.error ? `<pre class="agent-run-error">${escapeHtml(run.error)}</pre>` : ""}
+      ${run.error ? `<pre class="agent-run-error" data-scroll-key="run-error:${escapeAttr(runId)}">${escapeHtml(run.error)}</pre>` : ""}
       ${approvals.map(renderRunApprovalCard).join("")}
       ${children.length ? `<div class="agent-run-children">${children.map((id) => renderAgentRunCard(id, depth + 1)).join("")}</div>` : ""}
     </div>` : approvals.map(renderRunApprovalCard).join("");
@@ -1055,10 +1152,8 @@ function bindRunCards(scope: HTMLElement): void {
       send({ type: "resolveRunApproval", sessionId, approvalId, decision: btn.dataset.runApproval === "approved" ? "approved" : "rejected" });
     });
   });
-  // Follow live output; fetch the tool calls of finished runs once.
-  scope.querySelectorAll<HTMLElement>("[data-run-text]").forEach((el) => {
-    if (el.classList.contains("streaming")) el.scrollTop = el.scrollHeight;
-  });
+  // Live output follows its tail via preserveView (`data-follow`), only while
+  // the user is at its bottom. Fetch the tool calls of finished runs once.
   scope.querySelectorAll<HTMLElement>(".agent-run-card").forEach((card) => {
     const runId = card.dataset.runId!;
     const run = state.agentRuns.get(runId);
@@ -1084,10 +1179,10 @@ function renderFallbackCard(fallback: FallbackProposalView): string {
 function bindTurnExtras(turn: HTMLElement, message: ChatMessage): void {
   const sessionId = state.activeSession?.id;
   if (!sessionId) return;
-  turn.querySelector<HTMLDetailsElement>(".thinking-block")?.addEventListener("toggle", (event) => {
-    const el = event.currentTarget as HTMLDetailsElement;
-    if (el.open) expandedThinking.add(message.id);
-    else expandedThinking.delete(message.id);
+  // Only a click is the user's choice (`toggle` also fires when a render opens it).
+  const thinking = turn.querySelector<HTMLDetailsElement>(".thinking-block");
+  thinking?.querySelector("summary")?.addEventListener("click", () => {
+    thinkingToggles.set(message.id, !thinking.open);
   });
   turn.querySelectorAll<HTMLButtonElement>("[data-approval]").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -2313,6 +2408,8 @@ function decodeAttr(value: string): string {
 function appendChunkInDom(messageId: string, chunk: string): void {
   const turn = root.querySelector<HTMLElement>(`.turn[data-message-id="${cssAttr(messageId)}"] .turn-content`);
   if (!turn) return;
+  const transcript = root.querySelector<HTMLDivElement>("#transcript");
+  const follow = transcript ? isAtBottom(transcript) : false;
   const session = state.activeSession;
   const fullMessage = session?.messages.find((m) => m.id === messageId);
   if (fullMessage) {
@@ -2324,8 +2421,8 @@ function appendChunkInDom(messageId: string, chunk: string): void {
     if (turn.querySelector(".placeholder")) turn.innerHTML = "";
     turn.appendChild(document.createTextNode(chunk));
   }
-  const transcript = root.querySelector<HTMLDivElement>("#transcript");
-  if (transcript) transcript.scrollTop = transcript.scrollHeight;
+  // Follow the reply only while the user is at the bottom.
+  if (transcript && follow) transcript.scrollTop = transcript.scrollHeight;
 }
 
 function rerenderMessageInDom(messageId: string): void {
@@ -2335,7 +2432,7 @@ function rerenderMessageInDom(messageId: string): void {
   if (!message) return;
   const turn = root.querySelector<HTMLElement>(`.turn[data-message-id="${cssAttr(messageId)}"]`);
   if (!turn) return;
-  turn.replaceWith(renderMessage(message));
+  preserveView(() => turn.replaceWith(renderMessage(message)));
 }
 
 function cssAttr(id: string): string { return id.replace(/"/g, '\\"'); }
@@ -2455,17 +2552,20 @@ function handleMessage(msg: ChatHostToWebview): void {
       state.activeSessionId = msg.activeSessionId;
       renderSidebar();
       break;
-    case "session":
+    case "session": {
+      // A re-sent session of the chat on screen is an update: keep the user's place.
+      const sameChat = state.activeSession?.id === msg.session.id;
       adoptSessionRuns(msg.session);
       state.activeSession = msg.session;
       state.activeSessionId = msg.session.id;
       state.streaming = msg.session.messages.some((m) => m.status === "streaming");
-      renderTranscript();
+      renderTranscript({ keepScroll: sameChat });
       renderComposer();
       renderComposerAttachments();
       if (state.approvalPickerOpen) renderApprovalPicker();
       renderApprovalModeOffer();
       break;
+    }
     case "messageStart":
       if (state.activeSession && state.activeSession.id === msg.sessionId) {
         const m = state.activeSession.messages.find((x) => x.id === msg.messageId);
@@ -2551,12 +2651,9 @@ function handleMessage(msg: ChatHostToWebview): void {
           const before = runPlacement();
           computeRunLayout();
           // A graph card appearing can adopt runs drawn elsewhere until now.
+          // Either way the transcript follows new content only from the bottom.
           if (msg.patch.graph && runPlacement() !== before) renderTranscript({ keepScroll: true });
           else rerenderMessageInDom(msg.messageId);
-          if (msg.patch.content !== undefined) {
-            const transcript = root.querySelector<HTMLDivElement>("#transcript");
-            if (transcript) transcript.scrollTop = transcript.scrollHeight;
-          }
         }
       }
       break;
