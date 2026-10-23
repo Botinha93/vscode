@@ -93,20 +93,20 @@
   var list = (value) => Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
   function parseTaskContractBlock(source) {
     const data = parseFields(source.trim());
-    const id = String(data.id ?? "").trim();
-    const title = String(data.title ?? "").trim();
+    const id = String(data["id"] ?? "").trim();
+    const title = String(data["title"] ?? "").trim();
     if (!id || !title) return void 0;
     return {
       id,
       title,
-      status: String(data.status ?? "pending").trim() || "pending",
-      agent: String(data.agent ?? "coding").trim() || "coding",
-      requirementRefs: list(data.requirement_refs),
-      designRefs: list(data.design_refs),
-      dependsOn: list(data.depends_on),
-      expectedFiles: list(data.expected_files),
-      architectureHints: String(data.architecture_hints ?? "").trim(),
-      acceptance: list(data.acceptance)
+      status: String(data["status"] ?? "pending").trim() || "pending",
+      agent: String(data["agent"] ?? "coding").trim() || "coding",
+      requirementRefs: list(data["requirement_refs"]),
+      designRefs: list(data["design_refs"]),
+      dependsOn: list(data["depends_on"]),
+      expectedFiles: list(data["expected_files"]),
+      architectureHints: String(data["architecture_hints"] ?? "").trim(),
+      acceptance: list(data["acceptance"])
     };
   }
 

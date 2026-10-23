@@ -2,7 +2,7 @@ import { afterEach, describe, expect, mock, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { clearIntegrationCache, fetchAuthenticatedUser, getApiOrigin, getAuthToken, getIntegrationIdentity, parseSseFrame, sseBackoffDelay } from "./api";
+import { clearIntegrationCache, fetchAuthenticatedUser, getApiOrigin, getAuthToken, getIntegrationIdentity, normalizeServerUrl, parseSseFrame, setConfiguredApiOrigin, sseBackoffDelay } from "./api";
 
 const originalEnv = { ...process.env };
 const originalFetch = globalThis.fetch;
@@ -138,5 +138,42 @@ describe("integration file loading", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("managed LiberIDE profile", () => {
+  test("accepts a public API origin from the VS Code setting without credentials", () => {
+    delete process.env.LIBERIDE_API_ORIGIN;
+    delete process.env.CHATLLM_API_ORIGIN;
+    delete process.env.LIBERVOX_INTEGRATION_FILE;
+    delete process.env.CHATLLM_INTEGRATION_FILE;
+    clearIntegrationCache();
+
+    // This is the setting written to User/settings.json by a Hub-managed IDE profile.
+    setConfiguredApiOrigin("https://liberide.example.test/");
+    expect(getApiOrigin()).toBe("https://liberide.example.test");
+    expect(normalizeServerUrl("https://liberide.example.test")).toBe("https://liberide.example.test");
+  });
+
+  test("rejects credential-bearing or secret-reference values and preserves standalone fallback", () => {
+    delete process.env.LIBERIDE_API_ORIGIN;
+    delete process.env.CHATLLM_API_ORIGIN;
+    delete process.env.LIBERVOX_INTEGRATION_FILE;
+    delete process.env.CHATLLM_INTEGRATION_FILE;
+    clearIntegrationCache();
+
+    for (const unsafe of [
+      "https://user:password@liberide.example.test",
+      "https://liberide.example.test?token=secret",
+      "vault://liberide/api-origin",
+      "${secret:liberide.apiOriginRef}",
+    ]) {
+      expect(normalizeServerUrl(unsafe)).toBeUndefined();
+      setConfiguredApiOrigin(unsafe);
+      expect(getApiOrigin()).toBe("");
+    }
+
+    setConfiguredApiOrigin(undefined);
+    expect(getApiOrigin()).toBe("");
   });
 });

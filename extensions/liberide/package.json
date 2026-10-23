@@ -15,6 +15,7 @@
   "enabledApiProposals": ["testObserver"],
   "scripts": {
     "build": "node esbuild.mjs",
+    "build:verify-reproducible": "node verify-build-reproducible.mjs",
     "test": "bun test test src",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

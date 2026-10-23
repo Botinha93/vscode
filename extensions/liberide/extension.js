@@ -436,6 +436,7 @@ function backoffDelay(attempt, baseMs = 1e3, maxMs = 3e4) {
 
 // src/api.ts
 var integrationPath;
+var configuredApiOrigin = "";
 var cachedIntegration;
 var cachedIntegrationSource;
 var cachedIntegrationMtimeMs;
@@ -548,7 +549,12 @@ function clearIntegrationCache() {
 function getApiOrigin() {
   const fromEnv = process.env.LIBERIDE_API_ORIGIN ?? process.env.CHATLLM_API_ORIGIN;
   if (fromEnv) return fromEnv.replace(/\/$/, "");
-  return (loadIntegrationFile()?.apiOrigin || "").replace(/\/$/, "");
+  const fromIntegration = loadIntegrationFile()?.apiOrigin;
+  if (fromIntegration) return fromIntegration.replace(/\/$/, "");
+  return configuredApiOrigin;
+}
+function setConfiguredApiOrigin(value) {
+  configuredApiOrigin = typeof value === "string" ? normalizeServerUrl(value) ?? "" : "";
 }
 function getAuthToken() {
   if (refreshedAuth?.token) return refreshedAuth.token;
@@ -646,6 +652,7 @@ function normalizeServerUrl(input) {
   try {
     const url2 = new URL(input.trim());
     if (url2.protocol !== "http:" && url2.protocol !== "https:") return void 0;
+    if (url2.username || url2.password || url2.search || url2.hash) return void 0;
     return `${url2.origin}${url2.pathname}`.replace(/\/+$/, "");
   } catch {
     return void 0;
@@ -23174,6 +23181,13 @@ var store;
 var pipeline;
 var chat;
 async function activate(context) {
+  const liberideConfig = vscode40.workspace.getConfiguration("liberide");
+  setConfiguredApiOrigin(liberideConfig.get("apiOrigin"));
+  context.subscriptions.push(vscode40.workspace.onDidChangeConfiguration((event) => {
+    if (event.affectsConfiguration("liberide.apiOrigin")) {
+      setConfiguredApiOrigin(vscode40.workspace.getConfiguration("liberide").get("apiOrigin"));
+    }
+  }));
   context.subscriptions.push(initApiFromContext(context));
   initMachineIdentity(context);
   const output = vscode40.window.createOutputChannel("LiberIDE");
@@ -23520,7 +23534,7 @@ function connectionStatus(output) {
     apply(state);
     if (state === "ok" || !notify || warned) return;
     warned = true;
-    const message = state === "unconfigured" ? "LiberIDE backend is not configured. Set LIBERIDE_API_ORIGIN + LIBERIDE_AUTH_TOKEN (or a libervox-integration.json)." : state === "unauthorized" ? "LiberIDE could not authenticate with the backend (token missing or expired)." : "LiberIDE backend is unreachable.";
+    const message = state === "unconfigured" ? "LiberIDE backend is not configured. Set liberide.apiOrigin and pair this machine, or provide launch credentials or a libervox-integration.json." : state === "unauthorized" ? "LiberIDE could not authenticate with the backend (token missing or expired)." : "LiberIDE backend is unreachable.";
     const pick2 = await vscode40.window.showWarningMessage(message, "Details", "Retry");
     if (pick2 === "Details") output.show(true);
     else if (pick2 === "Retry") void refresh(true);
