@@ -995,6 +995,12 @@ function renderGraphStep(graph: GraphProgressView, step: GraphProgressView["step
   </div>`;
 }
 
+/** A stopped graph with failed steps: retrying them is the way forward. */
+function retryableGraph(graph: GraphProgressView): boolean {
+  if (!["blocked", "failed", "cancelled"].includes(graph.status)) return false;
+  return graph.status !== "cancelled" || graph.steps.some((step) => step.status === "failed");
+}
+
 function renderGraphCard(graph: GraphProgressView): string {
   const terminal = isTerminalGraph(graph.status);
   const nodeRuns = runLayout.nodeRuns.get(graph.graphId);
@@ -1028,6 +1034,7 @@ function renderGraphCard(graph: GraphProgressView): string {
       ${reconnecting ? `<span class="graph-reconnecting" title="${escapeAttr(graph.error ?? "Reconnecting to live output")}">Reconnecting\u2026</span>` : ""}
       ${graph.steps.length ? `<span class="graph-count">${done}/${graph.steps.length}</span>` : ""}
       ${terminal ? "" : `<button class="btn-secondary small" type="button" data-graph-cancel${graph.cancelling ? " disabled" : ""}>${graph.cancelling ? "Cancelling\u2026" : "Cancel"}</button>`}
+      ${retryableGraph(graph) ? `<button class="btn-secondary small" type="button" data-graph-retry data-graph-id="${escapeAttr(graph.graphId)}" title="Re-run failed and blocked steps; completed steps are kept">Retry failed steps</button>` : ""}
     </div>
     ${body}
     ${unplaced.map((id) => renderAgentRunCard(id, 1)).join("")}
@@ -1134,6 +1141,12 @@ function bindRunCards(scope: HTMLElement): void {
         nodeId: btn.dataset.nodeId!,
         decision: btn.dataset.stepApproval === "approved" ? "approved" : "rejected",
       });
+    });
+  });
+  scope.querySelectorAll<HTMLButtonElement>("[data-graph-retry]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      btn.disabled = true;
+      send({ type: "retryGraph", sessionId, graphId: btn.dataset.graphId! });
     });
   });
   scope.querySelectorAll<HTMLButtonElement>("[data-step-replay]").forEach((btn) => {

@@ -18920,6 +18920,9 @@ var LiberideChatPanelController = class _LiberideChatPanelController {
         case "replayNode":
           await vscode11.commands.executeCommand("liberide.replayFromNode", { graphId: message.graphId, nodeId: message.nodeId });
           break;
+        case "retryGraph":
+          await vscode11.commands.executeCommand("liberide.retryRun", message.graphId);
+          break;
         case "loadRunToolCalls":
           await this.loadRunToolCalls(message.sessionId, message.runId);
           break;

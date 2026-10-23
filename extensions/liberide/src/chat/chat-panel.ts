@@ -677,6 +677,9 @@ export class LiberideChatPanelController implements vscode.WebviewViewProvider, 
         case "replayNode":
           await vscode.commands.executeCommand("liberide.replayFromNode", { graphId: message.graphId, nodeId: message.nodeId });
           break;
+        case "retryGraph":
+          await vscode.commands.executeCommand("liberide.retryRun", message.graphId);
+          break;
         case "loadRunToolCalls":
           await this.loadRunToolCalls(message.sessionId, message.runId);
           break;

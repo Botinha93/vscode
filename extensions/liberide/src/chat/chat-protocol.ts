@@ -284,6 +284,8 @@ export type ChatWebviewToHost =
   | { type: "resolveNodeApproval"; sessionId: string; messageId: string; graphId: string; nodeId: string; decision: "approved" | "rejected" }
   | { type: "resolveRunApproval"; sessionId: string; approvalId: string; decision: "approved" | "rejected" }
   | { type: "replayNode"; sessionId: string; graphId: string; nodeId: string }
+  /** Re-run a stopped graph's failed/blocked steps (completed ones are kept). */
+  | { type: "retryGraph"; sessionId: string; graphId: string }
   | { type: "loadRunToolCalls"; sessionId: string; runId: string }
   | { type: "autoResolveApprovals"; sessionId: string; ids: string[] }
   | { type: "dismissApprovalModeOffer"; sessionId: string };

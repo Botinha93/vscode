@@ -16471,6 +16471,10 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
     ${detail}
   </div>`;
   }
+  function retryableGraph(graph) {
+    if (!["blocked", "failed", "cancelled"].includes(graph.status)) return false;
+    return graph.status !== "cancelled" || graph.steps.some((step) => step.status === "failed");
+  }
   function renderGraphCard(graph) {
     const terminal = isTerminalGraph(graph.status);
     const nodeRuns = runLayout.nodeRuns.get(graph.graphId);
@@ -16501,6 +16505,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
       ${reconnecting ? `<span class="graph-reconnecting" title="${escapeAttr(graph.error ?? "Reconnecting to live output")}">Reconnecting\u2026</span>` : ""}
       ${graph.steps.length ? `<span class="graph-count">${done}/${graph.steps.length}</span>` : ""}
       ${terminal ? "" : `<button class="btn-secondary small" type="button" data-graph-cancel${graph.cancelling ? " disabled" : ""}>${graph.cancelling ? "Cancelling\u2026" : "Cancel"}</button>`}
+      ${retryableGraph(graph) ? `<button class="btn-secondary small" type="button" data-graph-retry data-graph-id="${escapeAttr(graph.graphId)}" title="Re-run failed and blocked steps; completed steps are kept">Retry failed steps</button>` : ""}
     </div>
     ${body}
     ${unplaced.map((id) => renderAgentRunCard(id, 1)).join("")}
@@ -16599,6 +16604,12 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
           nodeId: btn.dataset.nodeId,
           decision: btn.dataset.stepApproval === "approved" ? "approved" : "rejected"
         });
+      });
+    });
+    scope.querySelectorAll("[data-graph-retry]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        btn.disabled = true;
+        send({ type: "retryGraph", sessionId, graphId: btn.dataset.graphId });
       });
     });
     scope.querySelectorAll("[data-step-replay]").forEach((btn) => {
