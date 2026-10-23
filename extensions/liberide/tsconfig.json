@@ -7,6 +7,7 @@
     "paths": {
       "@nexus/shared": ["../../../packages/shared/src/index.ts"],
       "@nexus/shared/*": ["../../../packages/shared/src/*"],
+      "zod": ["node_modules/zod/index.d.ts"],
       "vscode": ["node_modules/@types/vscode/index.d.ts"]
     },
     "types": ["node"]

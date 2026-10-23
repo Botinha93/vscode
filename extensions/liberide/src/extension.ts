@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { createAuthHandoff, getIntegrationSnapshot, getWebOrigin, initApiFromContext, listConversations, onIntegrationFileChanged, probeBackend, type BackendReachability } from "./api";
+import { createAuthHandoff, getIntegrationSnapshot, getWebOrigin, initApiFromContext, listConversations, onIntegrationFileChanged, probeBackend, setConfiguredApiOrigin, type BackendReachability } from "./api";
 import { continueInBrowserUrl, onConversationOpenRequest, resolveContinueInBrowserUrl, takeStartupConversationRequest } from "./chat/continuation";
 import { LiberidePipelineController } from "./panel/panel";
 import { LiberideChatPanelController } from "./chat/chat-panel";
@@ -27,6 +27,13 @@ let pipeline: LiberidePipelineController;
 let chat: LiberideChatPanelController;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  const liberideConfig = vscode.workspace.getConfiguration("liberide");
+  setConfiguredApiOrigin(liberideConfig.get<string>("apiOrigin"));
+  context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(event => {
+    if (event.affectsConfiguration("liberide.apiOrigin")) {
+      setConfiguredApiOrigin(vscode.workspace.getConfiguration("liberide").get<string>("apiOrigin"));
+    }
+  }));
   context.subscriptions.push(initApiFromContext(context));
   initMachineIdentity(context);
   const output = vscode.window.createOutputChannel("LiberIDE");
@@ -387,7 +394,7 @@ function connectionStatus(output: vscode.OutputChannel): vscode.Disposable {
     warned = true;
     const message =
       state === "unconfigured"
-        ? "LiberIDE backend is not configured. Set LIBERIDE_API_ORIGIN + LIBERIDE_AUTH_TOKEN (or a libervox-integration.json)."
+        ? "LiberIDE backend is not configured. Set liberide.apiOrigin and pair this machine, or provide launch credentials or a libervox-integration.json."
         : state === "unauthorized"
           ? "LiberIDE could not authenticate with the backend (token missing or expired)."
           : "LiberIDE backend is unreachable.";

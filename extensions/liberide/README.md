@@ -54,6 +54,7 @@ This extension is preinstalled in the bundled VS Code fork that ships with the L
 
 | Setting | Default | Description |
 |---|---|---|
+| `liberide.apiOrigin` | `""` | Non-secret HTTP(S) server URL used when launch variables and pairing integration data do not specify an origin. |
 | `liberide.modelSelection` | `manual` | Local override for model selection mode. `auto` lets the backend upgrade models based on the request. |
 | `liberide.useRag` | `false` | Default for RAG on new chats. |
 | `liberide.systemPrompt` | `""` | Optional system prompt appended to every LiberIDE chat request. |
@@ -79,7 +80,7 @@ For setup, OAuth configuration, schema, capability inference, and end-to-end flo
 
 ## How it connects to the API
 
-The launcher injects `LIBERIDE_API_ORIGIN` and `LIBERIDE_AUTH_TOKEN` environment variables when starting the bundled VS Code Electron window, and also writes `libervox-integration.json` for fallback integration state. The extension re-reads that file when it changes, so desktop login/token refreshes do not require restarting VS Code.
+The launcher may inject `LIBERIDE_API_ORIGIN` and `LIBERIDE_AUTH_TOKEN` environment variables and write `libervox-integration.json` for pairing and refreshed credentials. `liberide.apiOrigin` is a non-secret fallback for Hub-managed VS Code installations. See [Hub connection and packaging](./HUB-CONNECTION.md) for configuration format, precedence, and build commands.
 
 ## Building
 
@@ -88,6 +89,8 @@ cd vscode/extensions/liberide
 npm install
 npm run build
 ```
+
+The extension's own scripts define `npm run build` as `node esbuild.mjs`; it bundles the extension host and webview entry points.
 
 The build emits:
 
